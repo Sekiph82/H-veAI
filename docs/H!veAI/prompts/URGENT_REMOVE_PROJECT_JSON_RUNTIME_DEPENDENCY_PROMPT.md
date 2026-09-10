@@ -46,7 +46,6 @@ The visible consequences include:
 - Command Center portfolio health incorrect
 - Active tasks and Completed tasks unavailable
 - legacy `GITHUB_REMOTE_V3` wording still visible
-- `AI-Commerce-HQ` still appears as a portfolio project even though it was replaced by `H-veAI`
 
 The application is therefore still executing a legacy runtime path despite the migration work and passing automated tests.
 
@@ -82,20 +81,21 @@ Latest GitHub commit metadata may be shown as supporting information but must no
 
 ## Portfolio requirement
 
-The active portfolio must contain exactly these 8 repositories:
+The active portfolio must contain exactly these 9 repositories:
 
 1. `Sekiph82/H-veAI` — `main`
-2. `Sekiph82/Bulk-Edit` — `main`
-3. `Sekiph82/fmcg-erp-system` — `main`
-4. `Sekiph82/FormuLab` — `feature/laboratory-stability`
-5. `Sekiph82/PackLab` — `main`
-6. `Sekiph82/PackLab-3D` — `main`
-7. `Sekiph82/Scrubbots` — `main`
-8. `Sekiph82/ScrubBots-Level-Factory` — `main`
+2. `Sekiph82/AI-Commerce-HQ` — keep its currently configured tracked branch; do not remove it from the portfolio
+3. `Sekiph82/Bulk-Edit` — `main`
+4. `Sekiph82/fmcg-erp-system` — `main`
+5. `Sekiph82/FormuLab` — `feature/laboratory-stability`
+6. `Sekiph82/PackLab` — `main`
+7. `Sekiph82/PackLab-3D` — `main`
+8. `Sekiph82/Scrubbots` — `main`
+9. `Sekiph82/ScrubBots-Level-Factory` — `main`
 
-`Sekiph82/AI-Commerce-HQ` must not remain an active tracked project in the native application.
+`Sekiph82/AI-Commerce-HQ` is still an active tracked project. The standalone `H-veAI` repository is an additional project, not a replacement for AI-Commerce-HQ in the H!veAI portfolio.
 
-Existing persisted/local application database state must not cause a ninth stale `AI-Commerce-HQ` project or preserve obsolete source-policy behavior after the upgrade.
+Existing persisted/local application database state must converge to these exact 9 logical GitHub projects without duplicate local/remote identities or obsolete source-policy behavior after the upgrade.
 
 ## User-facing terminology
 
@@ -105,9 +105,9 @@ User-facing project tracking should simply communicate that the source is GitHub
 
 ## Command Center expected behavior
 
-With all 8 projects successfully read from GitHub/root TASKS.md:
+With all 9 projects successfully read from GitHub/root TASKS.md:
 
-- Projects = 8
+- Projects = 9
 - Active tasks must show a real calculated value when task data exists
 - Completed tasks must show a real calculated value when task data exists
 - Running must reflect actual current/in-progress task/workflow state according to TASKS.md semantics
@@ -117,7 +117,7 @@ With all 8 projects successfully read from GitHub/root TASKS.md:
 
 ## Project Cockpit expected behavior
 
-For all 8 projects:
+For all 9 projects:
 
 - opening the cockpit must render current GitHub/root TASKS.md state
 - current milestone/task/progress must not become Unknown merely because `.hiveai` files do not exist
@@ -154,9 +154,9 @@ Historical test fixtures/documentation may retain old strings only when clearly 
 
 This repair must work for the owner's existing installed/dev application state, not only for a brand-new empty database.
 
-On launch of the new build, previously persisted stale project/source/snapshot records from the old architecture must not keep the application stuck on legacy `PROJECT.json` errors or a 9-project portfolio.
+On launch of the new build, previously persisted stale project/source/snapshot records from the old architecture must not keep the application stuck on legacy `PROJECT.json` errors, duplicate projects, or incorrect project identities.
 
-The repaired app must converge existing user state to the exact 8-project GitHub + root TASKS.md portfolio automatically and safely.
+The repaired app must converge existing user state to the exact 9-project GitHub + root TASKS.md portfolio automatically and safely.
 
 Do not require the owner to manually delete databases, clear application data, edit SQLite, or recreate every project.
 
@@ -181,11 +181,11 @@ Build and publish the actual native executable that the owner launches, then val
 
 Verify at minimum:
 
-1. exactly 8 active projects appear;
-2. `AI-Commerce-HQ` is absent from the active portfolio;
-3. `H-veAI` is present;
+1. exactly 9 active projects appear;
+2. both `AI-Commerce-HQ` and `H-veAI` are present as separate logical projects;
+3. no duplicate project identities appear;
 4. no screen contains `.hiveai/PROJECT.json` errors;
-5. all 8 root `TASKS.md` files are read successfully when GitHub is reachable;
+5. all 9 root `TASKS.md` files are read successfully when GitHub is reachable;
 6. Project Cockpit shows real current task/milestone/progress values for repositories whose TASKS.md provides them;
 7. Command Center task totals are populated from TASKS.md data;
 8. no project becomes ERROR simply because legacy `.hiveai` files are absent;
@@ -208,7 +208,7 @@ Include:
 - persisted-state/upgrade repair performed;
 - files changed;
 - tests run;
-- native validation results for all 8 repositories;
+- native validation results for all 9 repositories;
 - final portfolio count;
 - implementation commit SHA;
 - stable EXE SHA-256;
