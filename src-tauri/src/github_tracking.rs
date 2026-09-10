@@ -801,7 +801,6 @@ fn parse_root_tasks(
     let mut total = 0_u64;
     let mut completed = 0_u64;
     let mut last_completed = None;
-    let mut found_current = current_task_id.is_none();
     for line in raw.tasks.lines() {
         if let Some((status, id, title)) = task_row(line) {
             total += 1;
@@ -809,13 +808,7 @@ fn parse_root_tasks(
                 completed += 1;
                 last_completed = Some((id.clone(), title));
             }
-            if current_task_id.as_deref() == Some(id.as_str()) {
-                found_current = true;
-            }
         }
-    }
-    if !found_current {
-        return Err("TASKS.md current task is not present in its task rows".into());
     }
     let mut blockers = raw
         .tasks
