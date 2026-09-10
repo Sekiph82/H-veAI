@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Read;
 use std::process::Stdio;
 #[cfg(not(test))]
 use std::sync::mpsc;
@@ -613,26 +614,57 @@ fn run_http(url: &str) -> Result<String, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("GitHub HTTP observation failed to start: {e}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "GitHub HTTP observation stdout was not captured".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "GitHub HTTP observation stderr was not captured".to_string())?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.read_to_end(&mut bytes);
+        (result, bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stderr.read_to_end(&mut bytes);
+        (result, bytes)
+    });
     let deadline = std::time::Instant::now() + Duration::from_secs(35);
+    let status;
     loop {
         match child
             .try_wait()
             .map_err(|e| format!("GitHub HTTP observation failed: {e}"))?
         {
-            Some(_) => break,
+            Some(value) => {
+                status = value;
+                break;
+            }
             None if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err("GitHub HTTP observation timed out after 35 seconds".into());
             }
             None => thread::sleep(Duration::from_millis(50)),
         }
     }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    let (stdout_result, stdout_bytes) = stdout_reader
+        .join()
+        .map_err(|_| "GitHub HTTP stdout reader failed".to_string())?;
+    stdout_result.map_err(|e| format!("GitHub HTTP stdout read failed: {e}"))?;
+    let (stderr_result, stderr_bytes) = stderr_reader
+        .join()
+        .map_err(|_| "GitHub HTTP stderr reader failed".to_string())?;
+    stderr_result.map_err(|e| format!("GitHub HTTP stderr read failed: {e}"))?;
+    if !status.success() {
+        return Err(String::from_utf8_lossy(&stderr_bytes).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(String::from_utf8_lossy(&stdout_bytes).to_string())
 }
 
 fn atom_value(entry: &str, tag: &str) -> Option<String> {
@@ -718,10 +750,17 @@ fn task_row(line: &str) -> Option<(char, String, String)> {
     if rest.is_empty() {
         return None;
     }
-    let (id, title) = rest
-        .split_once('—')
-        .or_else(|| rest.split_once(" - "))
-        .unwrap_or((rest, rest));
+    let (id, title) = if let Some(value) = rest.strip_prefix("**") {
+        value
+            .split_once("**")
+            .map(|(id, title)| (id, title.trim()))
+            .unwrap_or((rest, rest))
+    } else {
+        rest.split_once('—')
+            .or_else(|| rest.split_once(" - "))
+            .or_else(|| rest.split_once(char::is_whitespace))
+            .unwrap_or((rest, rest))
+    };
     let id = id.trim().trim_matches('*').trim_matches('`').to_string();
     let title = title.trim().trim_matches('*').to_string();
     Some((status, id, title))
