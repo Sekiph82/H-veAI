@@ -1,5 +1,9 @@
 # H!veAI GitHub-First Project Tracking Contract v3
 
+> Historical contract retained for audit provenance only. It is superseded by
+> the standalone root `TASKS.md` contract and is not read by production
+> project tracking.
+
 This contract supersedes the local-first v2 tracking design.
 
 ## Product goal

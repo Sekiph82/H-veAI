@@ -1,5 +1,8 @@
 # H!veAI Standalone Migration and GitHub-Only Tracking Simplification
 
+> Historical migration brief. The standalone migration is now in place; use
+> the root `TASKS.md`, `README.md`, and `ARCHITECTURE.md` for current truth.
+
 ## Owner requirement
 
 H!veAI is a GitHub project tracking application.
@@ -19,7 +22,9 @@ Target repository:
 
 `Sekiph82/H-veAI`
 
-The current H!veAI application lives under the `H!veAI/` subtree of `Sekiph82/AI-Commerce-HQ` on branch `H!veAI`.
+The application was originally sourced from the `H!veAI/` subtree of
+`Sekiph82/AI-Commerce-HQ` on branch `H!veAI`; it now lives at the root of
+`Sekiph82/H-veAI` on `main`.
 
 The application must be promoted to the root of this standalone repository while preserving working source code, assets, tests, build configuration, native packaging, and useful Git history where practical.
 

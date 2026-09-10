@@ -1,7 +1,7 @@
 # H!veAI Repository Constitution
 
 ## Purpose
-H!veAI is a local-first AI Development Command Center. It must always show:
+H!veAI is a GitHub-first AI Development Command Center. It must always show:
 - every managed project and its health,
 - current task,
 - last completed task/action,
@@ -11,7 +11,7 @@ H!veAI is a local-first AI Development Command Center. It must always show:
 - an actionable control whenever the next step can be executed.
 
 ## Non-negotiable principles
-1. **Local-first:** local repository state is authoritative for uncommitted changes and local sessions; GitHub is authoritative for remote PRs, issues, Actions, releases and remote refs.
+1. **GitHub-first:** each tracked repository's branch metadata and root `TASKS.md` are authoritative for project-management state; local folders and SQLite records are execution telemetry only.
 2. **Evidence-first:** AI self-report never proves task completion. Completion needs repository/test/audit evidence.
 3. **Human override wins:** user corrections override inferred state and are recorded as events.
 4. **Separation of duties:** builder and auditor are separate roles. Auditor inspects actual diff, task requirements, tests and architecture rules.
@@ -52,10 +52,11 @@ id, project_id, task_id, timestamp, actor_type, actor_id, event_type,
 from_state, to_state, summary, evidence_json, session_id, commit_sha, source.
 
 ## Repository-native sources
-H!veAI may discover TASKS.md, tasks.md, PLANS.md, PROGRESS.md, ROADMAP.md,
-CLAUDE.md, AGENTS.md, docs/handoffs and GitHub Issues/Milestones.
-Projects may optionally add `.hiveai/project.yaml`, `.hiveai/tasks.yaml`,
-`.hiveai/prompts/`, `.hiveai/audits/`, `.hiveai/handoffs/`.
+For the eight tracked GitHub projects, H!veAI reads repository metadata and the
+root `TASKS.md` only for project-management state. Provider instructions and
+other repository documents may support execution but cannot become task truth.
+Legacy `.hiveai` control-plane files are historical/secondary telemetry only and
+must never override the remote root tracker.
 
 ## Definition of done
 A milestone is complete only when implementation exists, relevant tests pass,
@@ -70,10 +71,10 @@ evidence, run baseline tests before risky work, stay inside current scope,
 add tests, verify, update docs/tasks, review diff, never force-push and never
 silently modify another managed repository.
 
-## AI-Commerce-HQ migration rule
-The old parent AI-Commerce-HQ application is source material only. H!veAI is a
-product rebuild under the child `H!veAI` application root, not a cosmetic rename
-of parent runtime code. Upgrade to Tauri 2 before core orchestration work.
+## Standalone repository rule
+H!veAI is developed and released from the standalone `Sekiph82/H-veAI` repository
+on `main`. The historical `AI-Commerce-HQ` repository is migration/source
+history only and must not be an active runtime, build, or development root.
 Retain reusable infrastructure only after audit. Do not destroy old local data
 without an explicit backup and migration policy.
 

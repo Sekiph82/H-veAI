@@ -172,7 +172,7 @@ pub fn discover(
     project_id: &str,
 ) -> Result<Vec<DiscoveredProjectSource>, String> {
     let project = discovery_project(database, project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         let sources = github_contract_sources(database, &project)?;
         reconcile(database, project_id, &sources)?;
         return Ok(sources);
@@ -199,7 +199,7 @@ pub fn list(
     project_id: &str,
 ) -> Result<Vec<DiscoveredProjectSource>, String> {
     let project = discovery_project(database, project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         return github_contract_sources(database, &project);
     }
     if !Path::new(&project.normalized_path).exists() {
@@ -233,7 +233,7 @@ pub fn reconcile_github_remote_sources(
     project_id: &str,
 ) -> Result<(), String> {
     let project = discovery_project(database, project_id)?;
-    if !github_tracking::is_github_v3_project(&project) {
+    if !github_tracking::is_github_tasks_project(&project) {
         return Ok(());
     }
     let sources = github_contract_sources(database, &project)?;
@@ -245,7 +245,7 @@ pub fn custom_paths_list(
     project_id: &str,
 ) -> Result<Vec<CustomSourcePath>, String> {
     let project = discovery_project(database, project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         return Ok(Vec::new());
     }
     let root = physical_root(Path::new(&project.normalized_path))?;
@@ -267,7 +267,7 @@ pub fn custom_path_add(
     request: CustomPathRequest,
 ) -> Result<Vec<CustomSourcePath>, String> {
     let project = discovery_project(database, &request.project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         return Err("custom local source paths are unavailable for GitHub-tracked projects; the remote contract is authoritative".into());
     }
     let root = physical_root(Path::new(&project.normalized_path))?;
@@ -299,7 +299,7 @@ pub fn custom_path_remove(
     path_or_id: &str,
 ) -> Result<Vec<CustomSourcePath>, String> {
     let project = discovery_project(database, project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         return Err("custom local source paths are unavailable for GitHub-tracked projects; the remote contract is authoritative".into());
     }
     let mut paths = load_custom_paths(database, project_id)?;
@@ -320,7 +320,7 @@ pub fn custom_path_update(
     request: CustomPathUpdateRequest,
 ) -> Result<Vec<CustomSourcePath>, String> {
     let project = discovery_project(database, &request.project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         return Err("custom local source paths are unavailable for GitHub-tracked projects; the remote contract is authoritative".into());
     }
     let root = physical_root(Path::new(&project.normalized_path))?;

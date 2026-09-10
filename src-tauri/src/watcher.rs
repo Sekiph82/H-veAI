@@ -255,7 +255,7 @@ impl WatcherManager {
         let remote_only = self.app_handle.is_some();
         let desired = projects
             .iter()
-            .filter(|project| !remote_only || github_tracking::is_github_v3_project(project))
+            .filter(|project| !remote_only || github_tracking::is_github_tasks_project(project))
             .map(|project| project.id.clone())
             .collect::<HashSet<_>>();
         let existing = self
@@ -267,10 +267,10 @@ impl WatcherManager {
             .cloned()
             .collect::<Vec<_>>();
         for project in projects {
-            if remote_only && !github_tracking::is_github_v3_project(&project) {
+            if remote_only && !github_tracking::is_github_tasks_project(&project) {
                 continue;
             }
-            if github_tracking::is_github_v3_project(&project) {
+            if github_tracking::is_github_tasks_project(&project) {
                 self.configure_project(project)?;
                 continue;
             }
@@ -319,7 +319,7 @@ impl WatcherManager {
     }
 
     fn configure_project(&self, project: ProjectRecord) -> Result<(), String> {
-        if github_tracking::is_github_v3_project(&project) {
+        if github_tracking::is_github_tasks_project(&project) {
             return configure_remote_project(&self.inner, &self.sender, project);
         }
         let available = project.status == "ACTIVE" && Path::new(&project.normalized_path).is_dir();
@@ -703,7 +703,7 @@ fn reconcile_active_projects(
         return;
     };
     for project in projects {
-        if remote_only && !github_tracking::is_github_v3_project(&project) {
+        if remote_only && !github_tracking::is_github_tasks_project(&project) {
             continue;
         }
         let project = refresh_repository_metadata(database, &project.id).unwrap_or(project);

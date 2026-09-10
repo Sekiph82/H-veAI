@@ -1,5 +1,9 @@
 # H!veAI AI Development Protocol
 
+This protocol is maintained in standalone `Sekiph82/H-veAI` on `main`.
+Historical M00-M20 records may mention the former parent topology, but current
+work and current project truth use this repository root and root `TASKS.md`.
+
 This directory is the canonical, version-controlled operational record for H!veAI development.
 
 ## Canonical product name
@@ -15,22 +19,20 @@ Technical identifiers may use lowercase ASCII-safe forms such as `hiveai` only w
 ## Canonical repository
 
 GitHub repository:
-`Sekiph82/AI-Commerce-HQ`
+`Sekiph82/H-veAI`
 
 Canonical development branch:
-`H!veAI`
+`main`
 
 Canonical local repository root:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\AI-Commerce-HQ`
+`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI`
 
-Application child root:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\AI-Commerce-HQ\H!veAI`
-
-The child root is **not** the Git repository root and must never contain its own `.git` repository.
+The repository root is the H!veAI application root. The historical
+`AI-Commerce-HQ` checkout is migration/source history only.
 
 ## Canonical tracking files
 
-### `H!veAI/TASKS.md`
+### `TASKS.md`
 
 The canonical detailed task/progress ledger.
 
@@ -89,11 +91,11 @@ Chronological builder logs. Builder logs are claims/evidence records, not indepe
 - Strict completed milestone count remains 16/20 = 80%; M16M physical adoption, true read-purity, and portfolio provenance remediation is implementation-complete pending independent whole-M16 strict audit and user native/visual acceptance while M16 remains OPEN.
 - M11 original implementation: historical strict-audit FAIL with 8 MAJOR findings.
 - M11A REV4-REV7 remediation history remains immutable and accepted; M11A REV7 = PASS/CLOSED and final Projects visual cleanup = PASS/CLOSED.
-- M11 = PASS/CLOSED. M12, M12A R26, and M12B native cockpit route remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native/visual evidence. M16 implementation is complete pending independent strict audit and user native/visual acceptance. M11/M12/M13/M14 runtime implementation incorporates the `.hiveai/PROJECT_DASHBOARD.md` authority manifest system.
-- M21 remains planned and was not started.
+- M11 = PASS/CLOSED. M12, M12A R26, and M12B native cockpit route remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native/visual evidence. M16 implementation is complete pending independent strict audit and user native/visual acceptance. Earlier `.hiveai/PROJECT_DASHBOARD.md` authority work is retained as historical/secondary runtime telemetry; it is not the current GitHub project tracker.
+- M21 standalone migration is implementation-complete; the remediation prompt is the active bounded closure work.
 - M16L UCP-R36 through UCP-R38 remains immutable accepted history. M16M UCP-R39 through UCP-R42 is implementation-complete after physical adoption convergence, real adopted-project read purity, and separated branch/blob provenance; M16 remains OPEN pending independent strict re-audit and user native/visual acceptance.
 
-For exact current status, always defer to `H!veAI/TASKS.md`.
+For exact current status, always defer to root `TASKS.md`.
 
 ## Mandatory workflow
 

@@ -1,8 +1,14 @@
 # M21 - Standalone Repository Migration
 
+> Historical migration plan. The standalone repository is now the active
+> development root; do not use the former parent/subtree topology described
+> below for new work.
+
 Purpose: after H!veAI v1.0 product development, hardening, release acceptance, and all prior roadmap work are complete, separate H!veAI from the `AI-Commerce-HQ` parent repository and make H!veAI an independent repository/product root.
 
-Timing rule: this milestone is intentionally last. Do not begin it before M20 is PASS/CLOSED and the H!veAI v1.0 release/hardening gates are satisfied. Until then, H!veAI remains developed as the `H!veAI` branch/subtree of `Sekiph82/AI-Commerce-HQ` so reusable AI-Commerce-HQ modules can still be evaluated and reused safely.
+Timing rule: this milestone was intentionally last. The plan's pre-migration
+topology is historical; H!veAI is now developed from `Sekiph82/H-veAI` on
+`main`.
 
 ## Packages
 
@@ -32,4 +38,4 @@ M21 is complete only when H!veAI is no longer dependent on being a subdirectory 
 
 While H!veAI remains under the AI-Commerce-HQ parent repository, AI-Commerce-HQ source discovery can surface nested H!veAI planning files such as `H!veAI/TASKS.md`. This is a known consequence of the current development topology and is not, by itself, a reason to split the repository early. The structural separation is intentionally deferred to M21 after M20.
 
-Status: PLANNED/BLOCKED behind M20.
+Status: COMPLETED; closure evidence is tracked by the standalone remediation log.

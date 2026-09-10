@@ -6,7 +6,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 - Current Milestone: M21
 - Current Sprint: M21-MIGRATION
-- Current Task: M21-01 — Standalone root migration and GitHub TASKS-only architecture
+- Current Task: M21-R01 — Standalone remediation closure
 - Current Task Status: PASS/CLOSED
 - Next Task/Action: Owner native/visual acceptance and independent retirement decision; preserve the legacy parent until explicitly retired.
 - Required Actor: CODEX
@@ -15,6 +15,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 ## Tasks
 - [x] M21-01 — Standalone root migration and GitHub TASKS-only architecture
+- [x] M21-R01 — Standalone remediation closure: remove obsolete production tracking assumptions and verify standalone release
 
 # H!veAI MASTER TASKS
 
@@ -52,7 +53,7 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 - Original M11 implementation is a historical strict-audit FAIL with 8 MAJOR findings.
 - M11A REV4, REV5, REV6, and REV7 remediation history remains immutable; all findings are closed by the accepted strict audits. M11A REV7 = PASS/CLOSED and the final Projects visual cleanup = PASS/CLOSED.
 - M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42 and is implementation-complete pending independent whole-M16 strict re-audit and user native/visual acceptance; M16 remains OPEN; M17-M20 remain planned/blocked and M21 remains planned/not started.
-- M21 remains planned and was not started.
+- M21 standalone migration is PASS/CLOSED; M21-R01 remediation is PASS/CLOSED pending owner native/visual acceptance and the independent retirement decision for the historical parent.
 
 ---
 

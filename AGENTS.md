@@ -8,21 +8,19 @@ Use `hiveai` only for technical identifiers where punctuation is unsafe.
 
 ## Roots
 
-Run Git commands from:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\AI-Commerce-HQ`
+Run Git commands from the standalone repository root:
+`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI`
 
-Put new H!veAI application code, product docs, prompts, audits, Codex logs,
-tests, desktop shell files, and application configuration under:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\AI-Commerce-HQ\H!veAI`
-
-Do not treat `H!veAI` as a separate Git repository. It must not contain a `.git`
-directory.
+Put H!veAI application code, product docs, prompts, audits, Codex logs, tests,
+desktop shell files, and application configuration in this repository root.
+H!veAI is the standalone `Sekiph82/H-veAI` repository on `main`; do not write
+new work into the historical `AI-Commerce-HQ` checkout.
 
 ## Canonical UI Assets
 
-Canonical UI reference assets are located at:
+Canonical UI reference assets are located in this repository at:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI`
+`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\src\assets`
 
 Use the assets in this folder as authoritative visual references:
 
@@ -60,7 +58,7 @@ During active development, the user must be able to launch the latest validated 
 
 Canonical stable development executable:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\AI-Commerce-HQ\H!veAI\dev-bin\H!veAI.exe`
+`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\dev-bin\H!veAI.exe`
 
 Canonical Desktop shortcut:
 
@@ -68,13 +66,13 @@ Canonical Desktop shortcut:
 
 Canonical shortcut icon source image:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI\H!veAI small logo.png`
+`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\src\assets\hiveai-small-logo.png`
 
 Use this exact image as the authoritative visual source for the Desktop shortcut icon. Do not substitute, redesign, recolor, crop, or replace it unless the user explicitly changes this rule.
 
 Because Windows `.lnk` icon locations should use a Windows-compatible icon resource rather than depend directly on PNG rendering, create or refresh a deterministic `.ico` derivative from this exact PNG when needed. Prefer the stable local derivative:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\AI-Commerce-HQ\H!veAI\dev-bin\H!veAI.ico`
+`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\dev-bin\H!veAI.ico`
 
 The `.ico` derivative must preserve the source logo and should include standard Windows icon sizes where tooling permits, including 16, 32, 48, 64, 128, and 256 pixels. The Desktop `H!veAI.lnk` IconLocation must point to this stable `.ico` derivative, or to an equivalent Windows icon resource generated from the same canonical PNG if technically required.
 
@@ -116,20 +114,20 @@ Preserve this Chrome preference across future milestones unless the user explici
 Before reading milestone prompt files:
 
 ```powershell
-git fetch origin H!veAI
+git fetch origin main
 ```
 
 Then compare:
 
 ```powershell
-git rev-list --left-right --count HEAD...origin/H!veAI
+git rev-list --left-right --count HEAD...origin/main
 ```
 
-If local HEAD is behind `origin/H!veAI` and there are no conflicting local
+If local HEAD is behind `origin/main` and there are no conflicting local
 tracked changes:
 
 ```powershell
-git merge --ff-only origin/H!veAI
+git merge --ff-only origin/main
 ```
 
 Then read the authoritative audit and milestone prompt from the updated local
@@ -147,8 +145,8 @@ stop and report the exact divergence or conflicting tracked changes.
 At the start of each milestone:
 
 1. Run the mandatory fetch-before-prompt preflight above.
-2. Read `H!veAI/AGENTS.md`, `H!veAI/CONSTITUTION.md`, `H!veAI/ARCHITECTURE.md`,
-   and `H!veAI/TASKS.md` from the synchronized checkout.
+2. Read `AGENTS.md`, `CONSTITUTION.md`, `ARCHITECTURE.md`, and `TASKS.md` from
+   the synchronized standalone checkout.
 3. Inspect branch, HEAD, remotes, status, tags, and worktrees from the Git root.
 4. Read the authoritative prior milestone audit and current milestone prompt.
 5. Create or continue the milestone Codex log under

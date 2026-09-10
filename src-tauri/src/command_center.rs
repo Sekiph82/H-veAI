@@ -196,7 +196,7 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
     let mut activity = Vec::new();
     let mut has_legacy_projects = false;
     for project in projects {
-        if github_tracking::is_github_v3_project(&project) {
+        if github_tracking::is_github_tasks_project(&project) {
             match github_tracking::refresh_project(database, &project) {
                 Ok(remote) => {
                     let summary = remote_project_summary(&project, &remote);
@@ -2068,7 +2068,7 @@ mod tests {
 
     #[test]
     fn m11_portfolio_counts_use_authoritative_tasks_only() {
-        assert_eq!(same_path("H!veAI\\TASKS.md", "h!veai/tasks.md"), true);
+        assert_eq!(same_path("TASKS.md", "tasks.md"), true);
     }
 
     #[test]

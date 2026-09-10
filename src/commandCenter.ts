@@ -4,7 +4,7 @@ import type { ProjectRecord } from "./projectRegistry";
 import type { ControlPlaneSummary } from "./controlPlane";
 
 export type ManifestStatus = "VALID" | "PARTIAL" | "ABSENT" | "MALFORMED" | "STALE" | "UNAVAILABLE";
-export type TaskAuthority = "CANONICAL" | "GITHUB_TASKS_ONLY" | "GITHUB_REMOTE_V3" | "NOT_CANONICALIZED" | "FALLBACK_M08_M09";
+export type TaskAuthority = "CANONICAL" | "GITHUB_TASKS_ONLY" | "NOT_CANONICALIZED" | "FALLBACK_M08_M09";
 
 export type CommandCenterTask = {
   taskId: string;

@@ -3,7 +3,6 @@ use crate::projects::{list_projects, ProjectListQuery, ProjectRecord};
 use crate::time::utc_timestamp;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::collections::HashMap;
@@ -22,9 +21,8 @@ use std::time::Duration;
 #[cfg(not(test))]
 use tauri::Emitter;
 
-const RESOURCE_KIND: &str = "GITHUB_TRACKING_V3";
-const TASKS_START: &str = "<!-- HIVEAI_TRACKER_V3_START";
-const TASKS_END: &str = "HIVEAI_TRACKER_V3_END -->";
+pub const GITHUB_TASKS_ONLY_POLICY: &str = "GITHUB_TASKS_ONLY";
+const REMOTE_TASKS_RESOURCE_KIND: &str = "GITHUB_TASKS_REMOTE";
 pub const SELECTED_PROJECT_REFRESH_SECONDS: u64 = 10;
 pub const PORTFOLIO_REFRESH_SECONDS: u64 = 30;
 
@@ -106,67 +104,6 @@ pub struct RemoteTrackingEvent {
     pub commit_sha: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectV3 {
-    schema: String,
-    project_key: String,
-    display_name: String,
-    repository: RepositoryV3,
-    tracked_branch: String,
-    tasks_path: String,
-    rules_path: String,
-    events_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct RepositoryV3 {
-    owner: String,
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TasksV3 {
-    schema: String,
-    project_key: String,
-    current_milestone: Option<String>,
-    current_sprint: Option<String>,
-    current_task_id: Option<String>,
-    current_task_title: Option<String>,
-    workflow_state: Option<String>,
-    required_actor: Option<String>,
-    next_action: Option<String>,
-    blockers: Vec<String>,
-    progress: Option<ProgressV3>,
-    last_completed_task_id: Option<String>,
-    last_completed_task_title: Option<String>,
-    updated_at: Option<String>,
-    updated_by: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProgressV3 {
-    scope_type: Option<String>,
-    scope_id: Option<String>,
-    completed: Option<u64>,
-    total: Option<u64>,
-    percent: Option<f64>,
-}
-
-struct RemoteRaw {
-    head: String,
-    project: String,
-    tasks: String,
-    rules: String,
-    events: String,
-    project_blob_sha: String,
-    tasks_blob_sha: String,
-    rules_blob_sha: String,
-    events_blob_sha: String,
-}
-
 pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
     const TARGETS: [(&str, &str, &str, &str); 8] = [
         ("h-veai", "H-veAI", "Sekiph82/H-veAI", "main"),
@@ -212,8 +149,8 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
             .or_else(|| {
                 transaction
                     .query_row(
-                        "SELECT p.id FROM projects p JOIN repositories r ON r.project_id=p.id WHERE lower(r.github_owner)=lower(?1) AND lower(r.github_repo)=lower(?2) AND p.task_source_policy='GITHUB_REMOTE_V3' ORDER BY p.id LIMIT 1",
-                        params![owner, repo],
+                        "SELECT p.id FROM projects p JOIN repositories r ON r.project_id=p.id WHERE lower(r.github_owner)=lower(?1) AND lower(r.github_repo)=lower(?2) AND p.task_source_policy=?3 ORDER BY p.id LIMIT 1",
+                        params![owner, repo, GITHUB_TASKS_ONLY_POLICY],
                         |row| row.get(0),
                     )
                     .optional()
@@ -240,8 +177,8 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
             .map_err(db_error)?;
         if existing.is_none() {
             transaction.execute(
-                "INSERT INTO projects (id,name,local_path,default_branch,status,priority,metadata_json,created_at,updated_at,original_path,normalized_path,registered_at,last_validated_at,task_source_policy) VALUES (?1,?2,NULL,?3,'ACTIVE',0,?4,?5,?5,NULL,NULL,?5,NULL,'GITHUB_REMOTE_V3')",
-                params![project_id, name, branch, r#"{"tracking":"github-first-v3"}"#, now],
+                "INSERT INTO projects (id,name,local_path,default_branch,status,priority,metadata_json,created_at,updated_at,original_path,normalized_path,registered_at,last_validated_at,task_source_policy) VALUES (?1,?2,NULL,?3,'ACTIVE',0,?4,?5,?5,NULL,NULL,?5,NULL,?6)",
+                params![project_id, name, branch, r#"{"tracking":"github-tasks-only"}"#, now, GITHUB_TASKS_ONLY_POLICY],
             ).map_err(db_error)?;
             transaction.execute(
                 "INSERT INTO repositories (id,project_id,remote_url,github_owner,github_repo,default_branch,created_at,updated_at,is_git_repository) VALUES (?1,?2,?3,?4,?5,?6,?7,?7,1)",
@@ -250,8 +187,8 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
         } else {
             transaction
                 .execute(
-                    "UPDATE projects SET name=?2, default_branch=?3, task_source_policy='GITHUB_REMOTE_V3', status=CASE WHEN status='ARCHIVED' THEN 'ACTIVE' ELSE status END, archived_at=NULL, updated_at=?4 WHERE id=?1",
-                    params![project_id, name, branch, now],
+                    "UPDATE projects SET name=?2, default_branch=?3, task_source_policy=?4, status=CASE WHEN status='ARCHIVED' THEN 'ACTIVE' ELSE status END, archived_at=NULL, updated_at=?5 WHERE id=?1",
+                    params![project_id, name, branch, GITHUB_TASKS_ONLY_POLICY, now],
                 )
                 .map_err(db_error)?;
             let repository_updated = transaction
@@ -423,8 +360,8 @@ pub fn refresh_interval_seconds(selected: bool) -> u64 {
     }
 }
 
-pub fn is_github_v3_project(project: &ProjectRecord) -> bool {
-    project.task_source_policy.as_deref() == Some("GITHUB_REMOTE_V3")
+pub fn is_github_tasks_project(project: &ProjectRecord) -> bool {
+    project.task_source_policy.as_deref() == Some(GITHUB_TASKS_ONLY_POLICY)
         && project
             .repository
             .as_ref()
@@ -857,186 +794,6 @@ fn parse_root_tasks(
     })
 }
 
-fn parse_remote(
-    raw: &RemoteRaw,
-    repository: &str,
-    branch: &str,
-    fetched_at: String,
-) -> Result<RemoteTrackingSnapshot, String> {
-    let project: ProjectV3 = serde_json::from_str(&raw.project)
-        .map_err(|e| format!("PROJECT.json is not valid v3 JSON: {e}"))?;
-    if project.schema != "hiveai-project/v3"
-        || project.tracked_branch != branch
-        || format!("{}/{}", project.repository.owner, project.repository.name) != repository
-    {
-        return Err("PROJECT.json identity does not match the tracked repository/branch".into());
-    }
-    if project.tasks_path != ".hiveai/TASKS.md"
-        || project.rules_path != ".hiveai/RULES.md"
-        || project.events_path != ".hiveai/EVENTS.jsonl"
-    {
-        return Err("PROJECT.json does not declare the exact four v3 canonical paths".into());
-    }
-    let tasks_text = raw.tasks.trim();
-    let start = tasks_text
-        .find(TASKS_START)
-        .ok_or_else(|| "TASKS.md v3 start marker is missing".to_string())?
-        + TASKS_START.len();
-    let end = tasks_text
-        .find(TASKS_END)
-        .ok_or_else(|| "TASKS.md v3 end marker is missing".to_string())?;
-    if end <= start {
-        return Err("TASKS.md v3 marker range is invalid".into());
-    }
-    let tasks_value: Value = serde_json::from_str(tasks_text[start..end].trim())
-        .map_err(|e| format!("TASKS.md v3 JSON is malformed: {e}"))?;
-    let tasks: TasksV3 = serde_json::from_value(tasks_value)
-        .map_err(|e| format!("TASKS.md v3 contract is incomplete: {e}"))?;
-    if tasks.schema != "hiveai-task-tracker/v3" || tasks.project_key != project.project_key {
-        return Err("TASKS.md v3 project identity is inconsistent".into());
-    }
-    if let Some(progress) = tasks.progress.as_ref() {
-        validate_progress(progress)?;
-    }
-    let rules_lower = raw.rules.to_ascii_lowercase();
-    if !rules_lower.contains("github-first") || !rules_lower.contains("v3") {
-        return Err("RULES.md does not declare the GitHub-first v3 contract".into());
-    }
-    for line in raw.events.lines().filter(|line| !line.trim().is_empty()) {
-        let event: Value = serde_json::from_str(line)
-            .map_err(|e| format!("EVENTS.jsonl contains malformed JSON: {e}"))?;
-        if event.get("schema").and_then(Value::as_str) != Some("hiveai-event/v1")
-            || event.get("projectKey").and_then(Value::as_str) != Some(project.project_key.as_str())
-        {
-            return Err(
-                "EVENTS.jsonl contains an event for a different contract or project".into(),
-            );
-        }
-    }
-    let recent_events = raw
-        .events
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|event| {
-            Some(RemoteTrackingEvent {
-                id: event.get("id")?.as_str()?.to_string(),
-                event_type: event
-                    .get("type")
-                    .or_else(|| event.get("event"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                task_id: event
-                    .get("taskId")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                from: event
-                    .get("from")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                to: event.get("to").and_then(Value::as_str).map(str::to_string),
-                actor: event
-                    .get("actor")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                timestamp: event
-                    .get("timestamp")
-                    .or_else(|| event.get("createdAt"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                commit_sha: event
-                    .get("commitSha")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            })
-        })
-        .rev()
-        .take(50)
-        .collect::<Vec<_>>();
-    Ok(RemoteTrackingSnapshot {
-        project_key: project.project_key,
-        display_name: project.display_name,
-        repository: repository.into(),
-        branch: branch.into(),
-        remote_head: Some(raw.head.clone()),
-        project_blob_sha: Some(raw.project_blob_sha.clone()),
-        tasks_blob_sha: Some(raw.tasks_blob_sha.clone()),
-        rules_blob_sha: Some(raw.rules_blob_sha.clone()),
-        events_blob_sha: Some(raw.events_blob_sha.clone()),
-        current_milestone: tasks.current_milestone,
-        current_sprint: tasks.current_sprint,
-        current_task_id: tasks.current_task_id,
-        current_task_title: tasks.current_task_title,
-        current_task_status: tasks.workflow_state.clone(),
-        workflow_state: tasks.workflow_state,
-        required_actor: tasks.required_actor,
-        next_action: tasks.next_action,
-        next_task_id: None,
-        next_task_title: None,
-        blockers: tasks.blockers,
-        progress_scope_type: tasks
-            .progress
-            .as_ref()
-            .and_then(|progress| progress.scope_type.clone()),
-        progress_scope_id: tasks
-            .progress
-            .as_ref()
-            .and_then(|progress| progress.scope_id.clone()),
-        progress_completed: tasks
-            .progress
-            .as_ref()
-            .and_then(|progress| progress.completed),
-        progress_total: tasks.progress.as_ref().and_then(|progress| progress.total),
-        progress_percent: tasks
-            .progress
-            .as_ref()
-            .and_then(|progress| progress.percent),
-        last_completed_task_id: tasks.last_completed_task_id,
-        last_completed_task_title: tasks.last_completed_task_title,
-        updated_at: tasks.updated_at,
-        updated_by: tasks.updated_by,
-        total_tasks: None,
-        completed_tasks: None,
-        latest_commit_message: None,
-        latest_commit_author: None,
-        latest_commit_at: None,
-        fetched_at,
-        remote_health: "CURRENT".into(),
-        error: None,
-        recent_events,
-    })
-}
-
-fn validate_progress(progress: &ProgressV3) -> Result<(), String> {
-    let all = progress.scope_type.is_some()
-        && progress.scope_id.is_some()
-        && progress.completed.is_some()
-        && progress.total.is_some()
-        && progress.percent.is_some();
-    if !all
-        && [
-            progress.scope_type.is_some(),
-            progress.scope_id.is_some(),
-            progress.completed.is_some(),
-            progress.total.is_some(),
-            progress.percent.is_some(),
-        ]
-        .iter()
-        .any(|v| *v)
-    {
-        return Err("progress must be exact or entirely null".into());
-    }
-    if let (Some(completed), Some(total), Some(percent)) =
-        (progress.completed, progress.total, progress.percent)
-    {
-        let expected = completed as f64 * 100.0 / total as f64;
-        if total == 0 || completed > total || (percent - expected).abs() > 0.01 {
-            return Err("progress values are inconsistent".into());
-        }
-    }
-    Ok(())
-}
-
 fn persist(
     database: &DatabaseState,
     project: &ProjectRecord,
@@ -1044,7 +801,7 @@ fn persist(
 ) -> Result<(), String> {
     let connection = database.open_connection()?;
     let metadata = serde_json::to_string(snapshot).map_err(|e| e.to_string())?;
-    connection.execute("INSERT INTO github_sync_state (id,project_id,resource_kind,resource_cursor,last_synced_at,metadata_json) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(project_id,resource_kind) DO UPDATE SET resource_cursor=excluded.resource_cursor,last_synced_at=excluded.last_synced_at,metadata_json=excluded.metadata_json", params![format!("{}:{RESOURCE_KIND}", project.id), project.id, RESOURCE_KIND, snapshot.remote_head, snapshot.fetched_at, metadata]).map_err(db_error)?;
+    connection.execute("INSERT INTO github_sync_state (id,project_id,resource_kind,resource_cursor,last_synced_at,metadata_json) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(project_id,resource_kind) DO UPDATE SET resource_cursor=excluded.resource_cursor,last_synced_at=excluded.last_synced_at,metadata_json=excluded.metadata_json", params![format!("{}:{REMOTE_TASKS_RESOURCE_KIND}", project.id), project.id, REMOTE_TASKS_RESOURCE_KIND, snapshot.remote_head, snapshot.fetched_at, metadata]).map_err(db_error)?;
     Ok(())
 }
 
@@ -1057,7 +814,7 @@ fn cached(
     let value: Option<String> = connection
         .query_row(
             "SELECT metadata_json FROM github_sync_state WHERE project_id=?1 AND resource_kind=?2",
-            params![project.id, RESOURCE_KIND],
+            params![project.id, REMOTE_TASKS_RESOURCE_KIND],
             |row| row.get(0),
         )
         .optional()
@@ -1358,7 +1115,7 @@ fn polling_loop(
         }
         let mut live_ids = std::collections::HashSet::new();
         for project in projects {
-            if !is_github_v3_project(&project) {
+            if !is_github_tasks_project(&project) {
                 continue;
             }
             live_ids.insert(project.id.clone());
@@ -1408,28 +1165,6 @@ mod tests {
     use crate::projects::{register_project, RegisterProjectRequest};
     use tempfile::tempdir;
 
-    fn raw(tasks: &str) -> RemoteRaw {
-        RemoteRaw {
-            head: "head".into(),
-            project: r#"{"schema":"hiveai-project/v3","projectKey":"demo","displayName":"Demo","repository":{"owner":"o","name":"r"},"trackedBranch":"main","tasksPath":".hiveai/TASKS.md","rulesPath":".hiveai/RULES.md","eventsPath":".hiveai/EVENTS.jsonl"}"#.into(),
-            tasks: format!("<!-- HIVEAI_TRACKER_V3_START\n{tasks}\nHIVEAI_TRACKER_V3_END -->"),
-            rules: "GitHub-first v3".into(),
-            events: r#"{"schema":"hiveai-event/v1","projectKey":"demo"}"#.into(),
-            project_blob_sha: "project-blob".into(),
-            tasks_blob_sha: "tasks-blob".into(),
-            rules_blob_sha: "rules-blob".into(),
-            events_blob_sha: "events-blob".into(),
-        }
-    }
-
-    #[test]
-    fn v3_parser_accepts_exact_progress_and_identity() {
-        let tasks = r#"{"schema":"hiveai-task-tracker/v3","projectKey":"demo","currentMilestone":"M","currentSprint":"S","currentTaskId":"T","currentTaskTitle":"Task","workflowState":"READY","requiredActor":"OWNER","nextAction":"Do it","blockers":[],"progress":{"scopeType":"MILESTONE","scopeId":"M","completed":1,"total":2,"percent":50},"lastCompletedTaskId":null,"lastCompletedTaskTitle":null,"updatedAt":"2026-09-09T00:00:00Z","updatedBy":"OWNER"}"#;
-        let snapshot = parse_remote(&raw(tasks), "o/r", "main", "now".into()).unwrap();
-        assert_eq!(snapshot.current_task_id.as_deref(), Some("T"));
-        assert_eq!(snapshot.progress_percent, Some(50.0));
-    }
-
     #[test]
     fn root_tasks_parser_materializes_current_state_and_exact_counts() {
         let raw = RootTasksRemote {
@@ -1454,15 +1189,16 @@ mod tests {
     }
 
     #[test]
-    fn v3_parser_rejects_partial_progress() {
-        let tasks = r#"{"schema":"hiveai-task-tracker/v3","projectKey":"demo","blockers":[],"progress":{"scopeType":"MILESTONE","scopeId":null,"completed":null,"total":null,"percent":null}}"#;
-        assert!(parse_remote(&raw(tasks), "o/r", "main", "now".into()).is_err());
-    }
-
-    #[test]
     fn bulk_edit_blocked_owner_fixture_is_not_healthy() {
-        let tasks = r#"{"schema":"hiveai-task-tracker/v3","projectKey":"demo","currentMilestone":"M","currentSprint":"S","currentTaskId":"T","currentTaskTitle":"Blocked task","workflowState":"BLOCKED","requiredActor":"OWNER","nextAction":"Owner decision","blockers":[],"progress":null,"lastCompletedTaskId":null,"lastCompletedTaskTitle":null,"updatedAt":"2026-09-09T00:00:00Z","updatedBy":"OWNER"}"#;
-        let snapshot = parse_remote(&raw(tasks), "o/r", "main", "now".into()).unwrap();
+        let raw = RootTasksRemote {
+            head: "0123456789012345678901234567890123456789".into(),
+            tasks: "# Bulk-Edit\n\n## Project Status\n- Current Milestone: M13\n- Current Task: M13.03 — Real Etsy video upload architecture\n- Current Task Status: BLOCKED\n- Next Task/Action: Owner approval — Run live acceptance\n- Required Actor: OWNER\n\n## Tasks\n- [!] M13.03 — Real Etsy video upload architecture\n".into(),
+            tasks_blob_sha: "sha256:test".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let snapshot = parse_root_tasks(&raw, "Sekiph82/Bulk-Edit", "main", "now".into()).unwrap();
         assert_eq!(remote_health(&snapshot), "BLOCKED");
     }
 
@@ -1484,20 +1220,6 @@ mod tests {
         assert!(!gate.request());
         assert!(gate.take());
         assert!(!gate.take());
-    }
-
-    #[test]
-    fn remote_events_are_project_scoped_activity() {
-        let mut fixture = raw(
-            r#"{"schema":"hiveai-task-tracker/v3","projectKey":"demo","currentMilestone":"M","currentSprint":"S","currentTaskId":"T","currentTaskTitle":"Task","workflowState":"READY","requiredActor":"OWNER","nextAction":"Do it","blockers":[],"progress":null,"lastCompletedTaskId":null,"lastCompletedTaskTitle":null,"updatedAt":"2026-09-09T00:00:00Z","updatedBy":"OWNER"}"#,
-        );
-        fixture.events = r#"{"schema":"hiveai-event/v1","id":"event-1","projectKey":"demo","type":"TASK_STARTED","taskId":"T","from":"READY","to":"IN_PROGRESS","actor":"OWNER","timestamp":"2026-09-09T00:00:00Z"}"#.into();
-        let snapshot = parse_remote(&fixture, "o/r", "main", "now".into()).unwrap();
-        assert_eq!(snapshot.recent_events[0].id, "event-1");
-        assert_eq!(
-            snapshot.recent_events[0].event_type.as_deref(),
-            Some("TASK_STARTED")
-        );
     }
 
     #[test]
@@ -1540,7 +1262,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             scrubbots.task_source_policy.as_deref(),
-            Some("GITHUB_REMOTE_V3")
+            Some(GITHUB_TASKS_ONLY_POLICY)
         );
         assert_eq!(scrubbots.normalized_path, duplicate.normalized_path);
     }

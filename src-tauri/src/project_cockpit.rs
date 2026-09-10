@@ -179,7 +179,7 @@ pub fn snapshot(
     project_id: &str,
 ) -> Result<ProjectCockpitSnapshot, String> {
     let project = fetch_project(database, project_id)?;
-    if github_tracking::is_github_v3_project(&project) {
+    if github_tracking::is_github_tasks_project(&project) {
         return snapshot_remote_primary(database, project);
     }
     let github_tracking = github_tracking::refresh_project(database, &project).ok();
@@ -1051,9 +1051,9 @@ mod tests {
         let connection = database.open_connection().unwrap();
         connection
             .execute(
-                "INSERT INTO github_sync_state (id,project_id,resource_kind,resource_cursor,last_synced_at,metadata_json) VALUES (?1,?2,'GITHUB_TRACKING_V3',?3,?4,?5) ON CONFLICT(project_id,resource_kind) DO UPDATE SET resource_cursor=excluded.resource_cursor,last_synced_at=excluded.last_synced_at,metadata_json=excluded.metadata_json",
+                "INSERT INTO github_sync_state (id,project_id,resource_kind,resource_cursor,last_synced_at,metadata_json) VALUES (?1,?2,'GITHUB_TASKS_REMOTE',?3,?4,?5) ON CONFLICT(project_id,resource_kind) DO UPDATE SET resource_cursor=excluded.resource_cursor,last_synced_at=excluded.last_synced_at,metadata_json=excluded.metadata_json",
                 rusqlite::params![
-                    format!("{}:GITHUB_TRACKING_V3", project.id),
+                    format!("{}:GITHUB_TASKS_REMOTE", project.id),
                     project.id,
                     remote.remote_head.clone(),
                     remote.fetched_at.clone(),
@@ -1121,7 +1121,7 @@ mod tests {
         let invalid = remote_fixture("ERROR");
         connection
             .execute(
-                "UPDATE github_sync_state SET metadata_json=?1, resource_cursor=?2 WHERE project_id=?3 AND resource_kind='GITHUB_TRACKING_V3'",
+                "UPDATE github_sync_state SET metadata_json=?1, resource_cursor=?2 WHERE project_id=?3 AND resource_kind='GITHUB_TASKS_REMOTE'",
                 rusqlite::params![
                     serde_json::to_string(&invalid).unwrap(),
                     invalid.remote_head.clone(),
