@@ -7,29 +7,15 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - Current Milestone: M21
 - Current Sprint: M21-MIGRATION
 - Current Task: M21-01 — Standalone root migration and GitHub TASKS-only architecture
-- Current Task Status: IN_PROGRESS
-- Next Task/Action: Complete the standalone verification matrix and publish H!veAI.exe.
+- Current Task Status: PASS/CLOSED
+- Next Task/Action: Owner native/visual acceptance and independent retirement decision; preserve the legacy parent until explicitly retired.
 - Required Actor: CODEX
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
 ## Tasks
-# H-veAI — Canonical GitHub Task State
+- [x] M21-01 — Standalone root migration and GitHub TASKS-only architecture
 
-This root TASKS.md is the only authoritative project-status tracker consumed by H!veAI. GitHub repository metadata and the latest commit are the remaining project-truth inputs. Hidden .hiveai control-plane files are historical only and are not read for current project state.
-
-## Project Status
-
-- Current Milestone: M21
-- Current Sprint: M21-MIGRATION
-- Current Task: M21-01 — Standalone root migration and GitHub TASKS-only architecture
-- Current Task Status: IN_PROGRESS
-- Next Task/Action: Complete the standalone verification matrix and publish H!veAI.exe.
-- Required Actor: CODEX
-- Tracking Repository: Sekiph82/H-veAI
-- Tracking Branch: main
-
-## Tasks
 # H!veAI MASTER TASKS
 
 Legend: `[x]` validated complete, `[~]` active/in progress, `[ ]` planned/pending, `[!]` blocked.

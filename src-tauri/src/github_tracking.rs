@@ -787,6 +787,7 @@ fn parse_root_tasks(
         return Err("TASKS.md current task is not present in its task rows".into());
     }
     let mut blockers = raw
+        .tasks
         .lines()
         .skip_while(|line| !line.trim().eq_ignore_ascii_case("## Blockers/Waits"))
         .skip(1)
@@ -798,7 +799,13 @@ fn parse_root_tasks(
     if blockers.is_empty() {
         blockers = markdown_field(&raw.tasks, &["Blockers/Waits:"])
             .into_iter()
-            .flat_map(|value| value.split(';').map(str::trim).map(str::to_string))
+            .flat_map(|value| {
+                value
+                    .split(';')
+                    .map(str::trim)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
             .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
             .collect();
     }
