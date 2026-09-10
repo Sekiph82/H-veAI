@@ -1,0 +1,458 @@
+[
+  {
+    "name": "AI-Commerce-HQ",
+    "projectKey": "ai-commerce-hq",
+    "canonicalTaskSource": "H!veAI/TASKS.md",
+    "repository": "Sekiph82/AI-Commerce-HQ",
+    "branch": "H!veAI",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "ai-commerce-hq",
+      "displayName": "AI-Commerce-HQ",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "AI-Commerce-HQ",
+        "branch": "H!veAI"
+      },
+      "trackedBranch": "H!veAI",
+      "canonicalTaskSource": "H!veAI/TASKS.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      },
+      "authority": {
+        "tasks": "CANONICAL",
+        "state": "MATERIALIZED_CURRENT_STATE",
+        "handoff": "RESUME_POINTER",
+        "events": "APPEND_ONLY_HISTORY",
+        "builderLogs": "CLAIM_ONLY",
+        "audits": "INDEPENDENT_EVIDENCE"
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "ai-commerce-hq",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "ai-commerce-hq"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "ai-commerce-hq"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `H!veAI/TASKS.md`.\n- Never create a competing task ledger.\n",
+    "targetBranchHeadSha": "9233c7df49eaf43c58185f49d20ae607156836fa",
+    "projectBlobSha": "f0ffda434aa8e8b321b7582603a4fc9f8f0d7e5f",
+    "rulesBlobSha": "fe47f40fa5276d8f371da52cd495767b5c0ed7fc"
+  },
+  {
+    "name": "Bulk-Edit",
+    "projectKey": "bulk-edit",
+    "canonicalTaskSource": "TASKS.md",
+    "repository": "Sekiph82/Bulk-Edit",
+    "branch": "main",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "bulk-edit",
+      "displayName": "Bulk-Edit",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "Bulk-Edit",
+        "branch": "main"
+      },
+      "trackedBranch": "main",
+      "canonicalTaskSource": "TASKS.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "bulk-edit",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "bulk-edit"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "bulk-edit"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `TASKS.md`.\n- STATE.json = current materialized state.\n- HANDOFF.md = resume pointer.\n- EVENTS.jsonl = append-only lifecycle history.\n",
+    "targetBranchHeadSha": "05a059ab5aff211be8a9cd8feccd3d5cba7845fd",
+    "projectBlobSha": "6738f34092d3d1198cb798e514810bfd18389bc2",
+    "rulesBlobSha": "27287ce352cc781101e090ac9105e83952b06845"
+  },
+  {
+    "name": "fmcg-erp-system",
+    "projectKey": "fmcg-erp-system",
+    "canonicalTaskSource": "TASKS.md",
+    "repository": "Sekiph82/fmcg-erp-system",
+    "branch": "main",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "fmcg-erp-system",
+      "displayName": "fmcg-erp-system",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "fmcg-erp-system",
+        "branch": "main"
+      },
+      "trackedBranch": "main",
+      "canonicalTaskSource": "TASKS.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "fmcg-erp-system",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "fmcg-erp-system"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "fmcg-erp-system"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `TASKS.md`.\n- STATE.json = current materialized state.\n- HANDOFF.md = resume pointer.\n- EVENTS.jsonl is append-only lifecycle history.\n",
+    "targetBranchHeadSha": "77aa33b2d18811e019d17609a4298929946e603a",
+    "projectBlobSha": "5793d3cdaf076e46e6a889c6dd4488c3d5b04195",
+    "rulesBlobSha": "763d6365ff6aa15a6208d9c197cc58558dd042cc"
+  },
+  {
+    "name": "FormuLab",
+    "projectKey": "formulab",
+    "canonicalTaskSource": "docs/FORMULAB_V1_TASK_TRACKER.md",
+    "repository": "Sekiph82/FormuLab",
+    "branch": "feature/laboratory-stability",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "formulab",
+      "displayName": "FormuLab",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "FormuLab",
+        "branch": "feature/laboratory-stability"
+      },
+      "trackedBranch": "feature/laboratory-stability",
+      "canonicalTaskSource": "docs/FORMULAB_V1_TASK_TRACKER.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "formulab",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "formulab"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "formulab"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `docs/FORMULAB_V1_TASK_TRACKER.md`.\n- STATE.json = current materialized state.\n- HANDOFF.md = resume pointer.\n- EVENTS.jsonl = append-only lifecycle history.\n",
+    "targetBranchHeadSha": "db2520d648a7b379af15e2516c6c220f91aabc04",
+    "projectBlobSha": "8231abb9f1fe845318ee9c4de795683d9ceaf1b9",
+    "rulesBlobSha": "393d8c624a6b0517cf7ee266b1ee6c43e6bdf133"
+  },
+  {
+    "name": "PackLab",
+    "projectKey": "packlab",
+    "canonicalTaskSource": "TASKS.md",
+    "repository": "Sekiph82/PackLab",
+    "branch": "main",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "packlab",
+      "displayName": "PackLab",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "PackLab",
+        "branch": "main"
+      },
+      "trackedBranch": "main",
+      "canonicalTaskSource": "TASKS.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "packlab",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "packlab"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "packlab"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `TASKS.md`.\n- STATE.json = current materialized state.\n- HANDOFF.md = resume pointer.\n- EVENTS.jsonl = append-only lifecycle history.\n",
+    "targetBranchHeadSha": "46cdf07c3c5138594301214ffb351792c378e125",
+    "projectBlobSha": "73376f94e0892b6444b78b4024e92be2aa1bfd45",
+    "rulesBlobSha": "f9953064eaaf935bfe88c0c7f716de4e2459094f"
+  },
+  {
+    "name": "PackLab 3D",
+    "projectKey": "packlab-3d",
+    "canonicalTaskSource": "tasks.md",
+    "repository": "Sekiph82/PackLab-3D",
+    "branch": "main",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "packlab-3d",
+      "displayName": "PackLab 3D",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "PackLab-3D",
+        "branch": "main"
+      },
+      "trackedBranch": "main",
+      "canonicalTaskSource": "tasks.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "packlab-3d",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "packlab-3d"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "packlab-3d"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `tasks.md`.\n- STATE.json = current materialized state.\n- HANDOFF.md = resume pointer.\n- EVENTS.jsonl = append-only lifecycle history.\n",
+    "targetBranchHeadSha": "af5d83f089d753b82101369c303880d45b2ffc9e",
+    "projectBlobSha": "d552a805862a7ba96b06ed1bddd4808050f881b6",
+    "rulesBlobSha": "05d8a810e1971362d66c2722c0117b418e73301c"
+  },
+  {
+    "name": "ScrubBots",
+    "projectKey": "scrubbots",
+    "canonicalTaskSource": "tasks.md",
+    "repository": "Sekiph82/Scrubbots",
+    "branch": "main",
+    "rules": "standard",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "scrubbots",
+      "displayName": "ScrubBots",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "Scrubbots",
+        "branch": "main"
+      },
+      "trackedBranch": "main",
+      "canonicalTaskSource": "tasks.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "refresh": {
+        "mode": "watcher-first",
+        "debounceMs": 500,
+        "safetyReconcileSeconds": 60
+      },
+      "git": {
+        "remoteExpected": true,
+        "localGitPreferred": true,
+        "nonGitLocalFolderMustBeReported": true
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "scrubbots",
+      "workflowState": "IDLE"
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "scrubbots"
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "scrubbots"
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- Canonical task ledger: `tasks.md`.\n- STATE.json = current materialized state.\n- HANDOFF.md = resume pointer.\n- EVENTS.jsonl = append-only lifecycle history.\n",
+    "targetBranchHeadSha": "f44f1d50c6ea8f3427a4a62410887cc2b554945b",
+    "projectBlobSha": "14a9d6592fb2d27fa39d753e5069782154a1c842",
+    "rulesBlobSha": "78e15149669a3c4a7191dd0b60202dc9e764c631"
+  },
+  {
+    "name": "ScrubBots - Pixel Art Generator",
+    "projectKey": "scrubbots-level-factory",
+    "canonicalTaskSource": "tasks.md",
+    "repository": "Sekiph82/ScrubBots-Level-Factory",
+    "branch": "main",
+    "rules": "builderMayMutateHandoff=false; owner-approved authority",
+    "project": {
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "scrubbots-level-factory",
+      "displayName": "ScrubBots - Pixel Art Generator",
+      "repository": {
+        "owner": "Sekiph82",
+        "name": "ScrubBots-Level-Factory",
+        "branch": "main"
+      },
+      "trackedBranch": "main",
+      "canonicalTaskSource": "tasks.md",
+      "rules": ".hiveai/RULES.md",
+      "state": ".hiveai/STATE.json",
+      "handoff": ".hiveai/HANDOFF.md",
+      "events": ".hiveai/EVENTS.jsonl",
+      "eventSources": [],
+      "governance": {
+        "taskCompletionAuthority": "CHATGPT_INDEPENDENT_AUDITOR",
+        "builderMayMutateTaskState": false,
+        "builderMayMutateHandoff": false
+      }
+    },
+    "state": {
+      "source": ".hiveai/STATE.json",
+      "schema": "hiveai-project-control-plane/v1",
+      "projectKey": "scrubbots-level-factory",
+      "workflowState": "READY",
+      "currentMilestone": "PAG-M04",
+      "currentCycle": "PAG-M04-C002",
+      "progressPercent": 39.21
+    },
+    "handoff": {
+      "source": ".hiveai/HANDOFF.md",
+      "format": "markdown",
+      "projectKey": "scrubbots-level-factory",
+      "governed": true
+    },
+    "events": {
+      "source": ".hiveai/EVENTS.jsonl",
+      "schema": "hiveai-event/v1",
+      "projectKey": "scrubbots-level-factory",
+      "appendOnly": true
+    },
+    "eventSources": [],
+    "rulesText": "# H!veAI Project Control Rules v1\n\n- `tasks.md` is the canonical task ledger.\n- `.hiveai/STATE.json` is H!veAI's materialized current-state projection.\n- `.hiveai/HANDOFF.md` is the resume pointer.\n- `.hiveai/EVENTS.jsonl` is append-only lifecycle history.\n- Codex may not rewrite HANDOFF or independent audit history unless an owner-approved prompt explicitly changes governance.\n",
+    "targetBranchHeadSha": "f1a1c4f1df18cf8384733d7d372bd6c1aafffc8a",
+    "projectBlobSha": "8da21e67de8235d09a8078e7d45a872e1e5e401e",
+    "rulesBlobSha": "e551ed83dd5b28f6d59bf934f6960c0bee6a09e9"
+  }
+]

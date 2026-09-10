@@ -1,0 +1,101 @@
+"$schema" = "schemas/schema.json"
+
+[[permission]]
+identifier = "allow-native-status"
+description = "Allows the main window to read minimal H!veAI native shell metadata."
+commands.allow = ["hiveai_native_status"]
+
+[[permission]]
+identifier = "allow-frontend-ready"
+description = "Allows the mounted H!veAI frontend to emit its bounded readiness signal."
+commands.allow = ["hiveai_frontend_ready"]
+
+[[permission]]
+identifier = "allow-akilta-external-link"
+description = "Allows the main window to open the fixed Akilta website in Google Chrome."
+commands.allow = ["hiveai_open_akilta"]
+
+[[permission]]
+identifier = "allow-startup-intro-claim"
+description = "Allows the native frontend to claim the one startup intro for this process lifecycle."
+commands.allow = ["hiveai_startup_intro_claim"]
+
+[[permission]]
+identifier = "allow-request-restart"
+description = "Allows the main window to request an application restart through Tauri."
+commands.allow = ["hiveai_request_restart"]
+
+[[permission]]
+identifier = "allow-runtime-status"
+description = "Allows the main window to read structured H!veAI runtime state."
+commands.allow = ["hiveai_runtime_status"]
+
+[[permission]]
+identifier = "allow-database-status"
+description = "Allows the main window to read non-sensitive H!veAI database status."
+commands.allow = ["hiveai_database_status"]
+
+[[permission]]
+identifier = "allow-command-center-read"
+description = "Allows the main window to read one bounded live Command Center snapshot and a registered-project dashboard authority map."
+commands.allow = ["hiveai_command_center_snapshot", "hiveai_project_dashboard_resolve"]
+
+[[permission]]
+identifier = "allow-project-registry"
+description = "Allows the main window to use bounded, explicit H!veAI project registry operations."
+commands.allow = ["hiveai_projects_list", "hiveai_project_register", "hiveai_project_get", "hiveai_project_update_settings", "hiveai_project_archive", "hiveai_project_remove_from_registry", "hiveai_project_repair_path"]
+
+[[permission]]
+identifier = "allow-project-cockpit"
+description = "Allows the main window to read one registered project's bounded cockpit snapshot."
+commands.allow = ["hiveai_project_cockpit_snapshot"]
+
+[[permission]]
+identifier = "allow-control-plane"
+description = "Allows the main window to inspect or explicitly adopt the normalized project control plane."
+commands.allow = ["hiveai_control_plane_snapshot", "hiveai_control_plane_adopt", "hiveai_control_plane_upgrade", "hiveai_control_plane_sync_remote", "hiveai_control_plane_local_repair_plan", "hiveai_control_plane_set_auto_fast_forward"]
+
+[[permission]]
+identifier = "allow-git-engine-read"
+description = "Allows the main window to request bounded, read-only Git snapshots and diffs for registered repositories."
+commands.allow = ["hiveai_git_snapshot", "hiveai_git_diff", "hiveai_git_mutation_status"]
+
+[[permission]]
+identifier = "allow-filesystem-watcher"
+description = "Allows the main window to inspect and explicitly refresh registered-project watcher state."
+commands.allow = ["hiveai_watcher_status", "hiveai_watcher_project_status", "hiveai_watcher_refresh_set", "hiveai_watcher_rescan"]
+
+[[permission]]
+identifier = "allow-task-source-discovery"
+description = "Allows the main window to discover bounded task-source metadata for registered projects."
+commands.allow = ["hiveai_task_sources_discover", "hiveai_task_sources_list", "hiveai_task_source_custom_paths_list", "hiveai_task_source_custom_path_add", "hiveai_task_source_custom_path_remove", "hiveai_task_source_custom_path_update"]
+
+[[permission]]
+identifier = "allow-task-intelligence"
+description = "Allows the main window to explicitly parse and list bounded M09 task intelligence for registered projects."
+commands.allow = ["hiveai_task_intelligence_parse", "hiveai_task_intelligence_list"]
+
+[[permission]]
+identifier = "allow-workflow-state-machine"
+description = "Allows the main window to read and mutate the bounded M10 workflow state machine through evidence-backed native commands."
+commands.allow = ["hiveai_workflow_task_get", "hiveai_workflow_project_list", "hiveai_workflow_history", "hiveai_workflow_transition", "hiveai_workflow_override"]
+
+[[permission]]
+identifier = "allow-codex-adapter"
+description = "Allows the main window to use the bounded, registered-project Codex adapter lifecycle."
+commands.allow = ["hiveai_codex_readiness", "hiveai_codex_sessions_list", "hiveai_codex_start", "hiveai_codex_stop", "hiveai_codex_resume"]
+
+[[permission]]
+identifier = "allow-agent-session-center"
+description = "Allows the main window to use the provider-neutral, registered-project Codex and Claude session center."
+commands.allow = ["hiveai_agent_readiness", "hiveai_agent_sessions_list", "hiveai_agent_start", "hiveai_agent_stop", "hiveai_agent_retry", "hiveai_agent_resume", "hiveai_agent_session_events", "hiveai_agent_resize", "hiveai_agent_permission_decision"]
+
+[[permission]]
+identifier = "allow-prompt-engine"
+description = "Allows the main window to use the bounded, reviewable Prompt Engine workflow."
+commands.allow = ["hiveai_prompt_context_collect", "hiveai_prompt_generate", "hiveai_prompts_list", "hiveai_prompt_versions", "hiveai_prompt_edit", "hiveai_prompt_approve", "hiveai_prompt_dispatch"]
+
+[[permission]]
+identifier = "allow-audit-engine"
+description = "Allows the main window to use bounded, evidence-first audit collection, persistence, and remediation handoff."
+commands.allow = ["hiveai_audit_input_collect", "hiveai_audit_run", "hiveai_audits_list", "hiveai_audit_get", "hiveai_audit_create_remediation_prompt", "hiveai_audit_link_remediation_session"]

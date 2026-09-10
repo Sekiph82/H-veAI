@@ -1,0 +1,20 @@
+{
+  "schema": "hiveai-project-control-plane/v1",
+  "projectKey": "REPLACE_WITH_REGISTRY_PROJECT_ID",
+  "displayName": "REPLACE_WITH_PROJECT_NAME",
+  "repository": {
+    "owner": "REPLACE_WITH_OWNER",
+    "name": "REPLACE_WITH_REPOSITORY",
+    "branch": "REPLACE_WITH_BRANCH"
+  },
+  "canonicalTaskSource": "TASKS.md",
+  "eventSources": [
+    "TASKS.md",
+    ".hiveai/STATE.json",
+    ".hiveai/HANDOFF.md",
+    ".hiveai/EVENTS.jsonl",
+    ".git/HEAD",
+    ".git/index"
+  ],
+  "localRegistryId": "REPLACE_WITH_REGISTRY_PROJECT_ID"
+}

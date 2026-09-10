@@ -1,0 +1,15 @@
+{
+  "schema": "hiveai-project-control-plane/v1",
+  "projectKey": "project-key",
+  "displayName": "Project name",
+  "repository": {
+    "owner": "owner",
+    "name": "repository",
+    "branch": "tracked-branch"
+  },
+  "canonicalTaskSource": "TASKS.md",
+  "rules": ".hiveai/RULES.md",
+  "state": ".hiveai/STATE.json",
+  "handoff": ".hiveai/HANDOFF.md",
+  "eventSources": ["TASKS.md", ".hiveai/EVENTS.jsonl"]
+}

@@ -1,0 +1,172 @@
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import App from "../src/App";
+
+const invoke = vi.hoisted(() => vi.fn());
+const records = [{ id: "alpha", name: "Project Alpha", originalPath: "C:\\Projects\\alpha", normalizedPath: "c:\\projects\\alpha", status: "ACTIVE", priority: 0, preferredBuilder: null, preferredAuditor: null, taskSourcePolicy: "DISCOVER_STANDARD_FILES", registeredAt: "2026-08-27T10:00:00Z", lastValidatedAt: "2026-08-27T10:00:00Z", repository: null }];
+const readiness = [{ provider: "CODEX", available: true, version: "codex-cli 0.130.0-alpha.5", readinessState: "VERSION_VERIFIED_AUTH_UNKNOWN", diagnosticCode: "AUTH_READINESS_UNVERIFIED", diagnosticMessage: "authentication is unknown", capabilities: ["START", "LIST", "STOP"], supportsPty: false, supportsResume: false, checkedAt: "2026-08-27T10:00:00Z" }, { provider: "CLAUDE", available: false, version: null, readinessState: "UNAVAILABLE", diagnosticCode: "CLAUDE_EXECUTABLE_NOT_FOUND", diagnosticMessage: "Claude unavailable in fixture", capabilities: ["LIST"], supportsPty: false, supportsResume: false, checkedAt: "2026-08-27T10:00:00Z" }];
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+
+beforeEach(() => {
+  Object.defineProperty(window, "__TAURI_INTERNALS__", { configurable: true, value: {} });
+  window.sessionStorage.clear();
+  window.history.pushState({}, "", "/agents");
+  invoke.mockReset();
+  invoke.mockImplementation((command: string) => {
+    if (command === "hiveai_projects_list") return Promise.resolve(records);
+    if (command === "hiveai_agent_readiness") return Promise.resolve(readiness);
+    if (command === "hiveai_agent_sessions_list") return Promise.resolve([]);
+    return Promise.resolve({});
+  });
+});
+
+describe("M13 Codex adapter", () => {
+  it("keeps truthful readiness gating without rendering a readiness card", async () => {
+    render(<App />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_agent_readiness"));
+    expect(screen.queryByText("codex-cli 0.130.0-alpha.5")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Project Alpha").length).toBeGreaterThan(0);
+    expect(screen.queryByText("authentication is unknown")).not.toBeInTheDocument();
+  });
+
+  it("passes only the selected project, bounded task id, and prompt to native start", async () => {
+    render(<App />);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_agent_readiness"));
+    fireEvent.change(screen.getByLabelText("Agent task ID"), { target: { value: "alpha-task" } });
+    fireEvent.change(screen.getByLabelText("Agent prompt"), { target: { value: "inspect x & y | z" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start CODEX session" }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_agent_start", { request: { projectId: "alpha", provider: "CODEX", taskId: "alpha-task", prompt: "inspect x & y | z" } }));
+  });
+
+  it("does not offer an operation in browser preview and reports unsupported resume", async () => {
+    delete (window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
+    window.history.pushState({}, "", "/agents");
+    render(<App />);
+    expect(await screen.findByText("Native H!veAI is required for provider sessions.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start CODEX session" })).toBeDisabled();
+  });
+
+  it("renders bounded failed-session evidence without protected markers", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_projects_list") return Promise.resolve(records);
+      if (command === "hiveai_agent_readiness") return Promise.resolve(readiness);
+      if (command === "hiveai_agent_sessions_list") return Promise.resolve([{
+        id: "failed-session",
+        provider: "CODEX",
+        projectId: "alpha",
+        taskId: null,
+        operationKind: "CODEX_EXEC",
+        state: "FAILED",
+        cwd: "C:\\Projects\\alpha",
+        startedAt: "2026-08-27T10:01:00Z",
+        endedAt: "2026-08-27T10:01:01Z",
+        exitCode: 1,
+        stdout: "",
+        stderr: "[REDACTED SENSITIVE OUTPUT]\\nmodel requires a newer Codex version",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        diagnosticCode: "CODEX_PROCESS_FAILED",
+        diagnosticMessage: "Codex exited with code 1",
+        promptReference: "hash",
+        providerVersion: "codex-cli 0.130.0-alpha.5",
+        elapsedMs: 1000,
+        supportsResume: false,
+        supportsPty: false,
+        events: [],
+      }]);
+      return Promise.resolve({});
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /View CODEX CODEX_EXEC FAILED/i }));
+    fireEvent.click(screen.getByText("Technical details"));
+    expect((await screen.findAllByText("FAILED")).length).toBeGreaterThan(0);
+    expect(screen.getByText("CODEX_PROCESS_FAILED")).toBeInTheDocument();
+    expect(screen.getByText("Codex exited with code 1")).toBeInTheDocument();
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.queryByText(/model requires a newer Codex version/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\[REDACTED SENSITIVE OUTPUT\]/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/password=/i)).not.toBeInTheDocument();
+  });
+
+  it("keeps completed-session output evidence visible", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_projects_list") return Promise.resolve(records);
+      if (command === "hiveai_agent_readiness") return Promise.resolve(readiness);
+      if (command === "hiveai_agent_sessions_list") return Promise.resolve([{
+        id: "completed-session",
+        provider: "CODEX",
+        projectId: "alpha",
+        taskId: "alpha-task",
+        operationKind: "CODEX_EXEC",
+        state: "COMPLETED",
+        cwd: "C:\\Projects\\alpha",
+        startedAt: "2026-08-27T10:01:00Z",
+        endedAt: "2026-08-27T10:01:02Z",
+        exitCode: 0,
+        stdout: "status: clean",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        diagnosticCode: null,
+        diagnosticMessage: null,
+        promptReference: "hash",
+        providerVersion: "codex-cli 0.130.0-alpha.5",
+        elapsedMs: 2000,
+        supportsResume: false,
+        supportsPty: false,
+        events: [],
+      }]);
+      return Promise.resolve({});
+    });
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /View CODEX CODEX_EXEC COMPLETED/i }));
+    expect((await screen.findAllByText("COMPLETED")).length).toBeGreaterThan(0);
+    expect(screen.getByText("status: clean")).toBeInTheDocument();
+  });
+
+  it("renders long persisted JSON output as a wrapped vertical reader", async () => {
+    const longPath = `C:\\Projects\\alpha\\${"nested\\".repeat(40)}result.json`;
+    const output = JSON.stringify({ type: "command.completed", command: longPath, status: "clean" });
+    const longUnrecognizedLine = `unrecognized-path=${"x".repeat(400)}`;
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_projects_list") return Promise.resolve(records);
+      if (command === "hiveai_agent_readiness") return Promise.resolve(readiness);
+      if (command === "hiveai_agent_sessions_list") return Promise.resolve([{
+        id: "long-session",
+        provider: "CODEX",
+        projectId: "alpha",
+        taskId: "alpha-task",
+        operationKind: "CODEX_EXEC",
+        state: "COMPLETED",
+        cwd: "C:\\Projects\\alpha",
+        startedAt: "2026-08-27T10:01:00Z",
+        endedAt: "2026-08-27T10:01:02Z",
+        exitCode: 0,
+        stdout: `${output}\n${longUnrecognizedLine}`,
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        diagnosticCode: null,
+        diagnosticMessage: null,
+        promptReference: "hash",
+        providerVersion: "codex-cli 0.130.0-alpha.5",
+        elapsedMs: 2000,
+        supportsResume: false,
+        supportsPty: false,
+        events: [],
+      }]);
+      return Promise.resolve({});
+    });
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: /View CODEX CODEX_EXEC COMPLETED/i }));
+    const reader = await screen.findByTestId("agent-stdout-reader");
+    expect(reader).toHaveClass("agent-conversation");
+    expect(reader).toHaveTextContent("View activity");
+    expect(reader).toHaveTextContent(longUnrecognizedLine);
+    expect(reader.querySelector("pre")).toBeNull();
+    expect(reader.querySelector(".agent-activity-disclosure")).toBeTruthy();
+    expect(reader.querySelector(".agent-activity-disclosure")?.hasAttribute("open")).toBe(false);
+    expect(container.querySelector(".agent-sessions-panel")?.textContent).toContain("COMPLETED");
+  });
+});

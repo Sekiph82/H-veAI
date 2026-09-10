@@ -1,0 +1,13 @@
+{
+  "schema": "hiveai-project-control-plane/v1",
+  "projectKey": "project-key",
+  "workflowState": "READY",
+  "milestone": null,
+  "cycle": null,
+  "currentTaskId": null,
+  "nextAction": "Read canonical task source",
+  "blockers": [],
+  "progressPercent": null,
+  "updatedBy": "HIVEAI_SYSTEM",
+  "updatedAt": null
+}
