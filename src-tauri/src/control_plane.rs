@@ -1,5 +1,6 @@
 use crate::db::DatabaseState;
 use crate::git_engine::{self, GitSnapshotRequest, RepositoryHealth};
+use crate::github_tracking::{self, RemoteTrackingSnapshot};
 use crate::projects::{fetch_project, refresh_repository_metadata, ProjectRecord};
 use crate::{project_dashboard, task_intelligence, workflow};
 use rusqlite::OptionalExtension;
@@ -599,6 +600,9 @@ pub fn converge_physical_adoption(
     project_id: &str,
 ) -> Result<PhysicalControlPlaneStatus, String> {
     let project = fetch_project(database, project_id)?;
+    if github_tracking::is_github_tasks_project(&project) {
+        return Ok(PhysicalControlPlaneStatus::Missing);
+    }
     if project.status == "ARCHIVED" {
         return Ok(PhysicalControlPlaneStatus::Missing);
     }
@@ -655,6 +659,11 @@ pub fn snapshot(
     project_id: &str,
 ) -> Result<ControlPlaneSnapshot, String> {
     let project = fetch_project(database, project_id)?;
+    if github_tracking::is_github_tasks_project(&project) {
+        let remote = github_tracking::refresh_project(database, &project)
+            .unwrap_or_else(|error| github_tracking::unavailable_for_project(&project, error));
+        return Ok(remote_control_plane_snapshot(&project, &remote));
+    }
     let initial_truth_sync = truth_sync_status(database, project_id);
     let materialization = if truth_sync_is_current(&initial_truth_sync) {
         Ok(None)
@@ -714,6 +723,9 @@ pub fn snapshot(
 /// Upgrade only the bounded control-plane files. Canonical task files, handoff prose,
 /// audits, prompts, logs, and project-specific governance are deliberately untouched.
 pub fn upgrade_control_plane(project: &ProjectRecord) -> Result<bool, String> {
+    if github_tracking::is_github_tasks_project(project) {
+        return Ok(false);
+    }
     let root = Path::new(&project.normalized_path);
     if project.status != "ACTIVE" || !root.is_dir() {
         return Ok(false);
@@ -895,7 +907,10 @@ pub fn reconcile_project(
     database: &DatabaseState,
     project_id: &str,
 ) -> Result<ControlPlaneSnapshot, String> {
-    let _project = refresh_repository_metadata(database, project_id)?;
+    let project = refresh_repository_metadata(database, project_id)?;
+    if github_tracking::is_github_tasks_project(&project) {
+        return snapshot(database, project_id);
+    }
     converge_physical_adoption(database, project_id)?;
     materialize_project_truth(database, project_id, "EXPLICIT_RECONCILE")?;
     snapshot(database, project_id)
@@ -1148,6 +1163,12 @@ pub fn retry_pending_truth_sync(database: &DatabaseState) -> usize {
         .unwrap_or_default();
     ids.into_iter()
         .filter(|id| {
+            if fetch_project(database, id)
+                .map(|project| github_tracking::is_github_tasks_project(&project))
+                .unwrap_or(false)
+            {
+                return false;
+            }
             materialize_project_truth(database, id, "TRUTH_SYNC_RETRY").is_ok()
                 && truth_sync_is_current(&truth_sync_status(database, id))
         })
@@ -1182,6 +1203,9 @@ pub fn materialize_project_truth(
     trigger: &str,
 ) -> Result<MaterializationResult, String> {
     let project = fetch_project(database, project_id)?;
+    if github_tracking::is_github_tasks_project(&project) {
+        return Err("GitHub-tracked project truth is sourced from remote TASKS.md".into());
+    }
     let generation = current_truth_generation(database, project_id)?;
     let portable_key = match stable_project_key(&project) {
         Ok(value) => value,
@@ -1984,6 +2008,58 @@ pub fn resolve_project(project: &ProjectRecord) -> Result<ControlPlaneSnapshot, 
     Ok(result)
 }
 
+fn remote_control_plane_snapshot(
+    project: &ProjectRecord,
+    remote: &RemoteTrackingSnapshot,
+) -> ControlPlaneSnapshot {
+    ControlPlaneSnapshot {
+        schema: "github-root-tasks-v1".into(),
+        project_id: project.id.clone(),
+        project_key: Some(remote.project_key.clone()),
+        display_name: project.name.clone(),
+        adopted: false,
+        health: github_tracking::remote_health(remote).into(),
+        workflow_state: remote.workflow_state.clone(),
+        canonical_task_source: Some("TASKS.md".into()),
+        current_task_id: remote.current_task_id.clone(),
+        current_task_title: remote.current_task_title.clone(),
+        current_milestone: remote.current_milestone.clone(),
+        current_cycle: remote.current_sprint.clone(),
+        required_actor: remote.required_actor.clone(),
+        remote_repository: Some(remote.repository.clone()),
+        session_result: None,
+        auto_fast_forward_enabled: false,
+        next_action: remote.next_action.clone(),
+        blockers: remote.blockers.clone(),
+        progress_percent: remote.progress_percent.map(|value| value.round() as u8),
+        resume_pointer: None,
+        event_count: remote.recent_events.len(),
+        last_event_at: remote.updated_at.clone(),
+        git: GitControlPlaneState {
+            local_status: "SECONDARY_TELEMETRY".into(),
+            remote_status: remote.remote_health.clone(),
+            sync_status: "REMOTE_PRIMARY".into(),
+            branch: Some(remote.branch.clone()),
+            head_sha: remote.remote_head.clone(),
+            upstream: Some(remote.repository.clone()),
+            ahead: None,
+            behind: None,
+            dirty: false,
+            conflicted: false,
+            last_remote_observation_at: Some(remote.fetched_at.clone()),
+            last_remote_observation_status: remote.remote_health.clone(),
+            last_remote_observation_error: remote.error.clone(),
+            last_remote_observed_upstream: Some(remote.remote_head.clone().unwrap_or_default()),
+            last_remote_observed_ahead: None,
+            last_remote_observed_behind: None,
+            last_remote_observed_diverged: None,
+        },
+        truth_sync: TruthSyncState::default(),
+        source_precedence: vec!["GITHUB_TASKS_ONLY".into()],
+        warnings: Vec::new(),
+    }
+}
+
 /// Resolve the one project truth contract consumed by reconciliation and both
 /// project-facing summaries. Every current-task claim must be backed by the
 /// canonical task source or an explicit, valid workflow/control-plane claim.
@@ -2001,6 +2077,11 @@ pub fn resolve_truth(database: &DatabaseState, project_id: &str) -> Result<Proje
 
 fn resolve_truth_impl(database: &DatabaseState, project_id: &str) -> Result<ProjectTruth, String> {
     let project = fetch_project(database, project_id)?;
+    if github_tracking::is_github_tasks_project(&project) {
+        let remote = github_tracking::refresh_project(database, &project)
+            .unwrap_or_else(|error| github_tracking::unavailable_for_project(&project, error));
+        return Ok(remote_project_truth(&project, &remote));
+    }
     let control_plane = resolve_project(&project)?;
     let mut warnings = control_plane.warnings.clone();
     let mut provenance = vec![PROJECT_JSON.into(), STATE_JSON.into(), HANDOFF_MD.into()];
@@ -2380,6 +2461,33 @@ fn resolve_truth_impl(database: &DatabaseState, project_id: &str) -> Result<Proj
         reconciliation_state: reconciliation_state.into(),
         warnings: deduped_warnings,
     })
+}
+
+fn remote_project_truth(project: &ProjectRecord, remote: &RemoteTrackingSnapshot) -> ProjectTruth {
+    ProjectTruth {
+        project_id: project.id.clone(),
+        current_task_id: remote.current_task_id.clone(),
+        current_task_title: remote.current_task_title.clone(),
+        current_task_status: remote
+            .current_task_status
+            .clone()
+            .or_else(|| remote.workflow_state.clone()),
+        current_milestone: remote.current_milestone.clone(),
+        current_cycle: remote.current_sprint.clone(),
+        workflow_state: remote.workflow_state.clone(),
+        required_actor: remote.required_actor.clone(),
+        next_action: remote.next_action.clone(),
+        blockers: remote.blockers.clone(),
+        progress_percent: remote.progress_percent.map(|value| value.round() as u8),
+        progress_scope: remote
+            .progress_scope_type
+            .clone()
+            .or_else(|| remote.progress_scope_id.clone()),
+        authority_source: "GITHUB_TASKS_ONLY".into(),
+        provenance: vec![format!("{}@{}", remote.repository, remote.branch)],
+        reconciliation_state: "REMOTE_PRIMARY".into(),
+        warnings: Vec::new(),
+    }
 }
 
 fn truth_task_complete(

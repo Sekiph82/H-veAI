@@ -1816,7 +1816,11 @@ function CockpitLegacyOverview({
         </CockpitPanel>
         <CockpitPanel
           title="Next action"
-          detail="Existing workflow/dashboard evidence"
+          detail={
+            remote
+              ? "GitHub + root TASKS.md"
+              : "Existing workflow/dashboard evidence"
+          }
         >
           <div className="cockpit-callout">
             <strong>
@@ -1851,7 +1855,11 @@ function CockpitLegacyOverview({
         </CockpitPanel>
         <CockpitPanel
           title="Authority and provenance"
-          detail="Resolved Project Dashboard contract"
+          detail={
+            remote
+              ? "GitHub + root TASKS.md"
+              : "Resolved Project Dashboard contract"
+          }
         >
           <CockpitFacts
             facts={[
@@ -1865,7 +1873,7 @@ function CockpitLegacyOverview({
             ]}
           />
         </CockpitPanel>
-        {snapshot.controlPlane ? (
+        {snapshot.controlPlane && !remote ? (
           <CockpitPanel
             title="Unified project control plane"
             detail="Normalized PROJECT / STATE / HANDOFF / EVENTS read model"
@@ -1943,8 +1951,12 @@ function CockpitLegacyOverview({
         ) : null}
       </div>
       <CockpitPanel
-        title="Project Dashboard status"
-        detail="Materialized values are evidence, not stronger than M10"
+        title={remote ? "GitHub task status" : "Project Dashboard status"}
+        detail={
+          remote
+            ? "Current values from GitHub + root TASKS.md"
+            : "Materialized values are evidence, not stronger than M10"
+        }
       >
         <CockpitFacts
           facts={[
@@ -1962,8 +1974,12 @@ function CockpitLegacyOverview({
         />
       </CockpitPanel>
       <CockpitPanel
-        title="Dashboard operational evidence"
-        detail="Current work, waits, blockers, and quality remain provenance-bound"
+        title={remote ? "Remote task evidence" : "Dashboard operational evidence"}
+        detail={
+          remote
+            ? "Current work, waits, blockers, and quality remain remote-bound"
+            : "Current work, waits, blockers, and quality remain provenance-bound"
+        }
       >
         <CockpitList
           title="Current work"
@@ -2062,7 +2078,14 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
         ) : null}
       </CockpitPanel>
       <div className="cockpit-live-grid">
-        <CockpitPanel title="Handoff" detail="M09 structured handoff evidence">
+        <CockpitPanel
+          title="Handoff"
+          detail={
+            snapshot.githubTracking
+              ? "GitHub + root TASKS.md summary"
+              : "M09 structured handoff evidence"
+          }
+        >
           <CockpitList
             title="Current"
             values={snapshot.taskIntelligence?.handoff?.current ?? []}
@@ -2081,7 +2104,11 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
         </CockpitPanel>
         <CockpitPanel
           title="Task authority"
-          detail="Project Dashboard / M08 / M09"
+          detail={
+            snapshot.githubTracking
+              ? "GitHub + root TASKS.md"
+              : "Project Dashboard / M08 / M09"
+          }
         >
           <CockpitFacts
             facts={[
@@ -3421,7 +3448,7 @@ export function Tasks() {
           <div className="project-intelligence-grid">
             <div>
               <span>Entry contract</span>
-                <strong>{githubRemote ? "TASKS.md + latest GitHub commit" : ".hiveai/PROJECT_DASHBOARD.md"}</strong>
+                <strong>{githubRemote ? "GitHub + root TASKS.md" : "Secondary local telemetry"}</strong>
             </div>
             <div>
               <span>Live tracking</span>

@@ -55,7 +55,7 @@ describe("M08 Task Sources live workspace", () => {
     });
     renderTasks();
     expect(await screen.findByText("Project Intelligence / Dashboard Contract")).toBeInTheDocument();
-    expect(screen.getByText(".hiveai/PROJECT_DASHBOARD.md")).toBeInTheDocument();
+    expect(screen.getByText("Secondary local telemetry")).toBeInTheDocument();
     const details = (await screen.findByText("Advanced source inventory (15)")).closest("details");
     expect(details).not.toBeNull();
     expect(details).not.toHaveAttribute("open");

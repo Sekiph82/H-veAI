@@ -1,5 +1,6 @@
 use crate::control_plane;
 use crate::db::DatabaseState;
+use crate::github_tracking::{self, RemoteTrackingSnapshot};
 use crate::projects::fetch_project;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -137,6 +138,11 @@ pub fn resolve(
     project_id: &str,
 ) -> Result<ProjectDashboardResolution, String> {
     let project = fetch_project(database, project_id)?;
+    if github_tracking::is_github_tasks_project(&project) {
+        let remote = github_tracking::refresh_project(database, &project)
+            .unwrap_or_else(|error| github_tracking::unavailable_for_project(&project, error));
+        return Ok(resolve_remote(&project, &remote));
+    }
     let root = PathBuf::from(&project.normalized_path);
     let manifest_path = root.join(MANIFEST_RELATIVE_PATH);
     let base = empty_resolution(project_id, manifest_path.to_string_lossy().into_owned());
@@ -333,6 +339,57 @@ pub fn resolve(
         resolution.provenance_mode = "FALLBACK_M08_M09".into();
     }
     Ok(resolution)
+}
+
+pub(crate) fn resolve_remote(
+    project: &crate::projects::ProjectRecord,
+    remote: &RemoteTrackingSnapshot,
+) -> ProjectDashboardResolution {
+    ProjectDashboardResolution {
+        project_id: project.id.clone(),
+        manifest_status: match remote.remote_health.as_str() {
+            "CURRENT" => ManifestStatus::Valid,
+            "STALE" | "STALE_REMOTE_SNAPSHOT" => ManifestStatus::Stale,
+            "ERROR" => ManifestStatus::Malformed,
+            _ => ManifestStatus::Unavailable,
+        },
+        manifest_path: "TASKS.md".into(),
+        schema: Some("hiveai-task-tracker/root-v1".into()),
+        project_key: Some(remote.project_key.clone()),
+        repository: Some(remote.repository.clone()),
+        branch_policy: Some(remote.branch.clone()),
+        dashboard_mode: Some("GITHUB_TASKS_ONLY".into()),
+        tracking_mode: Some("GITHUB_TASKS_ONLY".into()),
+        refresh_policy: Some("GITHUB_POLL".into()),
+        task_authority: TaskAuthorityState::Canonical,
+        canonical_task_source: Some("TASKS.md".into()),
+        roles: BTreeMap::new(),
+        provenance_mode: "GITHUB_ROOT_TASKS".into(),
+        materialized: MaterializedDashboardStatus {
+            project_status: Some("REMOTE".into()),
+            health: Some(github_tracking::remote_health(remote).into()),
+            current_milestone: remote.current_milestone.clone(),
+            current_task_title: remote.current_task_title.clone(),
+            current_task_id: remote.current_task_id.clone(),
+            declared_workflow_state: remote.workflow_state.clone(),
+            progress_raw: remote.progress_percent.map(|value| format!("{value}%")),
+            progress_percent: remote.progress_percent.map(|value| value.round() as u32),
+            required_actor: remote.required_actor.clone(),
+            next_action: remote.next_action.clone(),
+            waiting_on: None,
+            last_meaningful_update: remote.updated_at.clone(),
+            current_work: Vec::new(),
+            blockers_waiting: remote.blockers.clone(),
+            milestone_summary: Vec::new(),
+            quality_verification: Vec::new(),
+            recent_meaningful_activity: Vec::new(),
+            provenance: vec![MaterializedFact {
+                label: "Source".into(),
+                value: format!("GitHub {}@{}", remote.repository, remote.branch),
+            }],
+        },
+        warnings: Vec::new(),
+    }
 }
 
 fn declares_control_plane_v1(path: &Path) -> bool {

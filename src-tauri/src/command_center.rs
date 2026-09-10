@@ -320,7 +320,7 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
         .iter()
         .all(|summary| summary.task_authority == "GITHUB_TASKS_ONLY")
     {
-        "GitHub remote v3 snapshots".into()
+        "GitHub + root TASKS.md".into()
     } else {
         format!(
             "{canonical_projects} canonical, {fallback_projects} fallback, {not_canonicalized_projects} not canonicalized"

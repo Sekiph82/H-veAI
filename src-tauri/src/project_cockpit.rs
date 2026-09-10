@@ -12,7 +12,6 @@ use crate::task_sources::{self, DiscoveredProjectSource};
 use crate::workflow::{self, WorkflowEvent, WorkflowProjectList};
 use rusqlite::Connection;
 use serde::Serialize;
-use std::collections::BTreeMap;
 
 const MAX_COCKPIT_TASKS: usize = 128;
 const MAX_COCKPIT_HISTORY: usize = 200;
@@ -341,51 +340,13 @@ fn snapshot_remote_primary(
     let remote = github_tracking::refresh_project(database, &project)
         .unwrap_or_else(|error| github_tracking::unavailable_for_project(&project, error));
     let mut local_warnings = Vec::new();
-
-    match project_dashboard::resolve(database, &project.id) {
-        Ok(value) => local_warnings.extend(value.warnings),
-        Err(error) => local_warnings.push(format!("local dashboard: {error}")),
-    }
-    match control_plane::snapshot(database, &project.id) {
-        Ok(value) => local_warnings.extend(value.warnings),
-        Err(error) => local_warnings.push(format!("local control plane: {error}")),
-    }
-    match control_plane::ProjectTruthResolver::resolve(database, &project.id) {
-        Ok(value) => local_warnings.extend(value.warnings),
-        Err(error) => local_warnings.push(format!("local truth resolver: {error}")),
-    }
-    let (task_intelligence, task_intelligence_error) =
-        match crate::task_intelligence::list(database, &project.id) {
-            Ok(value) => (Some(value), None),
-            Err(error) => {
-                local_warnings.push(format!("local task intelligence: {error}"));
-                (None, Some(error))
-            }
-        };
-    let workflow = match workflow::project_list(
-        database,
-        workflow::WorkflowProjectListQuery {
-            project_id: project.id.clone(),
-            limit: Some(MAX_COCKPIT_TASKS),
-        },
-    ) {
-        Ok(value) => value,
-        Err(error) => {
-            local_warnings.push(format!("local workflow: {error}"));
-            WorkflowProjectList {
-                project_id: project.id.clone(),
-                tasks: Vec::new(),
-            }
-        }
+    let task_intelligence = None;
+    let task_intelligence_error = None;
+    let workflow = WorkflowProjectList {
+        project_id: project.id.clone(),
+        tasks: Vec::new(),
     };
-    let workflow_history =
-        match workflow::project_history(database, &project.id, MAX_COCKPIT_HISTORY) {
-            Ok(value) => value,
-            Err(error) => {
-                local_warnings.push(format!("local workflow history: {error}"));
-                Vec::new()
-            }
-        };
+    let workflow_history = Vec::new();
 
     let (git, git_error) = match git_engine::snapshot(
         database,
@@ -532,51 +493,7 @@ fn remote_dashboard(
     project: &ProjectRecord,
     remote: &RemoteTrackingSnapshot,
 ) -> ProjectDashboardResolution {
-    ProjectDashboardResolution {
-        project_id: project.id.clone(),
-        manifest_status: match remote.remote_health.as_str() {
-            "CURRENT" => project_dashboard::ManifestStatus::Valid,
-            "STALE" | "STALE_REMOTE_SNAPSHOT" => project_dashboard::ManifestStatus::Stale,
-            "ERROR" => project_dashboard::ManifestStatus::Malformed,
-            _ => project_dashboard::ManifestStatus::Unavailable,
-        },
-        manifest_path: "TASKS.md".into(),
-        schema: Some("hiveai-task-tracker/root-v1".into()),
-        project_key: Some(remote.project_key.clone()),
-        repository: Some(remote.repository.clone()),
-        branch_policy: Some(remote.branch.clone()),
-        dashboard_mode: Some("GITHUB_TASKS_ONLY".into()),
-        tracking_mode: Some("GITHUB_TASKS_ONLY".into()),
-        refresh_policy: Some("GITHUB_POLL".into()),
-        task_authority: project_dashboard::TaskAuthorityState::Canonical,
-        canonical_task_source: Some("TASKS.md".into()),
-        roles: BTreeMap::new(),
-        provenance_mode: "GITHUB_ROOT_TASKS".into(),
-        materialized: project_dashboard::MaterializedDashboardStatus {
-            project_status: Some("REMOTE".into()),
-            health: Some(github_tracking::remote_health(remote).into()),
-            current_milestone: remote.current_milestone.clone(),
-            current_task_title: remote.current_task_title.clone(),
-            current_task_id: remote.current_task_id.clone(),
-            declared_workflow_state: remote.workflow_state.clone(),
-            progress_raw: remote.progress_percent.map(|value| format!("{value}%")),
-            progress_percent: remote.progress_percent.map(|value| value.round() as u32),
-            required_actor: remote.required_actor.clone(),
-            next_action: remote.next_action.clone(),
-            waiting_on: None,
-            last_meaningful_update: remote.updated_at.clone(),
-            current_work: Vec::new(),
-            blockers_waiting: remote.blockers.clone(),
-            milestone_summary: Vec::new(),
-            quality_verification: Vec::new(),
-            recent_meaningful_activity: Vec::new(),
-            provenance: vec![project_dashboard::MaterializedFact {
-                label: "Source".into(),
-                value: format!("GitHub {}@{}", remote.repository, remote.branch),
-            }],
-        },
-        warnings: Vec::new(),
-    }
+    project_dashboard::resolve_remote(project, remote)
 }
 
 fn remote_control_plane(
@@ -584,7 +501,7 @@ fn remote_control_plane(
     remote: &RemoteTrackingSnapshot,
 ) -> ControlPlaneSnapshot {
     ControlPlaneSnapshot {
-        schema: "github-remote-v3".into(),
+        schema: "github-root-tasks-v1".into(),
         project_id: project.id.clone(),
         project_key: Some(remote.project_key.clone()),
         display_name: project.name.clone(),
@@ -1189,7 +1106,9 @@ mod tests {
             .unwrap()
             .warnings
             .iter()
-            .any(|warning| warning.contains("malformed") || warning.contains("PAG-M02")));
+            .all(|warning| !warning.contains("PROJECT.json") && !warning.contains("PAG-M02")));
+        assert_eq!(cockpit.dashboard.manifest_path, "TASKS.md");
+        assert_eq!(cockpit.control_plane.schema, "github-root-tasks-v1");
     }
 
     #[test]

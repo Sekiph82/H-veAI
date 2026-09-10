@@ -178,6 +178,7 @@ mod app_commands {
     fn hiveai_command_center_snapshot(
         database: tauri::State<'_, DatabaseState>,
     ) -> Result<CommandCenterSnapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
         command_center::snapshot(&database)
     }
 
@@ -201,6 +202,7 @@ mod app_commands {
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
     ) -> Result<ProjectDashboardResolution, String> {
+        github_tracking::ensure_portfolio(&database)?;
         command_center::resolve_project(&database, &project_id)
     }
 
@@ -209,6 +211,7 @@ mod app_commands {
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
     ) -> Result<ProjectCockpitSnapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
         project_cockpit::snapshot(&database, &project_id)
     }
 
@@ -217,6 +220,7 @@ mod app_commands {
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
     ) -> Result<control_plane::ControlPlaneSnapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
         control_plane::snapshot(&database, &project_id)
     }
 
@@ -225,6 +229,11 @@ mod app_commands {
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
     ) -> Result<control_plane::ControlPlaneSnapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
+        let project = projects::fetch_project(&database, &project_id)?;
+        if github_tracking::is_github_tasks_project(&project) {
+            return control_plane::snapshot(&database, &project_id);
+        }
         control_plane::adopt(&database, &project_id)
     }
 
@@ -233,7 +242,11 @@ mod app_commands {
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
     ) -> Result<control_plane::ControlPlaneSnapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
         let project = projects::fetch_project(&database, &project_id)?;
+        if github_tracking::is_github_tasks_project(&project) {
+            return control_plane::snapshot(&database, &project_id);
+        }
         if !control_plane::upgrade_control_plane(&project)?
             && !std::path::Path::new(&project.normalized_path)
                 .join(control_plane::PROJECT_JSON)
@@ -259,6 +272,10 @@ mod app_commands {
         project_id: String,
         auto_fast_forward_enabled: bool,
     ) -> Result<control_plane::GitSyncPlan, String> {
+        let project = projects::fetch_project(&database, &project_id)?;
+        if github_tracking::is_github_tasks_project(&project) {
+            return Err("GitHub-tracked projects use GitHub + root TASKS.md state".into());
+        }
         control_plane::sync_remote(&database, &project_id, auto_fast_forward_enabled)
     }
 
@@ -529,6 +546,7 @@ mod app_commands {
         database: tauri::State<'_, DatabaseState>,
         query: Option<ProjectListQuery>,
     ) -> Result<Vec<ProjectRecord>, String> {
+        github_tracking::ensure_portfolio(&database)?;
         projects::list_projects(&database, query.unwrap_or_default())
     }
 

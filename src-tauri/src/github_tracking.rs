@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::collections::HashMap;
-#[cfg(not(test))]
 use std::collections::HashSet;
 use std::process::Stdio;
 #[cfg(not(test))]
@@ -105,8 +104,14 @@ pub struct RemoteTrackingEvent {
 }
 
 pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
-    const TARGETS: [(&str, &str, &str, &str); 8] = [
+    const TARGETS: [(&str, &str, &str, &str); 9] = [
         ("h-veai", "H-veAI", "Sekiph82/H-veAI", "main"),
+        (
+            "ai-commerce-hq",
+            "AI-Commerce-HQ",
+            "Sekiph82/AI-Commerce-HQ",
+            "H!veAI",
+        ),
         ("bulk-edit", "Bulk-Edit", "Sekiph82/Bulk-Edit", "main"),
         (
             "fmcg-erp-system",
@@ -133,6 +138,7 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
     let connection = database.open_connection()?;
     let transaction = connection.unchecked_transaction().map_err(db_error)?;
     let now = utc_timestamp();
+    let mut target_project_ids = HashSet::new();
     for (_id, name, repository, branch) in TARGETS {
         let mut parts = repository.splitn(2, '/');
         let owner = parts.next().unwrap_or_default();
@@ -169,6 +175,22 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                     .flatten()
             })
             .unwrap_or(target_id);
+        let branch = if repository.eq_ignore_ascii_case("Sekiph82/AI-Commerce-HQ") {
+            transaction
+                .query_row(
+                    "SELECT default_branch FROM projects WHERE id=?1",
+                    [&project_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+                .map_err(db_error)?
+                .flatten()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| branch.to_string())
+        } else {
+            branch.to_string()
+        };
+        target_project_ids.insert(project_id.clone());
         let existing = transaction
             .query_row("SELECT 1 FROM projects WHERE id=?1", [&project_id], |row| {
                 row.get::<_, i64>(0)
@@ -217,6 +239,36 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
             merge_duplicate_project(&transaction, &project_id, &duplicate_id, &now)?;
         }
     }
+    let stale_project_ids = transaction
+        .prepare("SELECT id FROM projects WHERE status <> 'ARCHIVED'")
+        .map_err(db_error)?
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    for stale_project_id in stale_project_ids {
+        if target_project_ids.contains(&stale_project_id) {
+            continue;
+        }
+        transaction
+            .execute(
+                "UPDATE projects SET status='ARCHIVED', archived_at=COALESCE(archived_at, ?2), updated_at=?2 WHERE id=?1",
+                params![stale_project_id, now],
+            )
+            .map_err(db_error)?;
+        transaction
+            .execute(
+                "DELETE FROM github_sync_state WHERE project_id=?1",
+                [&stale_project_id],
+            )
+            .map_err(db_error)?;
+    }
+    transaction
+        .execute(
+            "DELETE FROM github_sync_state WHERE resource_kind <> ?1",
+            [REMOTE_TASKS_RESOURCE_KIND],
+        )
+        .map_err(db_error)?;
     transaction.commit().map_err(db_error)?;
     Ok(())
 }
@@ -927,6 +979,7 @@ pub struct GitHubTrackingManager {
 #[cfg(not(test))]
 impl GitHubTrackingManager {
     pub fn start(database: DatabaseState, app_handle: tauri::AppHandle) -> Result<Self, String> {
+        ensure_portfolio(&database)?;
         let manager = Self {
             database,
             app_handle,
@@ -1254,8 +1307,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(projects.len(), 8);
+        assert_eq!(projects.len(), 9);
         assert!(!projects.iter().any(|project| project.id == duplicate.id));
+        assert!(projects.iter().any(|project| {
+            project
+                .repository
+                .as_ref()
+                .and_then(|repository| repository.github_repo.as_deref())
+                == Some("AI-Commerce-HQ")
+        }));
         let scrubbots = projects
             .iter()
             .find(|project| project.id == "github:Sekiph82/Scrubbots@main")
@@ -1265,5 +1325,71 @@ mod tests {
             Some(GITHUB_TASKS_ONLY_POLICY)
         );
         assert_eq!(scrubbots.normalized_path, duplicate.normalized_path);
+    }
+
+    #[test]
+    fn ensure_portfolio_archives_non_portfolio_persisted_rows() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        ensure_portfolio(&database).unwrap();
+
+        let local_dir = tempdir().unwrap();
+        let extra = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: local_dir.path().to_string_lossy().into_owned(),
+                name: Some("stale persisted project".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            list_projects(
+                &database,
+                ProjectListQuery {
+                    include_archived: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .len(),
+            10
+        );
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES ('legacy-cache', 'github:Sekiph82/H-veAI@main', 'GITHUB_TRACKING_V3', 'legacy', 'now', '{}')",
+                [],
+            )
+            .unwrap();
+
+        ensure_portfolio(&database).unwrap();
+        let active = list_projects(
+            &database,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(active.len(), 9);
+        assert!(!active.iter().any(|project| project.id == extra.id));
+        assert_eq!(
+            crate::projects::fetch_project(&database, &extra.id)
+                .unwrap()
+                .status,
+            "ARCHIVED"
+        );
+        assert_eq!(
+            database
+                .open_connection()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM github_sync_state WHERE resource_kind='GITHUB_TRACKING_V3'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
     }
 }

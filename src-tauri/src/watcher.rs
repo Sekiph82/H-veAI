@@ -310,6 +310,10 @@ impl WatcherManager {
 
     pub fn rescan_project(&self, project_id: &str) -> Result<ProjectWatcherStatus, String> {
         let project = refresh_repository_metadata(&self.database, project_id)?;
+        if github_tracking::is_github_tasks_project(&project) {
+            self.configure_project(project)?;
+            return self.project_status(project_id);
+        }
         let _ = control_plane::converge_physical_adoption(&self.database, project_id);
         self.configure_project(project)?;
         refresh_project_snapshot(&self.database, &self.inner, project_id, Vec::new(), true)?;
@@ -320,7 +324,7 @@ impl WatcherManager {
 
     fn configure_project(&self, project: ProjectRecord) -> Result<(), String> {
         if github_tracking::is_github_tasks_project(&project) {
-            return configure_remote_project(&self.inner, &self.sender, project);
+            return configure_remote_project(&self.inner, project);
         }
         let available = project.status == "ACTIVE" && Path::new(&project.normalized_path).is_dir();
         let single_dashboard = available
@@ -339,7 +343,6 @@ impl WatcherManager {
 
 fn configure_remote_project(
     inner: &Arc<Mutex<Inner>>,
-    _sender: &SyncSender<RawInput>,
     project: ProjectRecord,
 ) -> Result<(), String> {
     let status = ProjectWatcherStatus {
@@ -704,6 +707,10 @@ fn reconcile_active_projects(
     };
     for project in projects {
         if remote_only && !github_tracking::is_github_tasks_project(&project) {
+            continue;
+        }
+        if github_tracking::is_github_tasks_project(&project) {
+            let _ = configure_remote_project(inner, project);
             continue;
         }
         let project = refresh_repository_metadata(database, &project.id).unwrap_or(project);
