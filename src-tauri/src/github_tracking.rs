@@ -495,10 +495,11 @@ pub fn observe_project(
                 persist(database, project, &snapshot)?;
                 Ok((snapshot, RemoteObservationChange::Unchanged))
             }
-            None => Ok((
-                unavailable(&repository_name, &branch, error, fetched_at),
-                RemoteObservationChange::Changed,
-            )),
+            None => {
+                let snapshot = unavailable(&repository_name, &branch, error, fetched_at);
+                persist(database, project, &snapshot)?;
+                Ok((snapshot, RemoteObservationChange::Changed))
+            }
         },
     }
 }
@@ -737,12 +738,14 @@ fn parse_root_tasks(
         .nth(1)
         .unwrap_or(repository)
         .to_string();
-    let current = markdown_field(&raw.tasks, &["Current Task:"]).and_then(|value| {
-        let (id, title) = value
-            .split_once('—')
-            .unwrap_or((value.as_str(), value.as_str()));
-        Some((id.trim().to_string(), title.trim().to_string()))
-    });
+    let current = markdown_field(&raw.tasks, &["Current Task:"])
+        .filter(|value| !value.to_ascii_lowercase().contains("no exact current task"))
+        .and_then(|value| {
+            let (id, title) = value
+                .split_once('—')
+                .unwrap_or((value.as_str(), value.as_str()));
+            Some((id.trim().to_string(), title.trim().to_string()))
+        });
     let current_task_id = current.as_ref().map(|value| value.0.clone());
     let current_task_title = current.as_ref().map(|value| value.1.clone());
     let current_task_status = markdown_field(&raw.tasks, &["Current Task Status:"]);
