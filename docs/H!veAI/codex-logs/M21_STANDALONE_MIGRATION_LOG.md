@@ -12,7 +12,7 @@ Authoritative prompt: [M21 standalone migration and TASKS-only GitHub tracking a
 - Promotion method: the legacy `H!veAI` subtree was copied to the standalone repository root, then root-relative build/runtime paths were repaired. No nested `H!veAI/` wrapper was retained.
 - Intentionally excluded from the promoted tree: generated dependencies, build targets, databases, local caches, and active legacy control-plane runtime files.
 - Required historical prompt/audit/log material was retained under `docs/H!veAI/`; it is not a runtime task source.
-- Final standalone HEAD: `e8eb44f6d0dbc84c393c1ecb17c8ced83c67d8e0`.
+- Final standalone application source HEAD before the immutable log commits: `e8eb44f6d0dbc84c393c1ecb17c8ced83c67d8e0`.
 
 ## Simplified tracking architecture
 
