@@ -5,11 +5,11 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 ## Project Status
 
 - Current Milestone: M16
-- Current Sprint: M16S-CLOSURE
-- Current Task: M16S V02 — Post-M21 local workspace and GPT audit provider closure
-- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_AUDIT_AND_OWNER_NATIVE_ACCEPTANCE
-- Next Task/Action: Independent M16S V02 strict audit and owner native acceptance; M17 remains blocked.
-- Required Actor: HUMAN
+- Current Sprint: M16T-CODEX-ONLY
+- Current Task: M16T V01 — Codex-only audit provider migration
+- Current Task Status: IMPLEMENTATION_IN_PROGRESS
+- Next Task/Action: Remove the OpenAI HTTP audit path and implement the bounded local Codex CLI provider.
+- Required Actor: CODEX
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -18,7 +18,8 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R01 — Standalone remediation closure: remove obsolete production tracking assumptions and verify standalone release
 - [x] M21-R02 — Project Cockpit Tasks and AI-Commerce retirement remediation V02 (independent strict audit PASS and owner native re-acceptance PASS)
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
-- [~] M16S — Post-M21 local workspace and GPT audit provider closure V02 (implementation complete; awaiting independent strict audit and owner native acceptance)
+- [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
+- [~] M16T — Codex-only audit provider migration (implementation in progress; M16 remains OPEN)
 
 # H!veAI MASTER TASKS
 
