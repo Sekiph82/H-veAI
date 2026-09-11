@@ -1,0 +1,38 @@
+Keep the current animation, timing, camera, wordmark reveal, tagline reveal and final hold unchanged.
+
+ONLY correct the following:
+
+1. The AI bee must disappear completely inside the central hive cell immediately after entering it. It must NOT remain visible over the H!veAI emblem during or after the transformation.
+
+2. The hive-to-emblem transformation must be a visible physical reorganization of the existing honeycomb geometry.
+
+Do NOT simply reveal or overlay the H!veAI emblem on top of the hive.
+
+Show the existing hexagonal cells unlocking, sliding, folding and merging:
+- outer honeycomb cells form the official outer hexagonal frame,
+- central geometry reorganizes into the official H,
+- exactly three smaller hexagonal cells move into their final positions beside the H.
+
+The viewer must clearly perceive that the hive itself becomes the H!veAI emblem.
+
+3. Preserve the original H!veAI neon/glass color treatment after the transformation.
+
+Do NOT turn the emblem silver, white or monochrome.
+
+Maintain strong but premium:
+electric cyan,
+deep blue,
+violet,
+magenta
+
+across the outer frame, stylized H and three small hexagons, matching the supplied H!veAI logo reference.
+
+Do not change:
+- Scene 1 atmosphere
+- hive assembly timing
+- bee approach timing
+- logo movement to the left
+- H!veAI wordmark reveal
+- BUILD. AUTOMATE. SCALE. fade-in
+- final composition
+- final 1.2 second stable hold.

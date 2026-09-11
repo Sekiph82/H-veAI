@@ -1,0 +1,485 @@
+Use the provided images with exact pixel colors.
+Do not alter hue, saturation, brightness, contrast or glow.
+Disable all color grading and tone mapping.
+Do not reinterpret or regenerate the input images.
+Disable style transfer, disable recoloring, disable relighting.
+Use the provided images as the actual first frames of the video.
+Do not modify, redraw, upscale or enhance them.
+Only animate transitions between these frames.
+
+Create an 8-second premium cinematic brand intro for H!veAI.
+
+Use the eight supplied scene reference images as the authoritative visual storyboard.
+
+IMPORTANT:
+Do not redesign the H!veAI emblem, wordmark, hive, bee, colors, proportions, lighting style, floor reflections or scene composition.
+
+The supplied images define the visual appearance of each stage.
+
+Your task is to create smooth, cinematic motion BETWEEN these reference states.
+
+Preserve the exact visual language:
+deep black and navy background,
+electric cyan,
+deep blue,
+violet,
+magenta,
+glossy dark reflective floor,
+subtle atmospheric haze,
+premium glass-metal surfaces,
+controlled neon lighting,
+minimal high-end AI technology aesthetic.
+
+The H!veAI spelling must remain exactly:
+
+H!veAI
+
+The tagline must remain exactly:
+
+BUILD. AUTOMATE. SCALE.
+
+No other text.
+
+==================================================
+SCENE 1
+0.0 – 0.7 sec
+EMPTY TECHNOLOGICAL SPACE
+==================================================
+
+START FROM REFERENCE IMAGE 1.
+
+The frame begins almost completely empty.
+
+Deep black and navy environment.
+Subtle electric blue glow on the left.
+Subtle violet-magenta glow on the right.
+Glossy reflective floor.
+
+No logo.
+No hexagons.
+No bee.
+No text.
+
+Only extremely subtle atmospheric light breathing and haze.
+
+Keep the camera perfectly stable.
+
+During the final part of this scene, very faint points of cyan and violet light begin appearing near the central area.
+
+These points prepare the transition into Scene 2.
+
+Do not introduce obvious objects too early.
+
+==================================================
+SCENE 2
+0.7 – 2.1 sec
+HEXAGONAL CELLS BEGIN TO FORM
+==================================================
+
+TRANSITION INTO REFERENCE IMAGE 2.
+
+A small number of isolated technological hexagonal outlines begin materializing from darkness.
+
+At first they are sparse and separated exactly as suggested by Reference Image 2.
+
+Use several different sizes.
+
+They should appear through:
+subtle illumination,
+very small positional movement,
+controlled magnetic alignment,
+soft fade-in.
+
+Do not make them fly chaotically from outside the frame.
+
+More hexagonal cells gradually appear.
+
+The individual cells begin moving toward one another.
+
+They assemble into an increasingly structured technological honeycomb.
+
+The movement must feel:
+precise,
+engineered,
+modular,
+intelligent,
+magnetically coordinated.
+
+By the end of Scene 2, the honeycomb structure should be almost fully assembled and ready to match Scene 3.
+
+No bee yet until the final transition toward Scene 3.
+
+==================================================
+SCENE 3
+2.1 – 3.0 sec
+COMPLETED HIVE + APPROACHING AI BEE
+==================================================
+
+ARRIVE AT REFERENCE IMAGE 3.
+
+The futuristic technological hive is now completely formed.
+
+Preserve the exact dark glass / blue / violet / magenta hexagonal visual language shown in Reference Image 3.
+
+A futuristic AI bee is visible far to the right.
+
+The bee must visually match the supplied reference:
+small,
+technological,
+dark metallic,
+cyan-blue illuminated accents,
+geometric,
+elegant,
+not cute,
+not cartoonish,
+not a natural honeybee.
+
+The bee begins at a distance.
+
+It moves toward the technological hive.
+
+At first the movement is restrained.
+
+Then it smoothly accelerates.
+
+The bee travels toward the central hexagonal cell.
+
+Keep the camera locked.
+
+Do not zoom toward the bee.
+
+Do not move the hive.
+
+The bee should be the only major moving subject.
+
+Near the end of Scene 3, the bee rapidly approaches the center of the hive.
+
+==================================================
+SCENE 4
+3.0 – 4.0 sec
+BEE ENTERS THE CORE / SYSTEM ACTIVATES
+==================================================
+
+ARRIVE AT REFERENCE IMAGE 4.
+
+The bee has entered the central hexagonal cell.
+
+Use Reference Image 4 as the exact visual target for this activation moment.
+
+The central cell becomes intensely illuminated with cyan, white-blue and violet energy.
+
+The bee is visible briefly inside the central energy core.
+
+Then the bee begins disappearing into the core.
+
+A controlled energy pulse travels outward from the center through the connected hexagonal structure.
+
+Illuminate adjacent cells sequentially.
+
+The effect must feel like an intelligent distributed network coming online.
+
+IMPORTANT:
+
+No explosion.
+No destruction.
+No camera shake.
+No fire.
+No smoke.
+No debris storm.
+
+The honeycomb remains structurally intact for a short moment.
+
+Then the cells begin unlocking and reorganizing.
+
+Show the transformation physically.
+
+The hive must NOT simply fade out and be replaced by the logo.
+
+The hexagonal structure must visibly transform into the H!veAI emblem.
+
+Some structures slide and merge into the large outer hexagonal frame.
+
+The inner geometry reorganizes into the stylized H.
+
+Three smaller hexagonal elements move into position on the right side of the H.
+
+The bee itself disappears completely into the activation energy.
+
+By the end of the scene, the hive transformation is nearly complete.
+
+==================================================
+SCENE 5
+4.0 – 4.7 sec
+H!veAI EMBLEM COMPLETE IN THE CENTER
+==================================================
+
+ARRIVE AT REFERENCE IMAGE 5.
+
+The transformation is complete.
+
+Only the finished H!veAI emblem is visible.
+
+No hive remains.
+No bee remains.
+No wordmark yet.
+No tagline yet.
+
+The completed emblem is positioned around the center of the frame exactly as shown in Reference Image 5.
+
+Allow one very subtle cyan-violet activation pulse around its outer hexagonal frame.
+
+Then the entire emblem begins moving smoothly toward its final left-side position.
+
+Use elegant premium easing.
+
+The emblem does not rotate.
+The emblem does not spin.
+The emblem does not change shape.
+The emblem does not shrink dramatically.
+
+It simply glides from its centered position toward the left.
+
+==================================================
+SCENE 6
+4.7 – 6.0 sec
+WORDMARK REVEAL
+==================================================
+
+ARRIVE AT REFERENCE IMAGE 6.
+
+The emblem is now in its final left-side position.
+
+The H!veAI wordmark is already faintly visible, approximately 20–30% revealed, matching Reference Image 6.
+
+The wordmark must read exactly:
+
+H!veAI
+
+Do not alter its typography.
+
+Do not type the characters one by one.
+
+Do not animate individual letters separately.
+
+A narrow horizontal light sweep moves smoothly from left to right across the wordmark.
+
+As the light sweep passes, the complete wordmark becomes increasingly visible.
+
+The wordmark opacity transitions smoothly from its faint initial state to 100%.
+
+Preserve the color treatment:
+white H,
+cyan / blue / violet exclamation mark,
+white “ve”,
+cyan-to-magenta “AI”.
+
+The emblem remains completely unchanged and stationary.
+
+No camera movement.
+
+By the end of Scene 6, the H!veAI wordmark must be fully sharp, fully readable and completely stable.
+
+The tagline is still absent or almost invisible.
+
+==================================================
+SCENE 7
+6.0 – 6.8 sec
+TAGLINE FADE-IN
+==================================================
+
+ARRIVE AT REFERENCE IMAGE 7.
+
+The H!veAI emblem is 100% complete.
+
+The H!veAI wordmark is 100% complete, sharp and fully visible.
+
+Do not modify either one.
+
+The tagline is already faintly visible at approximately 15–25% opacity:
+
+BUILD. AUTOMATE. SCALE.
+
+ONLY animate the tagline during this scene.
+
+Slowly increase its opacity from approximately 20% to 100%.
+
+Apply an extremely subtle tracking animation:
+start with slightly wider letter spacing,
+then gently settle into the final spacing.
+
+No letter-by-letter animation.
+
+No typing.
+
+No bouncing.
+
+No word-by-word reveal.
+
+Do not move:
+the emblem,
+the H!veAI wordmark,
+the camera,
+the composition,
+the background.
+
+Only the tagline changes.
+
+By the end of Scene 7 the tagline becomes fully visible.
+
+==================================================
+SCENE 8
+6.8 – 8.0 sec
+FINAL BRAND LOCKUP
+==================================================
+
+ARRIVE AT REFERENCE IMAGE 8.
+
+This is the final composition.
+
+Preserve it exactly.
+
+The full H!veAI emblem is visible on the left.
+
+The full H!veAI wordmark is sharp and fully visible.
+
+The tagline is completely visible:
+
+BUILD. AUTOMATE. SCALE.
+
+Everything remains stationary.
+
+Do not move the logo.
+Do not move the text.
+Do not alter the spacing.
+Do not regenerate the typography.
+
+The camera remains locked.
+
+Only allow an almost imperceptible ambient blue-violet background breathing effect.
+
+The final composition must remain stable for at least 1.2 seconds.
+
+End directly on this frame.
+
+No fade to black.
+
+This stable final frame will be used to transition directly into the H!veAI interface / website.
+
+==================================================
+CRITICAL CONTINUITY RULES
+==================================================
+
+The eight supplied images are not loose inspiration.
+
+They are sequential storyboard anchors.
+
+Maintain visual continuity between them.
+
+Do not randomly redesign objects between scenes.
+
+The technological hive should evolve naturally from the sparse hexagonal cells.
+
+The bee shown approaching in Scene 3 must be the same bee entering the hive in Scene 4.
+
+The honeycomb in Scene 4 must visibly transform into the H!veAI emblem seen in Scene 5.
+
+The emblem in Scene 5 must be the same exact emblem that moves left in Scene 6.
+
+The wordmark revealed in Scene 6 must remain completely unchanged in Scenes 7 and 8.
+
+The only significant visual change from Scene 7 to Scene 8 is the tagline becoming fully visible.
+
+==================================================
+CAMERA
+==================================================
+
+Use one stable cinematic camera.
+
+Straight-on presentation.
+
+No dramatic orbit.
+No handheld movement.
+No camera shake.
+No fisheye.
+No rapid zoom.
+No spinning camera.
+
+Very subtle cinematic depth is acceptable.
+
+The motion should come from the objects, not from aggressive camera movement.
+
+==================================================
+STYLE
+==================================================
+
+premium AI technology company
+luxury software branding
+futuristic orchestration platform
+cinematic motion graphics
+dark navy-black environment
+electric cyan
+deep blue
+violet
+magenta
+polished glass-metal materials
+subtle reflections
+controlled bloom
+precise modular geometry
+smooth professional easing
+minimal sophisticated animation
+enterprise technology aesthetic
+
+Do NOT make this feel like:
+a gaming intro,
+a movie trailer,
+a cartoon,
+a children's animation,
+a science-fiction battle sequence.
+
+The experience should feel calm, intelligent, engineered and premium.
+
+==================================================
+NEGATIVE REQUIREMENTS
+==================================================
+
+No realistic honeybee.
+No cute bee.
+No cartoon bee.
+No yellow honeycomb.
+No honey.
+No natural beehive.
+No flowers.
+No organic materials.
+No explosion.
+No fire.
+No smoke.
+No debris.
+No particle storm.
+No camera shake.
+No spinning logo.
+No rotating emblem.
+No logo redesign.
+No distorted H.
+No random hexagons remaining after transformation.
+No extra logo elements.
+No misspelled H!veAI.
+No HiveAI.
+No Hive AI.
+No HveAI.
+No H!veAl.
+No H!veA1.
+No missing exclamation mark.
+No distorted wordmark.
+No random letters.
+No typewriter effect.
+No bouncing characters.
+No glitch typography.
+No extra tagline.
+No incorrect tagline.
+No fade to black at the end.
+
+FINAL REQUIRED TEXT:
+
+H!veAI
+
+BUILD. AUTOMATE. SCALE.

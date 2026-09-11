@@ -18,6 +18,14 @@ desktop shell files, and application configuration in this repository root.
 H!veAI is the standalone `Sekiph82/H-veAI` repository on `main`; do not write
 new work into the historical `AI-Commerce-HQ` checkout.
 
+## Versioned artifact naming
+
+Use the stable work-code/two-digit-version convention in
+`docs/H!veAI/HVA-LWC-001_ARTIFACT_NAMING_GOVERNANCE_V01_GOVERNANCE.md` for all
+new prompts, builder logs, audits, and task-specific governance artifacts.
+Never create a new active `RERUN` or `RETRY` artifact; advance the work item
+version instead.
+
 ## Canonical UI Assets
 
 Canonical UI reference assets are located in this repository at:
