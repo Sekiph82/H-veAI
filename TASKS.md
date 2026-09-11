@@ -6,9 +6,9 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 - Current Milestone: M21
 - Current Sprint: M21-MIGRATION
-- Current Task: M21-R02 V02 — Project Cockpit Tasks and AI-Commerce retirement remediation
-- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_V02_AUDIT
-- Next Task/Action: Independent V02 strict audit; owner native re-acceptance remains pending and parent deletion remains prohibited.
+- Current Task: M21-R03 V01 — Standalone relocation and AI-Commerce retirement readiness
+- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_RETIREMENT_AUDIT_AND_OWNER_FINAL_LAUNCH_CONFIRMATION
+- Next Task/Action: Independent M21-R03 retirement audit and owner final double-click confirmation; no deletion has occurred.
 - Required Actor: HUMAN
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
@@ -16,7 +16,8 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 ## Tasks
 - [x] M21-01 — Standalone root migration and GitHub TASKS-only architecture
 - [x] M21-R01 — Standalone remediation closure: remove obsolete production tracking assumptions and verify standalone release
-- [~] M21-R02 — Project Cockpit Tasks and AI-Commerce retirement remediation V02 (V01 failed audit remediated; implementation complete; awaiting independent V02 audit)
+- [x] M21-R02 — Project Cockpit Tasks and AI-Commerce retirement remediation V02 (independent strict audit PASS and owner native re-acceptance PASS)
+- [~] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (implementation complete; awaiting independent retirement audit and owner final launch confirmation; deletion not performed)
 
 # H!veAI MASTER TASKS
 
