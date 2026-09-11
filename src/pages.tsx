@@ -91,6 +91,11 @@ export { PromptEnginePage } from "./PromptEnginePage";
 import { AuditCenterPage } from "./AuditCenterPage";
 export { AuditCenterPage };
 import {
+  getAuditProviderReadiness,
+  setAuditProviderModel,
+  type AuditProviderReadiness,
+} from "./auditEngine";
+import {
   addCustomSourcePath,
   discoverTaskSources,
   listCustomSourcePaths,
@@ -720,8 +725,13 @@ export function Projects() {
                       void act(() => removeProject(project.id));
                   }}
                   onRepair={() => {
+                    const action = project.status === "MISSING"
+                      ? "Repair local workspace"
+                      : project.normalizedPath.trim()
+                        ? "Change local workspace"
+                        : "Attach local workspace";
                     const path = window.prompt(
-                      "Enter the moved project folder path",
+                      `${action}: enter the local project folder path`,
                       project.originalPath,
                     );
                     if (path) {
@@ -1185,8 +1195,13 @@ function LiveProjectCockpit({
     }
   };
   const repair = () => {
+    const workspaceAction = snapshot.project.status === "MISSING"
+      ? "Repair local workspace"
+      : snapshot.project.normalizedPath.trim()
+        ? "Change local workspace"
+        : "Attach local workspace";
     const path = window.prompt(
-      "Enter the moved project folder path",
+      `${workspaceAction}: enter the local project folder path`,
       snapshot.project.originalPath,
     );
     if (!path) return;
@@ -1371,6 +1386,7 @@ function LiveProjectCockpit({
           message={settingsMessage}
           onSave={savePriority}
           onRepair={repair}
+          workspaceActionLabel={snapshot.project.status === "MISSING" ? "Repair local workspace" : snapshot.project.normalizedPath.trim() ? "Change local workspace" : "Attach local workspace"}
           onArchive={archive}
           onRemove={remove}
           autoFastForward={autoFastForward}
@@ -2713,6 +2729,7 @@ function CockpitLiveSettings({
   message,
   onSave,
   onRepair,
+  workspaceActionLabel,
   onArchive,
   onRemove,
   autoFastForward,
@@ -2729,6 +2746,7 @@ function CockpitLiveSettings({
   message: string | null;
   onSave: () => void;
   onRepair: () => void;
+  workspaceActionLabel: string;
   onArchive: () => void;
   onRemove: () => void;
   autoFastForward: boolean;
@@ -2836,7 +2854,7 @@ function CockpitLiveSettings({
             disabled={busy}
           >
             <RefreshCw size={15} />
-            Repair path
+            {workspaceActionLabel}
           </button>
           <button
             className="secondary-button"
@@ -4874,6 +4892,66 @@ export function Settings() {
           <span className="settings-hint">Desktop app only</span>
         ) : null}
       </section>
+      <AuditProviderSettings desktop={desktop} />
     </>
+  );
+}
+
+function AuditProviderSettings({ desktop }: { desktop: boolean }) {
+  const [readiness, setReadiness] = React.useState<AuditProviderReadiness | null>(null);
+  const [model, setModel] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState<string | null>(null);
+
+  const refresh = React.useCallback(async () => {
+    if (!desktop) return;
+    try {
+      const next = await getAuditProviderReadiness();
+      setReadiness(next);
+      setModel(next.model ?? "");
+      setMessage(null);
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, [desktop]);
+
+  React.useEffect(() => { void refresh(); }, [refresh]);
+
+  const saveModel = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const next = await setAuditProviderModel(model);
+      setReadiness(next);
+      setModel(next.model ?? model.trim());
+      setMessage("Audit model setting saved.");
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const status = readiness?.status ?? "NOT_CONFIGURED";
+  return (
+    <section className="panel settings-panel" aria-label="GPT Audit Provider">
+      <SectionHeader title="GPT Audit Provider" detail="Secure OpenAI readiness boundary" />
+      <div className="settings-provider-facts">
+        <span>Provider <b>OpenAI</b></span>
+        <span>Status <b>{status}</b></span>
+        <span>Credential source <b>{readiness?.credentialSource ?? "Not available"}</b></span>
+      </div>
+      <label className="field-label">
+        Audit model
+        <input value={model} onChange={(event) => setModel(event.target.value)} maxLength={128} placeholder="Enter the approved OpenAI model" disabled={!desktop || busy} />
+      </label>
+      <div className="settings-action-row">
+        <button className="primary-button" type="button" onClick={() => void saveModel()} disabled={!desktop || busy || !model.trim()}>Save model</button>
+        <button className="secondary-button" type="button" onClick={() => void refresh()} disabled={!desktop || busy}>Check readiness</button>
+      </div>
+      <p className="settings-hint">The native process reads OPENAI_API_KEY as an environment-only fallback. H!veAI never displays, persists, or returns the credential.</p>
+      {readiness?.errorCategory ? <div className="safe-notice" role="status">{readiness.errorCategory}</div> : null}
+      {message ? <div className="safe-notice" role="status">{message}</div> : null}
+    </section>
   );
 }

@@ -33,7 +33,9 @@ use agent_session_center::{
     SessionEvent,
 };
 #[cfg(not(test))]
-use audit_engine::{AuditInput, AuditInputRequest, AuditRun};
+use audit_engine::{
+    AuditInput, AuditInputRequest, AuditProviderModelRequest, AuditProviderReadiness, AuditRun,
+};
 #[cfg(not(test))]
 use codex_adapter::{AgentAdapter, CodexAdapter, CodexReadiness, CodexSession, CodexStartRequest};
 #[cfg(not(test))]
@@ -488,11 +490,29 @@ mod app_commands {
     }
 
     #[tauri::command]
-    fn hiveai_audit_run(
+    async fn hiveai_audit_run(
         database: tauri::State<'_, DatabaseState>,
         request: AuditInputRequest,
     ) -> Result<AuditRun, String> {
-        audit_engine::run(&database, request)
+        let database = database.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || audit_engine::run(&database, request))
+            .await
+            .map_err(|error| format!("audit provider task failed: {error}"))?
+    }
+
+    #[tauri::command]
+    fn hiveai_audit_provider_readiness(
+        database: tauri::State<'_, DatabaseState>,
+    ) -> Result<AuditProviderReadiness, String> {
+        audit_engine::audit_provider_readiness(&database)
+    }
+
+    #[tauri::command]
+    fn hiveai_audit_provider_set_model(
+        database: tauri::State<'_, DatabaseState>,
+        request: AuditProviderModelRequest,
+    ) -> Result<AuditProviderReadiness, String> {
+        audit_engine::set_audit_provider_model(&database, request)
     }
 
     #[tauri::command]
@@ -811,6 +831,8 @@ mod app_commands {
                 hiveai_prompt_dispatch,
                 hiveai_audit_input_collect,
                 hiveai_audit_run,
+                hiveai_audit_provider_readiness,
+                hiveai_audit_provider_set_model,
                 hiveai_audits_list,
                 hiveai_audit_get,
                 hiveai_audit_create_remediation_prompt,

@@ -15,11 +15,10 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M10A remediation, independent re-audit, and Akilta native click acceptance: PASS/CLOSED.
 - M11 original and remediation failures remain historical evidence; accepted strict audits close M11A REV7 and the final Projects visual cleanup.
 - M11 = PASS/CLOSED.
-- M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16C REV2 remediation closes R63-R73 and is complete pending independent whole-M16 strict re-audit and user native/visual acceptance; M16 remains OPEN; M17-M20 remain planned/blocked, and M21 is not part of this roadmap run.
-- M21 remains planned and was not started.
-- M16F REV3 unified Project Control Plane whole-system remediation is complete pending independent strict re-audit and owner native/visual acceptance; M16 remains OPEN. M17 is not activated and M21 was not started.
-- M16G UCP-R13 through UCP-R18 whole-system remediation is implementation-complete after all eight target-branch migrations and final adversarial sweep; M16 remains OPEN pending independent strict re-audit and owner native/visual acceptance. M17 is not activated and M21 was not started.
-- Strict completed progress remains 16/20 = 80%; M16M closes UCP-R39 through UCP-R42 and is remediation-complete pending independent whole-M16 strict re-audit while M16 remains OPEN; the pre-M10 hotfix is not a numbered roadmap milestone.
+- M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 remains OPEN during M16S closure remediation; M17-M20 remain planned/blocked.
+- M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
+- M16S V01 is implementation-complete pending independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
+- Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16S, and the pre-M10 hotfix is not a numbered roadmap milestone.
 
 ---
 
@@ -434,6 +433,8 @@ Exit: H!veAI can independently audit implementation evidence and drive bounded r
 
 Status: M16C REV2 COMPREHENSIVE REMEDIATION COMPLETE / PENDING INDEPENDENT WHOLE-M16 STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPTANCE. M16 remains OPEN.
 
+The package notes below are historical implementation snapshots. Current prospective truth is recorded above: M21 and M21-R01 through M21-R03 are accepted, M16S is active and awaiting independent audit plus owner native acceptance, and M17 is not activated.
+
 M16A remediation closes M16-R59 through M16-R61 only: explicit prior-finding dispositions, exact Audit -> Prompt Engine -> Agent session provenance, and repository freshness enforcement before persistence. M17 is not activated and M21 was not started.
 
 M16B remediation closes M16-R62 only: fresh UNAVAILABLE and MALFORMED re-audits persist truthfully without prior dispositions or false closure, while AVAILABLE disposition validation and STALE precedence remain unchanged. M17 is not activated and M21 was not started.
@@ -468,7 +469,18 @@ M16M closes UCP-R39 through UCP-R42: physical control-plane adoption is authorit
 
 ### M16O GitHub-first tracking reset
 
-M16O migrates all eight tracked GitHub repositories to the identical v3 contract and makes remote branch snapshots authoritative for Command Center and Project Cockpit current-state fields. M16 remains OPEN at 16/20 = 80% pending independent whole-M16 re-audit and native acceptance. M16N is superseded; M17 and M21 remain inactive.
+M16O migrates all eight tracked GitHub repositories to the identical v3 contract and makes remote branch snapshots authoritative for Command Center and Project Cockpit current-state fields. M16 remains OPEN at 16/20 = 80% pending independent whole-M16 re-audit and native acceptance. M16N is superseded; M17 remains inactive, while M21 and M21-R01 through M21-R03 are accepted as recorded above.
+
+---
+
+## M16S - Post-M21 local workspace and GPT audit provider closure V01
+
+- [x] M16S-F01: secure production OpenAI audit-provider boundary with bounded current Responses API transport, strict structured output, truthful readiness/status handling, and unavailable fallback.
+- [x] M16S-F02: active project workspace attach/change/repair actions reuse the existing project identity and safe path-repair command without creating duplicates.
+- [x] M16S-F03: current TASKS/roadmap truth records accepted M21-R03 closure, historical parent retirement, and M16S implementation status without activating M17.
+- [x] Provider/workspace focused tests, full regression, governed publication, and immutable implementation evidence complete.
+
+M16S IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
 
 ---
 

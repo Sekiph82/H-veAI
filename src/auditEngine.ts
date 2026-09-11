@@ -1,5 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type AuditProviderReadiness = {
+  provider: string;
+  status: "READY" | "NOT_CONFIGURED" | "AUTH_ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
+  configured: boolean;
+  model: string | null;
+  credentialSource: string | null;
+  errorCategory: string | null;
+};
+
 export type VerificationStatus = "VERIFIED" | "CORROBORATED" | "CLAIM_ONLY" | "UNVERIFIED" | "UNAVAILABLE" | "STALE" | "TRUNCATED" | "EXCLUDED" | "PARTIAL";
 export type AuditVerdict = "PASS" | "CONDITIONAL" | "FAIL";
 export type FindingSeverity = "BLOCKER" | "MAJOR" | "MINOR" | "NOTE";
@@ -38,6 +47,12 @@ export function collectAuditInput(projectId: string, taskId: string | null, gitT
 export function runAudit(projectId: string, taskId: string | null, priorAuditId: string | null = null, gitTarget?: AuditGitTarget) {
   const request = gitTarget ? { projectId, taskId, priorAuditId, gitTarget } : { projectId, taskId, priorAuditId };
   return invoke<AuditRun>("hiveai_audit_run", { request });
+}
+export function getAuditProviderReadiness() {
+  return invoke<AuditProviderReadiness>("hiveai_audit_provider_readiness");
+}
+export function setAuditProviderModel(model: string) {
+  return invoke<AuditProviderReadiness>("hiveai_audit_provider_set_model", { request: { model } });
 }
 export function listAudits(projectId: string) {
   return invoke<AuditRun[]>("hiveai_audits_list", { projectId });
