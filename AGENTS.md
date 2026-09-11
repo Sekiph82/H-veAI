@@ -150,6 +150,21 @@ Do not use reset, force-push, destructive checkout, or automatic rebase to make
 this synchronization succeed. If a fast-forward cannot be performed safely,
 stop and report the exact divergence or conflicting tracked changes.
 
+## Permanent Sync-First and GitHub-Only Completion Rule
+
+Every Codex session must fetch and reconcile `origin/main` before reading the
+active prompt. Never silently overwrite, discard, reset, rebase, stash, or
+otherwise damage dirty or divergent local work. All repository changes must be
+committed and pushed before completion is claimed. Before final completion,
+verify that local `HEAD`, `origin/main`, and `git ls-remote origin
+refs/heads/main` are identical. Unsynchronized local edits are incomplete work.
+
+Owner-facing completion responses must be GitHub-first: show the relevant
+GitHub file URLs or repository-relative paths and commit SHAs, rather than
+ordinary local changed-file dumps. Mention local paths only when they are
+needed to explain a blocker or the owner specifically requests a local
+artifact.
+
 ## Session Start
 
 At the start of each milestone:
@@ -160,7 +175,7 @@ At the start of each milestone:
 3. Inspect branch, HEAD, remotes, status, tags, and worktrees from the Git root.
 4. Read the authoritative prior milestone audit and current milestone prompt.
 5. Create or continue the milestone Codex log under
-   `H!veAI/docs/H!veAI/codex-logs/`.
+   `docs/H!veAI/codex-logs/`.
 6. Work only on the active milestone.
 
 ## Strict Audit Governance Standard
