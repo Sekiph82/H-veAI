@@ -165,6 +165,14 @@ ordinary local changed-file dumps. Mention local paths only when they are
 needed to explain a blocker or the owner specifically requests a local
 artifact.
 
+### English-Only Codex Prompt Rule
+
+Every prompt intended for Codex must be written entirely in English. This
+applies to implementation, remediation, audit follow-up, migration, cleanup,
+and governance prompts intended for Codex. This rule does not require the
+owner's conversational messages to ChatGPT to be English, and it does not
+rewrite historical immutable prompt artifacts.
+
 ## Session Start
 
 At the start of each milestone:

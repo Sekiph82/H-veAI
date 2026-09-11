@@ -1,0 +1,66 @@
+{
+  "verifierVersion": "HVA-LWC-001-V03-PRESERVATION-VERIFIER-1.0",
+  "schema": "HVA-LWC-001-V03-PRESERVATION-RECEIPT-1",
+  "verificationTimestampUtc": "2026-09-11T12:53:33.6741596Z",
+  "reparsePointsFollowed": false,
+  "privacyMode": "logical-labels-only",
+  "overallResult": "PASS",
+  "pairs": [
+    {
+      "sourceLabel": "HVA-LWC-001-V01-parent-preservation",
+      "destinationLabel": "HVA-LWC-001-V02-parent-preservation",
+      "sourceFileCount": 89655,
+      "destinationFileCount": 89655,
+      "sourceTotalBytes": 16488188491,
+      "destinationTotalBytes": 16488188491,
+      "sourceManifestSha256": "0e8ec9b01edace9d5ef7cf90633211663a50e8df439141e641093314c6aa4f2c",
+      "destinationManifestSha256": "0e8ec9b01edace9d5ef7cf90633211663a50e8df439141e641093314c6aa4f2c",
+      "countMatch": true,
+      "bytesMatch": true,
+      "manifestMatch": true,
+      "finalResult": "PASS"
+    },
+    {
+      "sourceLabel": "H-veAI-consolidation-retired-20260911",
+      "destinationLabel": "HVA-LWC-001-V02-retired-H-veAI-20260911",
+      "sourceFileCount": 43808,
+      "destinationFileCount": 43808,
+      "sourceTotalBytes": 22836701505,
+      "destinationTotalBytes": 22836701505,
+      "sourceManifestSha256": "546e489c1fbdff94fa5b0194d52fb0fb3988b151e2c1fc1db2df89a35d7ebadd",
+      "destinationManifestSha256": "546e489c1fbdff94fa5b0194d52fb0fb3988b151e2c1fc1db2df89a35d7ebadd",
+      "countMatch": true,
+      "bytesMatch": true,
+      "manifestMatch": true,
+      "finalResult": "PASS"
+    },
+    {
+      "sourceLabel": "HVA-LWC-001-V01-deduplicated",
+      "destinationLabel": "HVA-LWC-001-V02-deduplicated",
+      "sourceFileCount": 6,
+      "destinationFileCount": 6,
+      "sourceTotalBytes": 6240120,
+      "destinationTotalBytes": 6240120,
+      "sourceManifestSha256": "65dbc91c7f8139f1bb9c264c3dcce913fe79aee6737023048037bb70eb7e4de1",
+      "destinationManifestSha256": "65dbc91c7f8139f1bb9c264c3dcce913fe79aee6737023048037bb70eb7e4de1",
+      "countMatch": true,
+      "bytesMatch": true,
+      "manifestMatch": true,
+      "finalResult": "PASS"
+    },
+    {
+      "sourceLabel": "HVA-LWC-001-V01-retired-loose-H!veAI",
+      "destinationLabel": "HVA-LWC-001-V02-retired-loose-H!veAI",
+      "sourceFileCount": 0,
+      "destinationFileCount": 0,
+      "sourceTotalBytes": 0,
+      "destinationTotalBytes": 0,
+      "sourceManifestSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "destinationManifestSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "countMatch": true,
+      "bytesMatch": true,
+      "manifestMatch": true,
+      "finalResult": "EMPTY"
+    }
+  ]
+}
