@@ -534,6 +534,15 @@ const TRUTH_GENERATION_BOOTSTRAP: &str = r#"
 SELECT 1 WHERE 0;
 "#;
 
+const PROJECT_REMOVAL_EXCLUSIONS: &str = r#"
+CREATE TABLE github_project_exclusions (
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    removed_at TEXT NOT NULL,
+    PRIMARY KEY (repository, branch)
+);
+"#;
+
 pub fn migrations() -> &'static [Migration] {
     &[
         Migration {
@@ -646,6 +655,11 @@ pub fn migrations() -> &'static [Migration] {
             name: "truth_generation_zero_bootstrap",
             sql: TRUTH_GENERATION_BOOTSTRAP,
         },
+        Migration {
+            version: 23,
+            name: "github_project_removal_exclusions",
+            sql: PROJECT_REMOVAL_EXCLUSIONS,
+        },
     ]
 }
 
@@ -744,8 +758,8 @@ mod tests {
     fn fresh_database_reaches_latest_version() {
         let (_directory, mut connection) = temp_connection();
         let report = apply_migrations(&mut connection, migrations()).expect("migrations apply");
-        assert_eq!(report.schema_version, 22);
-        assert_eq!(report.migration_count, 22);
+        assert_eq!(report.schema_version, 23);
+        assert_eq!(report.migration_count, 23);
         assert_eq!(report.last_migration_status, "APPLIED");
     }
 
@@ -755,7 +769,7 @@ mod tests {
         apply_migrations(&mut connection, migrations()).expect("first apply");
         let report = apply_migrations(&mut connection, migrations()).expect("second apply");
         assert_eq!(report.last_migration_status, "ALREADY_CURRENT");
-        assert_eq!(report.migration_count, 22);
+        assert_eq!(report.migration_count, 23);
     }
 
     #[test]
@@ -866,7 +880,7 @@ mod tests {
         let (_directory, mut connection) = temp_connection();
         let first = apply_migrations(&mut connection, migrations()).expect("first apply");
         let second = apply_migrations(&mut connection, migrations()).expect("rerun");
-        assert_eq!(first.schema_version, 22);
+        assert_eq!(first.schema_version, 23);
         assert_eq!(second.last_migration_status, "ALREADY_CURRENT");
         let mismatch = [Migration {
             version: 1,
@@ -915,6 +929,7 @@ mod tests {
                 (20, "durable_truth_sync_projection".to_string()),
                 (21, "transactional_truth_generation".to_string()),
                 (22, "truth_generation_zero_bootstrap".to_string()),
+                (23, "github_project_removal_exclusions".to_string()),
             ]
         );
     }
@@ -1119,6 +1134,7 @@ mod tests {
             "settings",
             "audit_evidence",
             "audit_requirement_coverage",
+            "github_project_exclusions",
             "migrations",
         ] {
             assert_eq!(

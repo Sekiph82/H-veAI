@@ -132,6 +132,17 @@ pub fn register_project(
         .and_then(non_empty)
         .unwrap_or_else(|| folder_name(&validated.canonical_path));
     let tx = connection.unchecked_transaction().map_err(db_error)?;
+    if let (Some(owner), Some(repo), Some(branch)) = (
+        git.github_owner.as_deref(),
+        git.github_repo.as_deref(),
+        git.default_branch.as_deref(),
+    ) {
+        tx.execute(
+            "DELETE FROM github_project_exclusions WHERE lower(repository)=lower(?1) AND branch=?2",
+            params![format!("{owner}/{repo}"), branch],
+        )
+        .map_err(db_error)?;
+    }
     tx.execute(
         "INSERT INTO projects (id, name, local_path, status, priority, created_at, updated_at, original_path, normalized_path, registered_at, last_validated_at, task_source_policy) VALUES (?1, ?2, ?3, 'ACTIVE', 0, ?4, ?4, ?5, ?6, ?4, ?4, 'DISCOVER_STANDARD_FILES')",
         params![project_id, name, validated.canonical_path.to_string_lossy(), now, validated.display_path, validated.normalized_path],
@@ -202,8 +213,8 @@ pub fn update_project_settings(
 ) -> Result<ProjectRecord, String> {
     let connection = database.open_connection()?;
     let updated = connection.execute(
-        "UPDATE projects SET priority = COALESCE(?2, priority), preferred_builder = COALESCE(?3, preferred_builder), preferred_auditor = COALESCE(?4, preferred_auditor), task_source_policy = COALESCE(?5, task_source_policy), preferred_agent_provider = COALESCE(?6, preferred_agent_provider), updated_at = ?7 WHERE id = ?1",
-        params![request.project_id, request.priority, request.preferred_builder.and_then(non_empty), request.preferred_auditor.and_then(non_empty), request.task_source_policy.and_then(non_empty), request.preferred_agent_provider.and_then(validate_agent_provider), timestamp()],
+        "UPDATE projects SET priority = COALESCE(?2, priority), preferred_builder = CASE WHEN ?3 IS NULL THEN preferred_builder ELSE NULLIF(TRIM(?3), '') END, preferred_auditor = CASE WHEN ?4 IS NULL THEN preferred_auditor ELSE NULLIF(TRIM(?4), '') END, task_source_policy = COALESCE(?5, task_source_policy), preferred_agent_provider = COALESCE(?6, preferred_agent_provider), updated_at = ?7 WHERE id = ?1",
+        params![request.project_id, request.priority, request.preferred_builder.map(|value| value.trim().to_string()), request.preferred_auditor.map(|value| value.trim().to_string()), request.task_source_policy.and_then(non_empty), request.preferred_agent_provider.and_then(validate_agent_provider), timestamp()],
     ).map_err(db_error)?;
     if updated == 0 {
         return Err("project is not registered".to_string());
@@ -227,13 +238,30 @@ pub fn archive_project(
 }
 
 pub fn remove_project(database: &DatabaseState, project_id: &str) -> Result<(), String> {
-    let connection = database.open_connection()?;
-    let deleted = connection
+    let mut connection = database.open_connection()?;
+    let identity: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT r.github_owner, r.github_repo, COALESCE(r.default_branch, p.default_branch, 'main') FROM projects p JOIN repositories r ON r.project_id=p.id WHERE p.id=?1 AND r.github_owner IS NOT NULL AND r.github_repo IS NOT NULL",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    let tx = connection.unchecked_transaction().map_err(db_error)?;
+    if let Some((owner, repo, branch)) = identity {
+        tx.execute(
+            "INSERT INTO github_project_exclusions (repository, branch, removed_at) VALUES (?1, ?2, ?3) ON CONFLICT(repository, branch) DO UPDATE SET removed_at=excluded.removed_at",
+            params![format!("{owner}/{repo}"), branch, timestamp()],
+        )
+        .map_err(db_error)?;
+    }
+    let deleted = tx
         .execute("DELETE FROM projects WHERE id = ?1", [project_id])
         .map_err(db_error)?;
     if deleted == 0 {
         return Err("project is not registered".to_string());
     }
+    tx.commit().map_err(db_error)?;
     Ok(())
 }
 
@@ -296,6 +324,17 @@ pub fn repair_project_path(
     }
     let now = timestamp();
     let tx = connection.unchecked_transaction().map_err(db_error)?;
+    if let (Some(owner), Some(repo), Some(branch)) = (
+        git.github_owner.as_deref(),
+        git.github_repo.as_deref(),
+        git.default_branch.as_deref(),
+    ) {
+        tx.execute(
+            "DELETE FROM github_project_exclusions WHERE lower(repository)=lower(?1) AND branch=?2",
+            params![format!("{owner}/{repo}"), branch],
+        )
+        .map_err(db_error)?;
+    }
     let updated = tx.execute("UPDATE projects SET local_path = ?2, original_path = ?3, normalized_path = ?4, status = 'ACTIVE', archived_at = NULL, last_validated_at = ?5, updated_at = ?5 WHERE id = ?1", params![request.project_id, validated.canonical_path.to_string_lossy(), validated.display_path, validated.normalized_path, now]).map_err(db_error)?;
     if updated == 0 {
         return Err("project is not registered".to_string());
@@ -1082,6 +1121,62 @@ mod tests {
             .unwrap()
             .len(),
             1
+        );
+    }
+
+    #[test]
+    fn github_removal_is_durable_until_explicit_reregister() {
+        let (_db_dir, database) = database();
+        let project_dir = tempdir().unwrap();
+        git(project_dir.path(), &["init", "-q"]);
+        git(project_dir.path(), &["config", "user.name", "Test"]);
+        git(project_dir.path(), &["config", "user.email", "test@example.com"]);
+        std::fs::write(project_dir.path().join("README.md"), "fixture").unwrap();
+        git(project_dir.path(), &["add", "README.md"]);
+        git(project_dir.path(), &["commit", "-qm", "fixture"]);
+        git(
+            project_dir.path(),
+            &["remote", "add", "origin", "https://github.com/Sekiph82/example.git"],
+        );
+        let project = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into_owned(),
+                name: Some("Example".into()),
+            },
+        )
+        .unwrap();
+        remove_project(&database, &project.id).unwrap();
+        let connection = database.open_connection().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM github_project_exclusions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into_owned(),
+                name: Some("Example restored".into()),
+            },
+        )
+        .unwrap();
+        let connection = database.open_connection().unwrap();
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM github_project_exclusions",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
         );
     }
 }

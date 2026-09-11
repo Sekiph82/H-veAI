@@ -74,13 +74,12 @@ describe("M11 Command Center evidence surface", () => {
     await waitFor(() => expect(window.location.pathname).toBe("/projects/project-2"));
   });
 
-  it("keeps home activity compact and leaves full history to the Activity route", async () => {
+  it("keeps the home surface focused and leaves activity to its dedicated route", async () => {
     renderCommandCenter();
-    await screen.findAllByText("Task parsed");
-    expect(screen.getByText("Recent activity")).toBeInTheDocument();
+    expect(await screen.findByText("Active Work Queue")).toBeInTheDocument();
+    expect(screen.queryByText("Recent activity")).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Search recent activity" })).not.toBeInTheDocument();
-    expect(screen.getByText("View activity")).toBeInTheDocument();
-    expect(screen.getByText("Active Work Queue")).toBeInTheDocument();
+    expect(screen.queryByText("View activity")).not.toBeInTheDocument();
   });
 
   it("uses a neutral browser preview identity without fixture actions", async () => {

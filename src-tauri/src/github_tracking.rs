@@ -145,6 +145,18 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
         let owner = parts.next().unwrap_or_default();
         let repo = parts.next().unwrap_or_default();
         let target_id = format!("github:{repository}@{branch}");
+        let excluded: bool = transaction
+            .query_row(
+                "SELECT 1 FROM github_project_exclusions WHERE lower(repository)=lower(?1) AND branch=?2",
+                params![repository, branch],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .is_some();
+        if excluded {
+            continue;
+        }
         let project_id: String = transaction
             .query_row(
                 "SELECT p.id FROM projects p JOIN repositories r ON r.project_id=p.id WHERE p.id=?1 LIMIT 1",
@@ -778,7 +790,12 @@ fn parse_root_tasks(
         .unwrap_or(repository)
         .to_string();
     let current = markdown_field(&raw.tasks, &["Current Task:"])
-        .filter(|value| !value.to_ascii_lowercase().contains("no exact current task"))
+        .filter(|value| {
+            let normalized = value.to_ascii_lowercase();
+            !normalized.contains("no exact current task")
+                && !normalized.contains("no active task")
+                && !normalized.starts_with("none")
+        })
         .and_then(|value| {
             let (id, title) = value
                 .split_once('—')
@@ -794,6 +811,10 @@ fn parse_root_tasks(
         &raw.tasks,
         &["Next Task/Action:", "Next Action:", "Next Task:"],
     );
+    let next_value = next_value.filter(|value| {
+        let normalized = value.to_ascii_lowercase();
+        !normalized.starts_with("none") && !normalized.contains("no future task")
+    });
     let next_task = next_value
         .as_ref()
         .and_then(|value| value.split_once('—'))

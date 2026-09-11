@@ -66,8 +66,12 @@ export function repairProjectPath(projectId: string, path: string) {
   return invoke<ProjectRecord>('hiveai_project_repair_path', { request: { projectId, path } });
 }
 
-export function updateProjectSettings(projectId: string, priority: number, preferredAgentProvider?: 'CODEX' | 'CLAUDE' | null) {
-  return invoke<ProjectRecord>('hiveai_project_update_settings', { request: { projectId, priority, preferredAgentProvider } });
+export function updateProjectSettings(projectId: string, priority: number, preferredAgentProvider?: 'CODEX' | 'CLAUDE' | null, preferredBuilder?: string | null, preferredAuditor?: string | null) {
+  const request: Record<string, unknown> = { projectId, priority };
+  if (preferredAgentProvider !== undefined) request.preferredAgentProvider = preferredAgentProvider;
+  if (preferredBuilder !== undefined) request.preferredBuilder = preferredBuilder;
+  if (preferredAuditor !== undefined) request.preferredAuditor = preferredAuditor;
+  return invoke<ProjectRecord>('hiveai_project_update_settings', { request });
 }
 
 export function refreshWatcherSet() {

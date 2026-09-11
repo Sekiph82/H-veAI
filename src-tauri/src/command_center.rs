@@ -545,7 +545,10 @@ fn apply_remote_tracking(summary: &mut ProjectOperationSummary, remote: &RemoteT
     }
     .into();
     summary.health = github_tracking::remote_health(remote).into();
-    summary.current_state = remote.workflow_state.clone();
+    summary.current_state = remote
+        .current_task_status
+        .clone()
+        .or_else(|| remote.workflow_state.clone());
     summary.next_action = remote.next_action.clone();
     summary.allowed_actors = remote.required_actor.clone().into_iter().collect();
     summary.progress_percent = remote.progress_percent.map(|value| value.round() as u8);
@@ -565,8 +568,9 @@ fn apply_remote_tracking(summary: &mut ProjectOperationSummary, remote: &RemoteT
             title,
             source_path: "TASKS.md".into(),
             parsed_status: remote
-                .workflow_state
+                .current_task_status
                 .clone()
+                .or_else(|| remote.workflow_state.clone())
                 .unwrap_or_else(|| "REMOTE".into()),
             workflow_state: remote.workflow_state.clone(),
             required_actor: remote.required_actor.clone(),
@@ -664,8 +668,9 @@ fn remote_queue(project: &ProjectRecord, remote: &RemoteTrackingSnapshot) -> Opt
         task,
         stage,
         state: remote
-            .workflow_state
+            .current_task_status
             .clone()
+            .or_else(|| remote.workflow_state.clone())
             .unwrap_or_else(|| "UNKNOWN".into()),
         actor: remote.required_actor.clone(),
         updated_at: remote
@@ -1573,10 +1578,15 @@ fn attention_state(state: WorkflowState) -> bool {
     )
 }
 fn is_running_state(state: &str) -> bool {
+    let normalized = state.trim().to_ascii_uppercase();
     matches!(
-        state,
-        "BUILDER_RUNNING" | "AUDIT_RUNNING" | "VERIFY_RUNNING"
-    )
+        normalized.as_str(),
+        "RUNNING" | "IN_PROGRESS" | "IMPLEMENTING" | "EXECUTING" | "WORKING"
+    ) || normalized.ends_with("_RUNNING")
+        || normalized.ends_with("_IN_PROGRESS")
+        || normalized.ends_with("_IMPLEMENTING")
+        || normalized.ends_with("_EXECUTING")
+        || normalized.ends_with("_WORKING")
 }
 
 fn read_evidence_items(
@@ -2003,6 +2013,7 @@ mod tests {
     #[test]
     fn m11_current_task_selection_is_deterministic() {
         assert!(is_running_state("BUILDER_RUNNING"));
+        assert!(is_running_state("IN_PROGRESS"));
         assert!(!is_running_state("READY_FOR_IMPLEMENTATION"));
     }
 

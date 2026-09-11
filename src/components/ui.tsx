@@ -29,9 +29,11 @@ export function PageHeader({ eyebrow, title, description, action }: { eyebrow?: 
 
 export function SectionHeader({ title, detail, action }: { title: string; detail?: string; action?: React.ReactNode }) { return <div className="section-header"><div><h2>{title}</h2>{detail ? <span>{detail}</span> : null}</div>{action}</div>; }
 
+export function formatPercent(value: number | null | undefined) { return value == null ? "Unknown" : `${value.toFixed(2)}%`; }
+
 export function MetricCard({ label, value, detail, tone = 'default' }: { label: string; value: string; detail?: string; tone?: string }) { return <MotionArticle className={`metric-card metric-${tone}`} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}><span>{label}</span><strong>{value}</strong>{detail ? <small>{detail}</small> : null}</MotionArticle>; }
 
-export function ProgressIndicator({ value }: { value: number }) { return <div className="progress-wrap"><div className="progress-track"><MotionDiv className="progress-fill" initial={{ width: 0 }} animate={{ width: `${value}%` }} transition={{ duration: 0.7 }} /></div><span>{value}%</span></div>; }
+export function ProgressIndicator({ value }: { value: number }) { return <div className="progress-wrap"><div className="progress-track"><MotionDiv className="progress-fill" initial={{ width: 0 }} animate={{ width: `${value}%` }} transition={{ duration: 0.7 }} /></div><span>{formatPercent(value)}</span></div>; }
 
 export function PrimaryActionButton({ children, onClick, ariaLabel }: { children: React.ReactNode; onClick?: () => void; ariaLabel?: string }) { return <button className="primary-button" type="button" onClick={onClick} aria-label={ariaLabel}>{children}<ArrowUpRight size={15} aria-hidden="true" /></button>; }
 

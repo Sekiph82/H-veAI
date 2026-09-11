@@ -31,6 +31,7 @@ import {
   PageHeader,
   PrimaryActionButton,
   ProgressIndicator,
+  formatPercent,
   ProjectOperationCard,
   SectionHeader,
   StatusBadge,
@@ -1127,6 +1128,8 @@ function LiveProjectCockpit({
   const [priority, setPriority] = React.useState(
     String(snapshot.project.priority),
   );
+  const [builder, setBuilder] = React.useState(snapshot.project.preferredBuilder ?? "");
+  const [auditor, setAuditor] = React.useState(snapshot.project.preferredAuditor ?? "");
   const [settingsMessage, setSettingsMessage] = React.useState<string | null>(
     null,
   );
@@ -1137,6 +1140,11 @@ function LiveProjectCockpit({
   const [autoFastForward, setAutoFastForward] = React.useState(
     snapshot.controlPlane?.autoFastForwardEnabled ?? false,
   );
+  React.useEffect(() => {
+    setPriority(String(snapshot.project.priority));
+    setBuilder(snapshot.project.preferredBuilder ?? "");
+    setAuditor(snapshot.project.preferredAuditor ?? "");
+  }, [snapshot.project.id, snapshot.project.priority, snapshot.project.preferredBuilder, snapshot.project.preferredAuditor]);
   const tabs = [
     "Overview",
     "Tasks",
@@ -1164,7 +1172,7 @@ function LiveProjectCockpit({
     setSettingsBusy(true);
     setSettingsMessage(null);
     try {
-      await updateProjectSettings(snapshot.project.id, nextPriority);
+      await updateProjectSettings(snapshot.project.id, nextPriority, undefined, builder, auditor);
       setSettingsMessage("Registry settings saved.");
       onRefresh();
     } catch (caught) {
@@ -1354,6 +1362,10 @@ function LiveProjectCockpit({
           snapshot={snapshot}
           priority={priority}
           setPriority={setPriority}
+          builder={builder}
+          setBuilder={setBuilder}
+          auditor={auditor}
+          setAuditor={setAuditor}
           busy={settingsBusy}
           message={settingsMessage}
           onSave={savePriority}
@@ -1434,7 +1446,7 @@ function CockpitLiveOverview({
         <div className="cockpit-live-progress">
           <span>Remote milestone progress</span>
           <strong>
-            {progress == null ? "Unknown" : String(progress) + "%"}
+            {formatPercent(progress)}
           </strong>
           {progress != null ? (
             <ProgressIndicator value={progress} />
@@ -1494,8 +1506,8 @@ function CockpitLiveOverview({
                 "Progress",
                 remote.progressPercent == null
                   ? "Unknown"
-                  : String(remote.progressPercent) +
-                    "% (" +
+                  : formatPercent(remote.progressPercent) +
+                    " (" +
                     (remote.progressCompleted ?? 0) +
                     "/" +
                     (remote.progressTotal ?? 0) +
@@ -1722,7 +1734,7 @@ function CockpitLegacyOverview({
           <strong>
             {summary.progressPercent == null
               ? "Unknown"
-              : `${summary.progressPercent}%`}
+              : formatPercent(summary.progressPercent)}
           </strong>
           {summary.progressPercent != null ? (
             <ProgressIndicator value={summary.progressPercent} />
@@ -1758,7 +1770,7 @@ function CockpitLegacyOverview({
                 "Progress",
                 remote.progressPercent == null
                   ? "Unknown"
-                  : `${remote.progressPercent}% (${remote.progressCompleted ?? 0}/${remote.progressTotal ?? 0})`,
+                  : `${formatPercent(remote.progressPercent)} (${remote.progressCompleted ?? 0}/${remote.progressTotal ?? 0})`,
               ],
               ["Required actor", remote.requiredActor ?? "Unknown"],
               ["Next action", remote.nextAction ?? "Unknown"],
@@ -2650,6 +2662,10 @@ function CockpitLiveSettings({
   snapshot,
   priority,
   setPriority,
+  builder,
+  setBuilder,
+  auditor,
+  setAuditor,
   busy,
   message,
   onSave,
@@ -2662,6 +2678,10 @@ function CockpitLiveSettings({
   snapshot: ProjectCockpitSnapshot;
   priority: string;
   setPriority: (value: string) => void;
+  builder: string;
+  setBuilder: (value: string) => void;
+  auditor: string;
+  setAuditor: (value: string) => void;
   busy: boolean;
   message: string | null;
   onSave: () => void;
@@ -2694,6 +2714,22 @@ function CockpitLiveSettings({
           ]}
         />
         <label className="cockpit-setting-field">
+          Preferred builder
+          <select value={builder} onChange={(event) => setBuilder(event.target.value)} disabled={busy}>
+            <option value="">Unassigned</option>
+            <option value="CODEX">Codex</option>
+            <option value="CLAUDE">Claude</option>
+          </select>
+        </label>
+        <label className="cockpit-setting-field">
+          Preferred auditor
+          <select value={auditor} onChange={(event) => setAuditor(event.target.value)} disabled={busy}>
+            <option value="">Unassigned</option>
+            <option value="GPT Audit">GPT Audit</option>
+            <option value="ChatGPT">ChatGPT</option>
+          </select>
+        </label>
+        <label className="cockpit-setting-field">
           Priority
           <select
             value={priority}
@@ -2712,7 +2748,7 @@ function CockpitLiveSettings({
           disabled={busy}
         >
           <Check size={15} />
-          Save priority
+          Save registry settings
         </button>
         {message ? (
           <div className="safe-notice" role="status">
@@ -3377,7 +3413,7 @@ export function Tasks() {
     (desktop ? "UNAVAILABLE" : "BROWSER_PREVIEW");
   const githubRemote = commandProject?.taskAuthority === "GITHUB_TASKS_ONLY";
   const running = commandProject?.currentState
-    ? /RUN|IN_PROGRESS|IMPLEMENT|EXECUT|WORKING/i.test(commandProject.currentState)
+    ? /^(RUNNING|IN_PROGRESS|IMPLEMENTING|EXECUTING|WORKING)$|_(RUNNING|IN_PROGRESS|IMPLEMENTING|EXECUTING|WORKING)$/i.test(commandProject.currentState)
     : false;
   return (
     <>
@@ -3403,7 +3439,7 @@ export function Tasks() {
           <div className="task-status-next"><span className="eyebrow">Next action</span><strong>{commandProject?.nextAction ?? "Unavailable"}</strong><small>Required actor: {commandProject?.githubTracking?.requiredActor ?? "Unavailable"}</small></div>
           <div className="task-status-counts"><span><b>{commandProject?.activeTasks == null ? "Unavailable" : commandProject.activeTasks}</b>Active/open</span><span><b>{running ? "1" : commandProject?.currentState ? "0" : "Unavailable"}</b>Running</span><span><b>{commandProject?.completedTasks == null ? "Unavailable" : commandProject.completedTasks}</b>Completed</span><span><b>{commandProject?.totalTasks == null ? "Unavailable" : commandProject.totalTasks}</b>Total</span></div>
         </div>
-        <div className="task-status-footer"><span>Completion: {commandProject?.progressPercent == null ? "Unavailable" : `${commandProject.progressPercent}%`}</span><span>Milestone: {commandProject?.githubTracking?.currentMilestone ?? "Unavailable"}</span><span>Execution: {commandProject?.githubTracking?.workflowState ?? "Unavailable"}</span><span>Last completed: {commandProject?.githubTracking?.lastCompletedTaskTitle ?? "Unavailable"}</span></div>
+          <div className="task-status-footer"><span>Completion: {commandProject?.progressPercent == null ? "Unavailable" : formatPercent(commandProject.progressPercent)}</span><span>Milestone: {commandProject?.githubTracking?.currentMilestone ?? "Unavailable"}</span><span>Execution: {commandProject?.githubTracking?.workflowState ?? "Unavailable"}</span><span>Last completed: {commandProject?.githubTracking?.lastCompletedTaskTitle ?? "Unavailable"}</span></div>
         {commandProject?.githubTracking?.blockers.length ? <div className="project-intelligence-warning">{commandProject.githubTracking.blockers.join(" | ")}</div> : null}
       </section>
       <section className="panel task-sources-workspace">
