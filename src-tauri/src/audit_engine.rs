@@ -499,9 +499,12 @@ impl AuditModel for FixtureAuditModel {
 }
 
 const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const OPENAI_MODEL_URL_PREFIX: &str = "https://api.openai.com/v1/models/";
 const OPENAI_MODEL_SETTING: &str = "audit.openai.model";
 const MAX_PROVIDER_RESPONSE_BYTES: usize = MAX_MODEL_OUTPUT_BYTES * 2;
 const PROVIDER_TIMEOUT: Duration = Duration::from_secs(60);
+const READINESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -522,6 +525,7 @@ pub struct AuditProviderModelRequest {
 
 trait AuditHttpTransport: Send + Sync {
     fn post_responses(&self, api_key: &str, body: &Value) -> Result<AuditHttpResponse, String>;
+    fn get_model(&self, api_key: &str, model: &str) -> Result<AuditHttpResponse, String>;
 }
 
 #[derive(Debug, Clone)]
@@ -543,11 +547,37 @@ impl ReqwestAuditTransport {
             .map(|client| Self { client })
             .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: HTTPS client unavailable".into())
     }
+
+    fn readiness() -> Result<Self, String> {
+        reqwest::blocking::Client::builder()
+            .connect_timeout(READINESS_CONNECT_TIMEOUT)
+            .timeout(READINESS_TIMEOUT)
+            .build()
+            .map(|client| Self { client })
+            .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: HTTPS readiness client unavailable".into())
+    }
+}
+
+fn read_bounded_response(mut response: reqwest::blocking::Response) -> Result<AuditHttpResponse, String> {
+    let status = response.status().as_u16();
+    let mut bytes = Vec::new();
+    response
+        .take((MAX_PROVIDER_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: response could not be read".to_string())?;
+    if bytes.len() > MAX_PROVIDER_RESPONSE_BYTES {
+        return Err("AUDIT_MODEL_OUTPUT_TRUNCATED: provider response exceeded the bounded response limit".into());
+    }
+    Ok(AuditHttpResponse {
+        status,
+        body: String::from_utf8(bytes)
+            .map_err(|_| "AUDIT_MODEL_SCHEMA_INVALID: provider response was not UTF-8".to_string())?,
+    })
 }
 
 impl AuditHttpTransport for ReqwestAuditTransport {
     fn post_responses(&self, api_key: &str, body: &Value) -> Result<AuditHttpResponse, String> {
-        let mut response = self
+        let response = self
             .client
             .post(OPENAI_RESPONSES_URL)
             .bearer_auth(api_key)
@@ -560,20 +590,23 @@ impl AuditHttpTransport for ReqwestAuditTransport {
                     "AUDIT_PROVIDER_NETWORK_ERROR: request failed".to_string()
                 }
             })?;
-        let status = response.status().as_u16();
-        let mut bytes = Vec::new();
-        response
-            .take((MAX_PROVIDER_RESPONSE_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: response could not be read".to_string())?;
-        if bytes.len() > MAX_PROVIDER_RESPONSE_BYTES {
-            return Err("AUDIT_MODEL_OUTPUT_TRUNCATED: provider response exceeded the bounded response limit".into());
-        }
-        Ok(AuditHttpResponse {
-            status,
-            body: String::from_utf8(bytes)
-                .map_err(|_| "AUDIT_MODEL_SCHEMA_INVALID: provider response was not UTF-8".to_string())?,
-        })
+        read_bounded_response(response)
+    }
+
+    fn get_model(&self, api_key: &str, model: &str) -> Result<AuditHttpResponse, String> {
+        let response = self
+            .client
+            .get(format!("{OPENAI_MODEL_URL_PREFIX}{model}"))
+            .bearer_auth(api_key)
+            .send()
+            .map_err(|error| {
+                if error.is_timeout() {
+                    "AUDIT_PROVIDER_NETWORK_ERROR: readiness request timed out".to_string()
+                } else {
+                    "AUDIT_PROVIDER_NETWORK_ERROR: readiness request failed".to_string()
+                }
+            })?;
+        read_bounded_response(response)
     }
 }
 
@@ -676,7 +709,11 @@ pub fn audit_provider_readiness(
     };
     Ok(AuditProviderReadiness {
         provider: "OpenAI".into(),
-        status: if missing.is_none() { "READY".into() } else { "NOT_CONFIGURED".into() },
+        status: if missing.is_none() {
+            "CONFIGURED_UNVERIFIED".into()
+        } else {
+            "NOT_CONFIGURED".into()
+        },
         configured: missing.is_none(),
         model,
         credential_source: key_configured.then(|| "OPENAI_API_KEY environment".into()),
@@ -684,12 +721,129 @@ pub fn audit_provider_readiness(
     })
 }
 
+fn model_name_is_safe(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 128
+        && model
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':'))
+}
+
+fn readiness_result(
+    model: Option<String>,
+    status: &str,
+    error_category: Option<&str>,
+) -> AuditProviderReadiness {
+    AuditProviderReadiness {
+        provider: "OpenAI".into(),
+        status: status.into(),
+        configured: matches!(status, "READY" | "CONFIGURED_UNVERIFIED"),
+        model,
+        credential_source: Some("OPENAI_API_KEY environment".into()),
+        error_category: error_category.map(str::to_string),
+    }
+}
+
+fn check_readiness_with_transport(
+    model: String,
+    api_key: &str,
+    transport: &dyn AuditHttpTransport,
+) -> AuditProviderReadiness {
+    if !model_name_is_safe(&model) {
+        return readiness_result(
+            Some(model),
+            "MODEL_UNAVAILABLE",
+            Some("configured audit model name is invalid"),
+        );
+    }
+    let response = match transport.get_model(api_key, &model) {
+        Ok(response) => response,
+        Err(error) => {
+            let category = if error.starts_with("AUDIT_MODEL_OUTPUT_TRUNCATED") {
+                "provider readiness response exceeded the bounded response limit"
+            } else {
+                "provider readiness request was unavailable"
+            };
+            return readiness_result(Some(model), "NETWORK_ERROR", Some(category));
+        }
+    };
+    match response.status {
+        200..=299 => {
+            let parsed = serde_json::from_str::<Value>(&response.body).ok();
+            let returned_id = parsed
+                .as_ref()
+                .and_then(|value| value.get("id"))
+                .and_then(Value::as_str);
+            if returned_id == Some(model.as_str()) {
+                readiness_result(Some(model), "READY", None)
+            } else {
+                readiness_result(
+                    Some(model),
+                    "MODEL_UNAVAILABLE",
+                    Some("provider returned no matching configured model"),
+                )
+            }
+        }
+        401 | 403 => readiness_result(
+            Some(model),
+            "AUTH_ERROR",
+            Some("provider rejected the configured credential"),
+        ),
+        429 => readiness_result(
+            Some(model),
+            "RATE_LIMITED",
+            Some("provider rate or quota limit"),
+        ),
+        404 => readiness_result(
+            Some(model),
+            "MODEL_UNAVAILABLE",
+            Some("configured model is unavailable to this provider account"),
+        ),
+        500..=599 => readiness_result(
+            Some(model),
+            "NETWORK_ERROR",
+            Some("provider is unavailable"),
+        ),
+        _ => readiness_result(
+            Some(model),
+            "MODEL_UNAVAILABLE",
+            Some("provider rejected the configured model"),
+        ),
+    }
+}
+
+pub fn check_audit_provider_readiness(
+    database: &DatabaseState,
+) -> Result<AuditProviderReadiness, String> {
+    let local = audit_provider_readiness(database)?;
+    if !local.configured {
+        return Ok(local);
+    }
+    let Some(model) = local.model else {
+        return Ok(readiness_result(
+            None,
+            "NOT_CONFIGURED",
+            Some("audit model is not configured"),
+        ));
+    };
+    if !model_name_is_safe(&model) {
+        return Ok(readiness_result(
+            Some(model),
+            "MODEL_UNAVAILABLE",
+            Some("configured audit model name is invalid"),
+        ));
+    }
+    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    let transport = ReqwestAuditTransport::readiness()?;
+    Ok(check_readiness_with_transport(model, &api_key, &transport))
+}
+
 pub fn set_audit_provider_model(
     database: &DatabaseState,
     request: AuditProviderModelRequest,
 ) -> Result<AuditProviderReadiness, String> {
     let model = request.model.trim();
-    if model.is_empty() || model.len() > 128 || model.chars().any(char::is_control) {
+    if !model_name_is_safe(model) || model.chars().any(char::is_control) {
         return Err("AUDIT_PROVIDER_MODEL_INVALID: model must be a bounded non-empty value".into());
     }
     let connection = database.open_connection()?;
@@ -752,8 +906,6 @@ fn audit_result_schema() -> Value {
             "confidence": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW"] },
             "regressionRisk": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
             "summary": { "type": "string" },
-            "model": { "type": ["string", "null"] },
-            "modelVersion": { "type": ["string", "null"] },
             "findings": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": {
                 "findingKey": { "type": "string" }, "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "NOTE"] }, "title": { "type": "string" }, "detail": { "type": "string" }, "requirementRefs": { "type": "array", "items": { "type": "string" } }, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "sourceLocator": { "type": ["string", "null"] }, "testLocator": { "type": ["string", "null"] }, "remediationGuidance": { "type": "string" }, "blocksRelease": { "type": "boolean" }
             }, "required": ["findingKey", "severity", "title", "detail", "requirementRefs", "evidenceRefs", "sourceLocator", "testLocator", "remediationGuidance", "blocksRelease"] } },
@@ -764,7 +916,7 @@ fn audit_result_schema() -> Value {
                 "priorFindingKey": { "type": "string" }, "disposition": { "type": "string", "enum": ["STILL_OPEN", "CLOSED", "SUPERSEDED"] }, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "rationale": { "type": "string" }, "replacementFindingKey": { "type": ["string", "null"] }
             }, "required": ["priorFindingKey", "disposition", "evidenceRefs", "rationale", "replacementFindingKey"] } }
         },
-        "required": ["verdict", "confidence", "regressionRisk", "summary", "model", "modelVersion", "findings", "requirementCoverage", "priorFindingDispositions"]
+        "required": ["verdict", "confidence", "regressionRisk", "summary", "findings", "requirementCoverage", "priorFindingDispositions"]
     })
 }
 
@@ -2208,9 +2360,11 @@ pub fn parse_model_output(raw: &str) -> Result<AuditEvaluation, String> {
         coverage,
         model_status: "AVAILABLE".into(),
         diagnostic: None,
-        auditor_provider: Some("OPENAI_GPT".into()),
-        auditor_model: parsed.model,
-        auditor_version: parsed.model_version,
+        // Model identity fields are accepted only for backward-compatible input parsing.
+        // evaluate_with replaces them with the executing AuditModel's trusted identity.
+        auditor_provider: None,
+        auditor_model: None,
+        auditor_version: None,
     })
 }
 
@@ -2348,7 +2502,11 @@ fn parse_disposition(value: &str) -> Result<PriorFindingDispositionKind, String>
     }
 }
 
-fn unavailable_evaluation(error: String, input: &AuditInput) -> AuditEvaluation {
+fn unavailable_evaluation<M: AuditModel>(
+    error: String,
+    input: &AuditInput,
+    model: &M,
+) -> AuditEvaluation {
     let mut coverage = Vec::new();
     if let Some(task) = &input.task {
         for (index, requirement) in task.requirements.iter().take(MAX_REQUIREMENTS).enumerate() {
@@ -2383,9 +2541,9 @@ fn unavailable_evaluation(error: String, input: &AuditInput) -> AuditEvaluation 
         coverage,
         model_status: model_status.into(),
         diagnostic: Some(truncate_utf8(&error, 2048)),
-        auditor_provider: Some("OPENAI_GPT".into()),
-        auditor_model: Some("UNCONFIGURED".into()),
-        auditor_version: Some("UNAVAILABLE".into()),
+        auditor_provider: Some(model.provider()),
+        auditor_model: Some(model.model()),
+        auditor_version: Some(model.version()),
     }
 }
 
@@ -2597,12 +2755,15 @@ fn evaluate_with<M: AuditModel>(model: &M, input: &AuditInput) -> AuditEvaluatio
                 if let Err(error) = validate_semantic_evaluation(input, &mut evaluation) {
                     semantic_degraded_evaluation(error, model)
                 } else {
+                    evaluation.auditor_provider = Some(model.provider());
+                    evaluation.auditor_model = Some(model.model());
+                    evaluation.auditor_version = Some(model.version());
                     evaluation
                 }
             }
             Err(error) => semantic_degraded_evaluation(error, model),
         },
-        Err(error) => unavailable_evaluation(error, input),
+        Err(error) => unavailable_evaluation(error, input, model),
     }
 }
 
@@ -4846,6 +5007,8 @@ mod tests {
     #[derive(Clone)]
     struct MockAuditTransport {
         response: AuditHttpResponse,
+        readiness_response: Option<AuditHttpResponse>,
+        readiness_error: Option<String>,
         request: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
     }
 
@@ -4854,11 +5017,21 @@ mod tests {
             *self.request.lock().unwrap() = Some(body.clone());
             Ok(self.response.clone())
         }
+
+        fn get_model(&self, _api_key: &str, _model: &str) -> Result<AuditHttpResponse, String> {
+            if let Some(error) = &self.readiness_error {
+                return Err(error.clone());
+            }
+            Ok(self
+                .readiness_response
+                .clone()
+                .unwrap_or_else(|| self.response.clone()))
+        }
     }
 
     fn provider_model(response: AuditHttpResponse) -> (OpenAiAuditModel, std::sync::Arc<std::sync::Mutex<Option<Value>>>) {
         let request = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let transport = MockAuditTransport { response, request: request.clone() };
+        let transport = MockAuditTransport { response, readiness_response: None, readiness_error: None, request: request.clone() };
         let model = OpenAiAuditModel { model: "gpt-audit-test".into(), api_key: "sk-test-never-persist".into(), transport: std::sync::Arc::new(transport) };
         (model, request)
     }
@@ -4899,7 +5072,7 @@ mod tests {
             let (model, _) = provider_model(AuditHttpResponse { status, body: "{}".into() });
             let error = model.evaluate(&input()).unwrap_err();
             assert!(error.starts_with(prefix), "status {status}: {error}");
-            let evaluation = unavailable_evaluation(error, &input());
+            let evaluation = unavailable_evaluation(error, &input(), &model);
             assert_ne!(evaluation.verdict, AuditVerdict::Pass);
         }
     }
@@ -4912,5 +5085,83 @@ mod tests {
         assert_eq!(readiness.model.as_deref(), Some("gpt-audit-test"));
         let stored: String = database.open_connection().unwrap().query_row("SELECT value_json FROM settings WHERE key=?1", [OPENAI_MODEL_SETTING], |row| row.get(0)).unwrap();
         assert!(!stored.contains("sk-"));
+    }
+
+    #[test]
+    fn readiness_probe_classifies_model_endpoint_truthfully_without_audit_persistence() {
+        let cases = [
+            (200, json!({"id":"gpt-audit-test","object":"model"}).to_string(), "READY"),
+            (401, "{}".into(), "AUTH_ERROR"),
+            (403, "{}".into(), "AUTH_ERROR"),
+            (429, "{}".into(), "RATE_LIMITED"),
+            (503, "{}".into(), "NETWORK_ERROR"),
+            (404, "{}".into(), "MODEL_UNAVAILABLE"),
+        ];
+        for (status, body, expected) in cases {
+            let transport = MockAuditTransport {
+                response: AuditHttpResponse { status: 200, body: "{}".into() },
+                readiness_response: Some(AuditHttpResponse { status, body }),
+                readiness_error: None,
+                request: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            };
+            let result = check_readiness_with_transport(
+                "gpt-audit-test".into(),
+                "sk-mock-only",
+                &transport,
+            );
+            assert_eq!(result.status, expected);
+            assert_eq!(result.credential_source.as_deref(), Some("OPENAI_API_KEY environment"));
+        }
+        let invalid = MockAuditTransport {
+            response: AuditHttpResponse { status: 200, body: "{}".into() },
+            readiness_response: None,
+            readiness_error: None,
+            request: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        let invalid_result = check_readiness_with_transport("gpt/audit".into(), "sk-mock-only", &invalid);
+        assert_eq!(invalid_result.status, "MODEL_UNAVAILABLE");
+
+        let failed = MockAuditTransport {
+            response: AuditHttpResponse { status: 200, body: "{}".into() },
+            readiness_response: None,
+            readiness_error: Some("AUDIT_MODEL_OUTPUT_TRUNCATED: bounded".into()),
+            request: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        };
+        let failed_result = check_readiness_with_transport("gpt-audit-test".into(), "sk-mock-only", &failed);
+        assert_eq!(failed_result.status, "NETWORK_ERROR");
+        assert!(!failed_result.configured || failed_result.status != "READY");
+    }
+
+    #[test]
+    fn successful_audit_identity_is_runtime_authoritative_and_round_trips() {
+        let response = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"runtime identity","model":"spoofed-model","modelVersion":"spoofed-version","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#;
+        let model = FixtureAuditModel { response: response.into() };
+        let evaluation = evaluate_fixture(&input(), &model);
+        assert_eq!(evaluation.auditor_provider.as_deref(), Some("FIXTURE"));
+        assert_eq!(evaluation.auditor_model.as_deref(), Some("deterministic-fixture"));
+        assert_eq!(evaluation.auditor_version.as_deref(), Some("1"));
+
+        let (_app, _project_dir, database, project_id) = git_project_fixture("Runtime identity fixture");
+        let persisted = run_with_model(
+            &database,
+            AuditInputRequest {
+                project_id: project_id.clone(),
+                task_id: None,
+                prior_audit_id: None,
+                git_target: AuditGitTarget::default(),
+            },
+            &model,
+        )
+        .unwrap();
+        let reloaded = get(&database, &project_id, &persisted.id).unwrap();
+        assert_eq!(reloaded.auditor_provider.as_deref(), Some("FIXTURE"));
+        assert_eq!(reloaded.auditor_model.as_deref(), Some("deterministic-fixture"));
+        assert_eq!(reloaded.auditor_version.as_deref(), Some("1"));
+
+        let malformed = evaluate_fixture(&input(), &FixtureAuditModel { response: "not-json".into() });
+        assert_eq!(malformed.model_status, "MALFORMED");
+        assert_eq!(malformed.auditor_provider.as_deref(), Some("FIXTURE"));
+        assert_eq!(malformed.auditor_model.as_deref(), Some("deterministic-fixture"));
+        assert_eq!(malformed.auditor_version.as_deref(), Some("1"));
     }
 }

@@ -508,6 +508,18 @@ mod app_commands {
     }
 
     #[tauri::command]
+    async fn hiveai_audit_provider_check_readiness(
+        database: tauri::State<'_, DatabaseState>,
+    ) -> Result<AuditProviderReadiness, String> {
+        let database = database.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            audit_engine::check_audit_provider_readiness(&database)
+        })
+        .await
+        .map_err(|error| format!("audit readiness task failed: {error}"))?
+    }
+
+    #[tauri::command]
     fn hiveai_audit_provider_set_model(
         database: tauri::State<'_, DatabaseState>,
         request: AuditProviderModelRequest,
@@ -832,6 +844,7 @@ mod app_commands {
                 hiveai_audit_input_collect,
                 hiveai_audit_run,
                 hiveai_audit_provider_readiness,
+                hiveai_audit_provider_check_readiness,
                 hiveai_audit_provider_set_model,
                 hiveai_audits_list,
                 hiveai_audit_get,

@@ -17,7 +17,7 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M11 = PASS/CLOSED.
 - M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 remains OPEN during M16S closure remediation; M17-M20 remain planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16S V01 is implementation-complete pending independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
+- M16S V02 is implementation-complete pending independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
 - Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16S, and the pre-M10 hotfix is not a numbered roadmap milestone.
 
 ---
@@ -433,7 +433,7 @@ Exit: H!veAI can independently audit implementation evidence and drive bounded r
 
 Status: M16C REV2 COMPREHENSIVE REMEDIATION COMPLETE / PENDING INDEPENDENT WHOLE-M16 STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPTANCE. M16 remains OPEN.
 
-The package notes below are historical implementation snapshots. Current prospective truth is recorded above: M21 and M21-R01 through M21-R03 are accepted, M16S is active and awaiting independent audit plus owner native acceptance, and M17 is not activated.
+The package notes below are historical implementation snapshots. Current prospective truth is recorded above: M21 and M21-R01 through M21-R03 are accepted, M16S V02 is active and awaiting independent audit plus owner native acceptance, and M17 is not activated.
 
 M16A remediation closes M16-R59 through M16-R61 only: explicit prior-finding dispositions, exact Audit -> Prompt Engine -> Agent session provenance, and repository freshness enforcement before persistence. M17 is not activated and M21 was not started.
 
@@ -473,14 +473,14 @@ M16O migrates all eight tracked GitHub repositories to the identical v3 contract
 
 ---
 
-## M16S - Post-M21 local workspace and GPT audit provider closure V01
+## M16S - Post-M21 local workspace and GPT audit provider closure V02
 
-- [x] M16S-F01: secure production OpenAI audit-provider boundary with bounded current Responses API transport, strict structured output, truthful readiness/status handling, and unavailable fallback.
-- [x] M16S-F02: active project workspace attach/change/repair actions reuse the existing project identity and safe path-repair command without creating duplicates.
-- [x] M16S-F03: current TASKS/roadmap truth records accepted M21-R03 closure, historical parent retirement, and M16S implementation status without activating M17.
+- [x] M16S-F01: secure production OpenAI audit-provider boundary plus explicit bounded live model-readiness probe, strict structured output, truthful status handling, and unavailable fallback.
+- [x] M16S-F02: successful audit provenance is sourced from the executing runtime provider/model/version, never generated identity fields.
+- [x] M16S-F03: active project workspace attach/change/repair actions are visibly discoverable, reuse identity-preserving path repair, and preserve the current M21/M16/M17 tracker truth.
 - [x] Provider/workspace focused tests, full regression, governed publication, and immutable implementation evidence complete.
 
-M16S IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
+M16S V02 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
 
 ---
 

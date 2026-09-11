@@ -92,6 +92,7 @@ import { AuditCenterPage } from "./AuditCenterPage";
 export { AuditCenterPage };
 import {
   getAuditProviderReadiness,
+  checkAuditProviderReadiness,
   setAuditProviderModel,
   type AuditProviderReadiness,
 } from "./auditEngine";
@@ -789,6 +790,11 @@ function ProjectRegistryDialog({
   const [name, setName] = React.useState(project?.name ?? "");
   const [submitting, setSubmitting] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const workspaceLabel = project?.status === "MISSING"
+    ? "Repair local workspace"
+    : project?.normalizedPath.trim()
+      ? "Change local workspace"
+      : "Attach local workspace";
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -813,12 +819,12 @@ function ProjectRegistryDialog({
         <div className="registry-dialog-head">
           <div>
             <span className="eyebrow">
-              {mode === "register" ? "Explicit registration" : "Path repair"}
+              {mode === "register" ? "Explicit registration" : workspaceLabel}
             </span>
             <h2 id="registry-dialog-title">
               {mode === "register"
                 ? "Add existing project"
-                : "Repair project path"}
+                : workspaceLabel}
             </h2>
           </div>
           <button
@@ -833,7 +839,7 @@ function ProjectRegistryDialog({
         <p className="registry-dialog-copy">
           {mode === "register"
             ? "Choose a folder. H!veAI will read metadata only and will not create or modify files there."
-            : "Choose the moved folder. H!veAI validates identity before updating the registry path."}
+            : `Choose a folder to ${workspaceLabel.toLowerCase()}. H!veAI validates project identity before updating the registry path.`}
         </p>
         {mode === "register" ? (
           <section
@@ -4932,6 +4938,20 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
     }
   };
 
+  const checkReadiness = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const next = await checkAuditProviderReadiness();
+      setReadiness(next);
+      setMessage("Live provider readiness checked.");
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const status = readiness?.status ?? "NOT_CONFIGURED";
   return (
     <section className="panel settings-panel" aria-label="GPT Audit Provider">
@@ -4947,9 +4967,9 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
       </label>
       <div className="settings-action-row">
         <button className="primary-button" type="button" onClick={() => void saveModel()} disabled={!desktop || busy || !model.trim()}>Save model</button>
-        <button className="secondary-button" type="button" onClick={() => void refresh()} disabled={!desktop || busy}>Check readiness</button>
+        <button className="secondary-button" type="button" onClick={() => void checkReadiness()} disabled={!desktop || busy}>Check readiness</button>
       </div>
-      <p className="settings-hint">The native process reads OPENAI_API_KEY as an environment-only fallback. H!veAI never displays, persists, or returns the credential.</p>
+      <p className="settings-hint">Configuration is local-only until you check it. The native process reads OPENAI_API_KEY from the Windows environment visible to H!veAI; H!veAI never displays, persists, or returns the key.</p>
       {readiness?.errorCategory ? <div className="safe-notice" role="status">{readiness.errorCategory}</div> : null}
       {message ? <div className="safe-notice" role="status">{message}</div> : null}
     </section>

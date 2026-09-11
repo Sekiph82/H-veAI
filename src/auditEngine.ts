@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type AuditProviderReadiness = {
   provider: string;
-  status: "READY" | "NOT_CONFIGURED" | "AUTH_ERROR" | "RATE_LIMITED" | "NETWORK_ERROR";
+  status: "READY" | "CONFIGURED_UNVERIFIED" | "NOT_CONFIGURED" | "AUTH_ERROR" | "RATE_LIMITED" | "NETWORK_ERROR" | "MODEL_UNAVAILABLE";
   configured: boolean;
   model: string | null;
   credentialSource: string | null;
@@ -50,6 +50,9 @@ export function runAudit(projectId: string, taskId: string | null, priorAuditId:
 }
 export function getAuditProviderReadiness() {
   return invoke<AuditProviderReadiness>("hiveai_audit_provider_readiness");
+}
+export function checkAuditProviderReadiness() {
+  return invoke<AuditProviderReadiness>("hiveai_audit_provider_check_readiness");
 }
 export function setAuditProviderModel(model: string) {
   return invoke<AuditProviderReadiness>("hiveai_audit_provider_set_model", { request: { model } });

@@ -6,9 +6,9 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 - Current Milestone: M16
 - Current Sprint: M16S-CLOSURE
-- Current Task: M16S V01 — Post-M21 local workspace and GPT audit provider closure
+- Current Task: M16S V02 — Post-M21 local workspace and GPT audit provider closure
 - Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_AUDIT_AND_OWNER_NATIVE_ACCEPTANCE
-- Next Task/Action: Independent M16S strict audit and owner native acceptance; M17 remains blocked.
+- Next Task/Action: Independent M16S V02 strict audit and owner native acceptance; M17 remains blocked.
 - Required Actor: HUMAN
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
@@ -18,7 +18,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R01 — Standalone remediation closure: remove obsolete production tracking assumptions and verify standalone release
 - [x] M21-R02 — Project Cockpit Tasks and AI-Commerce retirement remediation V02 (independent strict audit PASS and owner native re-acceptance PASS)
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
-- [~] M16S — Post-M21 local workspace and GPT audit provider closure V01 (implementation complete; awaiting independent strict audit and owner native acceptance)
+- [~] M16S — Post-M21 local workspace and GPT audit provider closure V02 (implementation complete; awaiting independent strict audit and owner native acceptance)
 
 # H!veAI MASTER TASKS
 
@@ -1414,7 +1414,7 @@ M15D REMEDIATION COMPLETE / ACCEPTED STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPT
 
 M16 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + USER NATIVE/VISUAL ACCEPTANCE.
 
-The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16S is active and awaiting independent audit plus owner native acceptance, and M17 is not activated.
+The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16S V02 is active and awaiting independent audit plus owner native acceptance, and M17 is not activated.
 
 ## M16A - Re-audit provenance and freshness remediation
 - [x] M16-R59 explicit evidence-backed prior-finding dispositions; omission never closes.
@@ -1785,7 +1785,7 @@ M20 PLANNED/BLOCKED until M19 and final hardening gates.
 - Subpackage numbering is for traceability, source/evidence mapping, and progress visibility, not an instruction to generate many tiny prompts.
 - Every milestone closes only after production implementation, direct evidence, full regression, governed publication where applicable, and independent audit acceptance.
 - M16O GitHub-first eight-repository tracking reset is implementation-complete: all eight target branches use the unified v3 contract, real branch state is pushed, and Command Center/Project Cockpit read remote GitHub snapshots with stale-cache fallback only. M16 remains OPEN at 16/20 = 80%; M16N is superseded and was not executed.
-- M16S V01 is implementation-complete: F01 adds the secure production GPT audit-provider boundary, F02 adds identity-preserving workspace attach/change/repair actions, and F03 reconciles current post-M21 truth. M16S awaits independent strict audit and owner native acceptance; M17 is not activated.
+- M16S V02 is implementation-complete: F01 adds a live bounded GPT readiness probe, F02 makes audit provenance runtime-authoritative, and F03 makes local workspace controls visibly discoverable while preserving identity. M16S awaits independent strict audit and owner native acceptance; M17 is not activated.
 - M21 and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence. The historical local AI-Commerce parent is retired from active use; the GitHub repository is retained for preservation and has not been deleted.
 
 
