@@ -12,7 +12,7 @@ export const projects: Project[] = [
   {
     id: 'fmcg-erp', name: 'FMCG ERP', code: 'FE', description: 'Operations planning and inventory',
     phase: 'M04 Database', task: 'Review migration recovery notes', progress: 48, health: 'Watch',
-    state: 'AUDIT_REQUIRED', actor: 'GPT Audit', lastAction: 'Schema migration completed',
+    state: 'AUDIT_REQUIRED', actor: 'Codex Audit', lastAction: 'Schema migration completed',
     nextAction: 'Review audit findings', updated: '22 min ago',
     metrics: [{ label: 'Open tasks', value: '8' }, { label: 'Audit score', value: 'Pending' }, { label: 'Sessions', value: '1' }],
   },
@@ -34,7 +34,7 @@ export const projects: Project[] = [
 
 export const activity: ActivityEvent[] = [
   { id: 'a1', time: '8 min ago', project: 'FormuLab', actor: 'Codex', event: 'Implementation finished', state: 'CODEX_RUNNING' },
-  { id: 'a2', time: '22 min ago', project: 'FMCG ERP', actor: 'GPT Audit', event: 'Audit requested', state: 'AUDIT_REQUIRED' },
+  { id: 'a2', time: '22 min ago', project: 'FMCG ERP', actor: 'Codex Audit', event: 'Audit requested', state: 'AUDIT_REQUIRED' },
   { id: 'a3', time: '41 min ago', project: 'PackLab 3D', actor: 'CI', event: 'Tests passed', state: 'AUDIT_PASSED' },
   { id: 'a4', time: '1 hr ago', project: 'Scrubbots', actor: 'External', event: 'Task moved to WAITING_EXTERNAL', state: 'WAITING_EXTERNAL' },
   { id: 'a5', time: '2 hrs ago', project: 'PackLab 3D', actor: 'Human', event: 'Branch changed', state: 'TASK_COMPLETE' },
@@ -49,7 +49,7 @@ export const attention = [
 
 export const queue = [
   { project: 'FormuLab', task: 'Connect project snapshot events', stage: 'Implementation', actor: 'Codex' as const, state: 'CODEX_RUNNING' as const, updated: '8 min ago' },
-  { project: 'FMCG ERP', task: 'Review migration recovery notes', stage: 'Audit', actor: 'GPT Audit' as const, state: 'AUDIT_REQUIRED' as const, updated: '22 min ago' },
+  { project: 'FMCG ERP', task: 'Review migration recovery notes', stage: 'Audit', actor: 'Codex Audit' as const, state: 'AUDIT_REQUIRED' as const, updated: '22 min ago' },
   { project: 'Scrubbots', task: 'Confirm worker boundary decision', stage: 'External wait', actor: 'External' as const, state: 'WAITING_EXTERNAL' as const, updated: '1 hr ago' },
   { project: 'PackLab 3D', task: 'Validate cockpit navigation model', stage: 'Complete', actor: 'Human' as const, state: 'TASK_COMPLETE' as const, updated: '2 hrs ago' },
 ];

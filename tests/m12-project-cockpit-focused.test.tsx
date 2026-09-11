@@ -316,9 +316,9 @@ describe("M12 project cockpit", () => {
     }
     expect(invoke.mock.calls.filter(([command]) => command === "hiveai_project_update_settings")).toHaveLength(0);
     fireEvent.change(screen.getByLabelText("Preferred builder"), { target: { value: "CODEX" } });
-    fireEvent.change(screen.getByLabelText("Preferred auditor"), { target: { value: "GPT Audit" } });
+    fireEvent.change(screen.getByLabelText("Preferred auditor"), { target: { value: "Codex Audit" } });
     fireEvent.click(screen.getByRole("button", { name: "Save registry settings" }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_project_update_settings", { request: { projectId: "alpha", priority: 0, preferredBuilder: "CODEX", preferredAuditor: "GPT Audit" } }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_project_update_settings", { request: { projectId: "alpha", priority: 0, preferredBuilder: "CODEX", preferredAuditor: "Codex Audit" } }));
     expect(screen.getByRole("status")).toHaveTextContent("Registry settings saved.");
     expect(within(screen.getByRole("status")).queryByText(/Project Beta/)).not.toBeInTheDocument();
   });

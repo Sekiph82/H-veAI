@@ -2,8 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type AuditProviderReadiness = {
   provider: string;
-  status: "READY" | "CONFIGURED_UNVERIFIED" | "NOT_CONFIGURED" | "AUTH_ERROR" | "RATE_LIMITED" | "NETWORK_ERROR" | "MODEL_UNAVAILABLE";
+  status: "READY" | "AUTH_UNVERIFIED" | "CODEX_NOT_FOUND" | "AUTH_REQUIRED" | "AUTH_POLICY_BLOCKED" | "USAGE_LIMITED" | "NETWORK_ERROR" | "TIMEOUT" | "PROCESS_ERROR";
   configured: boolean;
+  executableAvailable: boolean;
+  version: string | null;
+  loginState: string | null;
   model: string | null;
   credentialSource: string | null;
   errorCategory: string | null;
@@ -53,9 +56,6 @@ export function getAuditProviderReadiness() {
 }
 export function checkAuditProviderReadiness() {
   return invoke<AuditProviderReadiness>("hiveai_audit_provider_check_readiness");
-}
-export function setAuditProviderModel(model: string) {
-  return invoke<AuditProviderReadiness>("hiveai_audit_provider_set_model", { request: { model } });
 }
 export function listAudits(projectId: string) {
   return invoke<AuditRun[]>("hiveai_audits_list", { projectId });

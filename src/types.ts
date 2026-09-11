@@ -14,7 +14,7 @@ export type WorkflowState =
   | 'FAILED'
   | 'TASK_COMPLETE';
 
-export type Actor = 'Human' | 'Codex' | 'Claude' | 'GPT Audit' | 'CI' | 'External';
+export type Actor = 'Human' | 'Codex' | 'Claude' | 'Codex Audit' | 'CI' | 'External';
 
 export type Project = {
   id: string;

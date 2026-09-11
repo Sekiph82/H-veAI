@@ -1,3 +1,7 @@
+use crate::codex_runtime::{
+    probe_version, resolve_codex_executable, resolve_codex_executable_from_entries, ProbeError,
+    PROCESS_POLL, READINESS_TIMEOUT,
+};
 use crate::db::DatabaseState;
 use crate::final_response::{FinalResponseCapture, FinalResponseState, ProviderKind};
 use crate::process_policy::background_command;
@@ -8,9 +12,9 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Output, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -26,10 +30,8 @@ const MAX_SESSION_EVENTS: usize = MAX_OUTPUT_EVENTS * 2 + 16;
 const PERSIST_QUEUE_CAPACITY: usize = 32;
 const PERSIST_RETRY_ATTEMPTS: usize = 3;
 const PERSIST_RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(10), Duration::from_millis(25)];
-const READINESS_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_GRACE: Duration = Duration::from_millis(750);
 const STOP_ESCALATION_TIMEOUT: Duration = Duration::from_secs(2);
-const PROCESS_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -568,7 +570,7 @@ pub fn start(
         &connection,
         &session_id,
         "PROCESS_POLICY",
-        serde_json::json!({"executable":"codex.exe","argumentPolicy":"FIXED_ADAPTER_ARGS","model":"gpt-5.5","ignoreUserConfig":true,"cwd":cwd.to_string_lossy(),"shell":false,"promptTransport":"STDIN_BOUNDED"}),
+        serde_json::json!({"executable":"codex.exe","argumentPolicy":"FIXED_ADAPTER_ARGS","model":"CLI_DEFAULT","ignoreUserConfig":true,"cwd":cwd.to_string_lossy(),"shell":false,"promptTransport":"STDIN_BOUNDED"}),
     )?;
     let mut command = background_command(executable);
     command
@@ -999,8 +1001,6 @@ fn fixed_exec_args(cwd: &Path) -> Vec<String> {
     vec![
         "exec".into(),
         "--json".into(),
-        "--model".into(),
-        "gpt-5.5".into(),
         "--sandbox".into(),
         "workspace-write".into(),
         "--cd".into(),
@@ -1009,166 +1009,6 @@ fn fixed_exec_args(cwd: &Path) -> Vec<String> {
         "--ignore-user-config".into(),
         "--skip-git-repo-check".into(),
     ]
-}
-
-const MAX_NATIVE_HEADER_OFFSET: u64 = 1024 * 1024;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CodexExecutableResolution {
-    selected: Option<PathBuf>,
-    skipped_candidates: usize,
-}
-
-fn resolve_codex_executable() -> CodexExecutableResolution {
-    let mut entries = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .unwrap_or_default();
-    entries.extend(known_codex_install_candidates());
-    resolve_codex_executable_from_entries(entries)
-}
-
-fn resolve_codex_executable_from_entries<I>(entries: I) -> CodexExecutableResolution
-where
-    I: IntoIterator<Item = PathBuf>,
-{
-    let mut resolution = CodexExecutableResolution::default();
-    let mut seen = std::collections::HashSet::new();
-    for entry in entries {
-        for name in codex_executable_names() {
-            let candidate = entry.join(name);
-            if !candidate.is_file() || !seen.insert(candidate.clone()) {
-                continue;
-            }
-            if !is_direct_candidate_name(name) {
-                resolution.skipped_candidates = resolution.skipped_candidates.saturating_add(1);
-                continue;
-            }
-            if is_native_codex_candidate(&candidate) {
-                resolution.selected = Some(candidate);
-                return resolution;
-            }
-            resolution.skipped_candidates = resolution.skipped_candidates.saturating_add(1);
-        }
-    }
-    resolution
-}
-
-#[cfg(windows)]
-fn codex_executable_names() -> &'static [&'static str] {
-    &["codex.exe", "codex"]
-}
-
-#[cfg(not(windows))]
-fn codex_executable_names() -> &'static [&'static str] {
-    &["codex", "codex.exe"]
-}
-
-#[cfg(windows)]
-fn is_direct_candidate_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case("codex.exe")
-}
-
-#[cfg(not(windows))]
-fn is_direct_candidate_name(_name: &str) -> bool {
-    true
-}
-
-#[cfg(windows)]
-fn known_codex_install_candidates() -> Vec<PathBuf> {
-    std::env::var_os("LOCALAPPDATA")
-        .map(|root| vec![PathBuf::from(root).join(r"OpenAI\Codex\bin")])
-        .unwrap_or_default()
-}
-
-#[cfg(not(windows))]
-fn known_codex_install_candidates() -> Vec<PathBuf> {
-    Vec::new()
-}
-
-#[cfg(windows)]
-fn is_native_codex_candidate(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() || metadata.len() < 64 {
-        return false;
-    }
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut dos_header = [0u8; 64];
-    if file.read_exact(&mut dos_header).is_err() || &dos_header[..2] != b"MZ" {
-        return false;
-    }
-    let pe_offset = u32::from_le_bytes([
-        dos_header[0x3c],
-        dos_header[0x3d],
-        dos_header[0x3e],
-        dos_header[0x3f],
-    ]) as u64;
-    if pe_offset > MAX_NATIVE_HEADER_OFFSET || pe_offset.saturating_add(26) > metadata.len() {
-        return false;
-    }
-    if file.seek(SeekFrom::Start(pe_offset)).is_err() {
-        return false;
-    }
-    let mut pe_header = [0u8; 26];
-    if file.read_exact(&mut pe_header).is_err() || &pe_header[..4] != b"PE\0\0" {
-        return false;
-    }
-    let machine = u16::from_le_bytes([pe_header[4], pe_header[5]]);
-    let optional_magic = u16::from_le_bytes([pe_header[24], pe_header[25]]);
-    matches!(machine, 0x014c | 0x8664 | 0xaa64) && matches!(optional_magic, 0x010b | 0x020b)
-}
-
-#[cfg(not(windows))]
-fn is_native_codex_candidate(path: &Path) -> bool {
-    path.is_file()
-}
-
-#[derive(Debug)]
-enum ProbeError {
-    Timeout,
-    Malformed,
-    Failed,
-}
-
-fn probe_version(path: &Path, timeout: Duration) -> Result<String, ProbeError> {
-    let mut child = background_command(path)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| ProbeError::Failed)?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().map_err(|_| ProbeError::Failed)?;
-                if !status.success() {
-                    return Err(ProbeError::Failed);
-                }
-                return parse_version(&output);
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(PROCESS_POLL),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(ProbeError::Timeout);
-            }
-            Err(_) => return Err(ProbeError::Failed),
-        }
-    }
-}
-
-fn parse_version(output: &Output) -> Result<String, ProbeError> {
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let first = text.lines().next().unwrap_or_default().trim();
-    if first.len() > 256 || !first.to_ascii_lowercase().contains("codex") {
-        return Err(ProbeError::Malformed);
-    }
-    Ok(first.to_string())
 }
 
 fn insert_event(
@@ -1839,8 +1679,6 @@ mod tests {
             vec![
                 "exec",
                 "--json",
-                "--model",
-                "gpt-5.5",
                 "--sandbox",
                 "workspace-write",
                 "--cd",

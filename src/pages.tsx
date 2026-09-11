@@ -93,7 +93,6 @@ export { AuditCenterPage };
 import {
   getAuditProviderReadiness,
   checkAuditProviderReadiness,
-  setAuditProviderModel,
   type AuditProviderReadiness,
 } from "./auditEngine";
 import {
@@ -378,7 +377,7 @@ function LegacyCommandCenter() {
                 [
                   "Prompt Preparation",
                   "Claude Code Execution",
-                  "GPT Audit",
+                  "Codex Audit",
                   "Review & Approval",
                   "Deploy / Complete",
                 ].map((step, index) => (
@@ -2792,7 +2791,7 @@ function CockpitLiveSettings({
           Preferred auditor
           <select value={auditor} onChange={(event) => setAuditor(event.target.value)} disabled={busy}>
             <option value="">Unassigned</option>
-            <option value="GPT Audit">GPT Audit</option>
+            <option value="Codex Audit">Codex Audit</option>
             <option value="ChatGPT">ChatGPT</option>
           </select>
         </label>
@@ -4905,7 +4904,6 @@ export function Settings() {
 
 function AuditProviderSettings({ desktop }: { desktop: boolean }) {
   const [readiness, setReadiness] = React.useState<AuditProviderReadiness | null>(null);
-  const [model, setModel] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [message, setMessage] = React.useState<string | null>(null);
 
@@ -4914,7 +4912,6 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
     try {
       const next = await getAuditProviderReadiness();
       setReadiness(next);
-      setModel(next.model ?? "");
       setMessage(null);
     } catch (caught) {
       setMessage(caught instanceof Error ? caught.message : String(caught));
@@ -4922,21 +4919,6 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
   }, [desktop]);
 
   React.useEffect(() => { void refresh(); }, [refresh]);
-
-  const saveModel = async () => {
-    setBusy(true);
-    setMessage(null);
-    try {
-      const next = await setAuditProviderModel(model);
-      setReadiness(next);
-      setModel(next.model ?? model.trim());
-      setMessage("Audit model setting saved.");
-    } catch (caught) {
-      setMessage(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const checkReadiness = async () => {
     setBusy(true);
@@ -4952,24 +4934,21 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
     }
   };
 
-  const status = readiness?.status ?? "NOT_CONFIGURED";
+  const status = readiness?.status ?? "CODEX_NOT_FOUND";
   return (
-    <section className="panel settings-panel" aria-label="GPT Audit Provider">
-      <SectionHeader title="GPT Audit Provider" detail="Secure OpenAI readiness boundary" />
+    <section className="panel settings-panel" aria-label="Codex Audit Provider">
+      <SectionHeader title="Codex Audit Provider" detail="Uses the local Codex CLI and its managed ChatGPT login" />
       <div className="settings-provider-facts">
-        <span>Provider <b>OpenAI</b></span>
+        <span>Provider <b>Codex CLI</b></span>
+        <span>CLI <b>{readiness?.executableAvailable ? "Available" : "Unavailable"}</b></span>
+        <span>Version <b>{readiness?.version ?? "Unavailable"}</b></span>
+        <span>Login <b>{readiness?.loginState ?? "Unknown"}</b></span>
         <span>Status <b>{status}</b></span>
-        <span>Credential source <b>{readiness?.credentialSource ?? "Not available"}</b></span>
       </div>
-      <label className="field-label">
-        Audit model
-        <input value={model} onChange={(event) => setModel(event.target.value)} maxLength={128} placeholder="Enter the approved OpenAI model" disabled={!desktop || busy} />
-      </label>
       <div className="settings-action-row">
-        <button className="primary-button" type="button" onClick={() => void saveModel()} disabled={!desktop || busy || !model.trim()}>Save model</button>
-        <button className="secondary-button" type="button" onClick={() => void checkReadiness()} disabled={!desktop || busy}>Check readiness</button>
+        <button className="primary-button" type="button" onClick={() => void checkReadiness()} disabled={!desktop || busy}>Check readiness</button>
       </div>
-      <p className="settings-hint">Configuration is local-only until you check it. The native process reads OPENAI_API_KEY from the Windows environment visible to H!veAI; H!veAI never displays, persists, or returns the key.</p>
+      <p className="settings-hint">H!veAI uses the local Codex installation and the login managed by Codex itself. The explicit readiness check performs a bounded headless turn; audit history is created only when you run an audit.</p>
       {readiness?.errorCategory ? <div className="safe-notice" role="status">{readiness.errorCategory}</div> : null}
       {message ? <div className="safe-notice" role="status">{message}</div> : null}
     </section>

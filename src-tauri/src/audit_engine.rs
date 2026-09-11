@@ -1,3 +1,7 @@
+use crate::codex_runtime::{
+    probe_login_status, probe_version, resolve_codex_executable, run_bounded_process, LoginState,
+    ProbeError, READINESS_TIMEOUT,
+};
 use crate::db::DatabaseState;
 use crate::git_engine::{self, GitDiffRequest, GitDiffScope, GitSnapshot, GitSnapshotRequest};
 use crate::project_dashboard;
@@ -12,8 +16,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
@@ -464,16 +468,16 @@ pub struct UnavailableAuditModel;
 
 impl AuditModel for UnavailableAuditModel {
     fn provider(&self) -> String {
-        "OPENAI_GPT".into()
+        "CODEX_CLI".into()
     }
     fn model(&self) -> String {
-        "UNCONFIGURED".into()
+        CODEX_DEFAULT_MODEL.into()
     }
     fn version(&self) -> String {
         "UNAVAILABLE".into()
     }
     fn evaluate(&self, _input: &AuditInput) -> Result<String, String> {
-        Err("AUDIT_MODEL_UNAVAILABLE: no configured GPT audit provider exists".into())
+        Err("AUDIT_MODEL_UNAVAILABLE: no supported Codex CLI audit provider is available".into())
     }
 }
 
@@ -498,403 +502,18 @@ impl AuditModel for FixtureAuditModel {
     }
 }
 
-const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
-const OPENAI_MODEL_URL_PREFIX: &str = "https://api.openai.com/v1/models/";
-const OPENAI_MODEL_SETTING: &str = "audit.openai.model";
-const MAX_PROVIDER_RESPONSE_BYTES: usize = MAX_MODEL_OUTPUT_BYTES * 2;
-const PROVIDER_TIMEOUT: Duration = Duration::from_secs(60);
-const READINESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const READINESS_TIMEOUT: Duration = Duration::from_secs(10);
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditProviderReadiness {
     pub provider: String,
     pub status: String,
     pub configured: bool,
+    pub executable_available: bool,
+    pub version: Option<String>,
+    pub login_state: Option<String>,
     pub model: Option<String>,
     pub credential_source: Option<String>,
     pub error_category: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuditProviderModelRequest {
-    pub model: String,
-}
-
-trait AuditHttpTransport: Send + Sync {
-    fn post_responses(&self, api_key: &str, body: &Value) -> Result<AuditHttpResponse, String>;
-    fn get_model(&self, api_key: &str, model: &str) -> Result<AuditHttpResponse, String>;
-}
-
-#[derive(Debug, Clone)]
-struct AuditHttpResponse {
-    status: u16,
-    body: String,
-}
-
-struct ReqwestAuditTransport {
-    client: reqwest::blocking::Client,
-}
-
-impl ReqwestAuditTransport {
-    fn new() -> Result<Self, String> {
-        reqwest::blocking::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(PROVIDER_TIMEOUT)
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: HTTPS client unavailable".into())
-    }
-
-    fn readiness() -> Result<Self, String> {
-        reqwest::blocking::Client::builder()
-            .connect_timeout(READINESS_CONNECT_TIMEOUT)
-            .timeout(READINESS_TIMEOUT)
-            .build()
-            .map(|client| Self { client })
-            .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: HTTPS readiness client unavailable".into())
-    }
-}
-
-fn read_bounded_response(mut response: reqwest::blocking::Response) -> Result<AuditHttpResponse, String> {
-    let status = response.status().as_u16();
-    let mut bytes = Vec::new();
-    response
-        .take((MAX_PROVIDER_RESPONSE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "AUDIT_PROVIDER_NETWORK_ERROR: response could not be read".to_string())?;
-    if bytes.len() > MAX_PROVIDER_RESPONSE_BYTES {
-        return Err("AUDIT_MODEL_OUTPUT_TRUNCATED: provider response exceeded the bounded response limit".into());
-    }
-    Ok(AuditHttpResponse {
-        status,
-        body: String::from_utf8(bytes)
-            .map_err(|_| "AUDIT_MODEL_SCHEMA_INVALID: provider response was not UTF-8".to_string())?,
-    })
-}
-
-impl AuditHttpTransport for ReqwestAuditTransport {
-    fn post_responses(&self, api_key: &str, body: &Value) -> Result<AuditHttpResponse, String> {
-        let response = self
-            .client
-            .post(OPENAI_RESPONSES_URL)
-            .bearer_auth(api_key)
-            .json(body)
-            .send()
-            .map_err(|error| {
-                if error.is_timeout() {
-                    "AUDIT_PROVIDER_NETWORK_ERROR: request timed out".to_string()
-                } else {
-                    "AUDIT_PROVIDER_NETWORK_ERROR: request failed".to_string()
-                }
-            })?;
-        read_bounded_response(response)
-    }
-
-    fn get_model(&self, api_key: &str, model: &str) -> Result<AuditHttpResponse, String> {
-        let response = self
-            .client
-            .get(format!("{OPENAI_MODEL_URL_PREFIX}{model}"))
-            .bearer_auth(api_key)
-            .send()
-            .map_err(|error| {
-                if error.is_timeout() {
-                    "AUDIT_PROVIDER_NETWORK_ERROR: readiness request timed out".to_string()
-                } else {
-                    "AUDIT_PROVIDER_NETWORK_ERROR: readiness request failed".to_string()
-                }
-            })?;
-        read_bounded_response(response)
-    }
-}
-
-struct OpenAiAuditModel {
-    model: String,
-    api_key: String,
-    transport: Arc<dyn AuditHttpTransport>,
-}
-
-impl AuditModel for OpenAiAuditModel {
-    fn provider(&self) -> String {
-        "OPENAI_GPT".into()
-    }
-
-    fn model(&self) -> String {
-        self.model.clone()
-    }
-
-    fn version(&self) -> String {
-        "responses-api-v1".into()
-    }
-
-    fn evaluate(&self, input: &AuditInput) -> Result<String, String> {
-        let body = build_openai_request(&self.model, input)?;
-        let response = self.transport.post_responses(&self.api_key, &body)?;
-        match response.status {
-            200..=299 => extract_openai_output(&response.body),
-            401 | 403 => Err("AUDIT_PROVIDER_AUTH_ERROR: OpenAI rejected the configured credential".into()),
-            429 => Err("AUDIT_PROVIDER_RATE_LIMITED: OpenAI rate or quota limit".into()),
-            500..=599 => Err("AUDIT_PROVIDER_HTTP_5XX: OpenAI is unavailable".into()),
-            _ => Err(format!("AUDIT_PROVIDER_HTTP_ERROR: OpenAI returned status {}", response.status)),
-        }
-    }
-}
-
-enum ProductionAuditModel {
-    OpenAi(OpenAiAuditModel),
-    Unavailable(UnavailableAuditModel),
-}
-
-impl AuditModel for ProductionAuditModel {
-    fn provider(&self) -> String {
-        match self {
-            Self::OpenAi(model) => model.provider(),
-            Self::Unavailable(model) => model.provider(),
-        }
-    }
-
-    fn model(&self) -> String {
-        match self {
-            Self::OpenAi(model) => model.model(),
-            Self::Unavailable(model) => model.model(),
-        }
-    }
-
-    fn version(&self) -> String {
-        match self {
-            Self::OpenAi(model) => model.version(),
-            Self::Unavailable(model) => model.version(),
-        }
-    }
-
-    fn evaluate(&self, input: &AuditInput) -> Result<String, String> {
-        match self {
-            Self::OpenAi(model) => model.evaluate(input),
-            Self::Unavailable(model) => model.evaluate(input),
-        }
-    }
-}
-
-fn configured_audit_model(database: &DatabaseState) -> Result<Option<String>, String> {
-    let connection = database.open_connection()?;
-    let value = connection
-        .query_row(
-            "SELECT value_json FROM settings WHERE key=?1 AND scope='WORKSPACE'",
-            [OPENAI_MODEL_SETTING],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-    Ok(value
-        .and_then(|raw| serde_json::from_str::<String>(&raw).ok())
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty()))
-}
-
-pub fn audit_provider_readiness(
-    database: &DatabaseState,
-) -> Result<AuditProviderReadiness, String> {
-    let model = configured_audit_model(database)?;
-    let key_configured = std::env::var("OPENAI_API_KEY")
-        .ok()
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false);
-    let missing = match (key_configured, model.as_deref()) {
-        (false, None) => Some("OPENAI_API_KEY and audit model are not configured"),
-        (false, Some(_)) => Some("OPENAI_API_KEY environment credential is not configured"),
-        (true, None) => Some("audit model is not configured"),
-        (true, Some(_)) => None,
-    };
-    Ok(AuditProviderReadiness {
-        provider: "OpenAI".into(),
-        status: if missing.is_none() {
-            "CONFIGURED_UNVERIFIED".into()
-        } else {
-            "NOT_CONFIGURED".into()
-        },
-        configured: missing.is_none(),
-        model,
-        credential_source: key_configured.then(|| "OPENAI_API_KEY environment".into()),
-        error_category: missing.map(str::to_string),
-    })
-}
-
-fn model_name_is_safe(model: &str) -> bool {
-    !model.is_empty()
-        && model.len() <= 128
-        && model
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':'))
-}
-
-fn readiness_result(
-    model: Option<String>,
-    status: &str,
-    error_category: Option<&str>,
-) -> AuditProviderReadiness {
-    AuditProviderReadiness {
-        provider: "OpenAI".into(),
-        status: status.into(),
-        configured: matches!(status, "READY" | "CONFIGURED_UNVERIFIED"),
-        model,
-        credential_source: Some("OPENAI_API_KEY environment".into()),
-        error_category: error_category.map(str::to_string),
-    }
-}
-
-fn check_readiness_with_transport(
-    model: String,
-    api_key: &str,
-    transport: &dyn AuditHttpTransport,
-) -> AuditProviderReadiness {
-    if !model_name_is_safe(&model) {
-        return readiness_result(
-            Some(model),
-            "MODEL_UNAVAILABLE",
-            Some("configured audit model name is invalid"),
-        );
-    }
-    let response = match transport.get_model(api_key, &model) {
-        Ok(response) => response,
-        Err(error) => {
-            let category = if error.starts_with("AUDIT_MODEL_OUTPUT_TRUNCATED") {
-                "provider readiness response exceeded the bounded response limit"
-            } else {
-                "provider readiness request was unavailable"
-            };
-            return readiness_result(Some(model), "NETWORK_ERROR", Some(category));
-        }
-    };
-    match response.status {
-        200..=299 => {
-            let parsed = serde_json::from_str::<Value>(&response.body).ok();
-            let returned_id = parsed
-                .as_ref()
-                .and_then(|value| value.get("id"))
-                .and_then(Value::as_str);
-            if returned_id == Some(model.as_str()) {
-                readiness_result(Some(model), "READY", None)
-            } else {
-                readiness_result(
-                    Some(model),
-                    "MODEL_UNAVAILABLE",
-                    Some("provider returned no matching configured model"),
-                )
-            }
-        }
-        401 | 403 => readiness_result(
-            Some(model),
-            "AUTH_ERROR",
-            Some("provider rejected the configured credential"),
-        ),
-        429 => readiness_result(
-            Some(model),
-            "RATE_LIMITED",
-            Some("provider rate or quota limit"),
-        ),
-        404 => readiness_result(
-            Some(model),
-            "MODEL_UNAVAILABLE",
-            Some("configured model is unavailable to this provider account"),
-        ),
-        500..=599 => readiness_result(
-            Some(model),
-            "NETWORK_ERROR",
-            Some("provider is unavailable"),
-        ),
-        _ => readiness_result(
-            Some(model),
-            "MODEL_UNAVAILABLE",
-            Some("provider rejected the configured model"),
-        ),
-    }
-}
-
-pub fn check_audit_provider_readiness(
-    database: &DatabaseState,
-) -> Result<AuditProviderReadiness, String> {
-    let local = audit_provider_readiness(database)?;
-    if !local.configured {
-        return Ok(local);
-    }
-    let Some(model) = local.model else {
-        return Ok(readiness_result(
-            None,
-            "NOT_CONFIGURED",
-            Some("audit model is not configured"),
-        ));
-    };
-    if !model_name_is_safe(&model) {
-        return Ok(readiness_result(
-            Some(model),
-            "MODEL_UNAVAILABLE",
-            Some("configured audit model name is invalid"),
-        ));
-    }
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
-    let transport = ReqwestAuditTransport::readiness()?;
-    Ok(check_readiness_with_transport(model, &api_key, &transport))
-}
-
-pub fn set_audit_provider_model(
-    database: &DatabaseState,
-    request: AuditProviderModelRequest,
-) -> Result<AuditProviderReadiness, String> {
-    let model = request.model.trim();
-    if !model_name_is_safe(model) || model.chars().any(char::is_control) {
-        return Err("AUDIT_PROVIDER_MODEL_INVALID: model must be a bounded non-empty value".into());
-    }
-    let connection = database.open_connection()?;
-    let now = utc_timestamp();
-    connection
-        .execute(
-            "INSERT INTO settings (key,value_json,scope,created_at,updated_at) VALUES (?1,?2,'WORKSPACE',?3,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
-            params![OPENAI_MODEL_SETTING, serde_json::to_string(model).map_err(|error| error.to_string())?, now],
-        )
-        .map_err(|error| error.to_string())?;
-    audit_provider_readiness(database)
-}
-
-fn resolve_production_model(database: &DatabaseState) -> ProductionAuditModel {
-    let readiness = match audit_provider_readiness(database) {
-        Ok(value) => value,
-        Err(_) => return ProductionAuditModel::Unavailable(UnavailableAuditModel),
-    };
-    if !readiness.configured {
-        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
-    }
-    let Some(model) = readiness.model else {
-        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
-    };
-    let Ok(api_key) = std::env::var("OPENAI_API_KEY") else {
-        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
-    };
-    let Ok(transport) = ReqwestAuditTransport::new() else {
-        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
-    };
-    ProductionAuditModel::OpenAi(OpenAiAuditModel {
-        model,
-        api_key,
-        transport: Arc::new(transport),
-    })
-}
-
-fn build_openai_request(model: &str, input: &AuditInput) -> Result<Value, String> {
-    let input_json = serde_json::to_string(input).map_err(|error| error.to_string())?;
-    let body = json!({
-        "model": model,
-        "store": false,
-        "max_output_tokens": 4096,
-        "input": format!("Return only the JSON object matching the required audit schema.\n\nBounded audit evidence:\n{}", input_json),
-        "text": { "format": { "type": "json_schema", "name": "hiveai_audit_result", "strict": true, "schema": audit_result_schema() } }
-    });
-    let body_bytes = serde_json::to_vec(&body).map_err(|error| error.to_string())?;
-    if body_bytes.len() > MAX_AUDIT_INPUT_BYTES + 8192 {
-        return Err("AUDIT_PROVIDER_REQUEST_BOUNDS: request exceeded the bounded audit input limit".into());
-    }
-    Ok(body)
 }
 
 fn audit_result_schema() -> Value {
@@ -920,36 +539,471 @@ fn audit_result_schema() -> Value {
     })
 }
 
-fn extract_openai_output(raw: &str) -> Result<String, String> {
-    let value: Value = serde_json::from_str(raw)
-        .map_err(|_| "AUDIT_MODEL_SCHEMA_INVALID: OpenAI response envelope was malformed".to_string())?;
-    if value.get("status").and_then(Value::as_str) == Some("incomplete") {
-        return Err("AUDIT_PROVIDER_INCOMPLETE: OpenAI did not return a complete response".into());
-    }
-    if value.get("error").is_some() {
-        return Err("AUDIT_PROVIDER_ERROR: OpenAI returned an error response".into());
-    }
-    let mut candidates = Vec::new();
-    collect_output_text(&value, &mut candidates);
-    candidates
-        .pop()
-        .ok_or_else(|| "AUDIT_MODEL_SCHEMA_INVALID: OpenAI response contained no final structured output".into())
+const CODEX_DEFAULT_MODEL: &str = "CLI_DEFAULT";
+const CODEX_AUDIT_TIMEOUT: Duration = Duration::from_secs(120);
+const CODEX_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
+const CODEX_MAX_STDOUT_BYTES: usize = 64 * 1024;
+const CODEX_MAX_STDERR_BYTES: usize = 16 * 1024;
+const CODEX_MAX_FINAL_BYTES: usize = MAX_MODEL_OUTPUT_BYTES;
+
+#[derive(Debug, Clone)]
+struct CodexProcessRequest {
+    prompt: String,
+    schema: Option<Value>,
+    model: Option<String>,
+    timeout: Duration,
 }
 
-fn collect_output_text(value: &Value, candidates: &mut Vec<String>) {
-    match value {
-        Value::Object(map) => {
-            if map.get("type").and_then(Value::as_str) == Some("output_text") {
-                if let Some(text) = map.get("text").and_then(Value::as_str) {
-                    candidates.push(text.to_string());
-                }
+#[derive(Debug, Clone)]
+struct CodexProcessResult {
+    stdout: String,
+    stderr: String,
+    final_message: Option<String>,
+    exit_code: Option<i32>,
+    timed_out: bool,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+}
+
+trait CodexProcessRunner: Send + Sync {
+    fn run(&self, request: &CodexProcessRequest) -> Result<CodexProcessResult, String>;
+}
+
+struct NativeCodexProcessRunner {
+    executable: PathBuf,
+}
+
+impl CodexProcessRunner for NativeCodexProcessRunner {
+    fn run(&self, request: &CodexProcessRequest) -> Result<CodexProcessResult, String> {
+        let directory = std::env::temp_dir().join(format!("hiveai-codex-audit-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).map_err(|_| {
+            "AUDIT_CODEX_PROCESS_ERROR: dedicated temporary audit directory unavailable".to_string()
+        })?;
+        let schema_path = directory.join("audit-result-schema.json");
+        let final_path = directory.join("audit-final-message.json");
+        let result = (|| {
+            if let Some(schema) = &request.schema {
+                let mut file = File::create(&schema_path).map_err(|_| {
+                    "AUDIT_CODEX_PROCESS_ERROR: output schema file unavailable".to_string()
+                })?;
+                let bytes = serde_json::to_vec(schema).map_err(|_| {
+                    "AUDIT_CODEX_PROCESS_ERROR: output schema serialization failed".to_string()
+                })?;
+                file.write_all(&bytes).map_err(|_| {
+                    "AUDIT_CODEX_PROCESS_ERROR: output schema write failed".to_string()
+                })?;
             }
-            for child in map.values() {
-                collect_output_text(child, candidates);
+            let args = build_codex_audit_args(
+                &directory,
+                &schema_path,
+                &final_path,
+                request.model.as_deref(),
+                request.schema.is_some(),
+            );
+            let mut command = crate::process_policy::background_command(&self.executable);
+            command.args(args).current_dir(&directory);
+            let process = run_bounded_process(
+                command,
+                Some(request.prompt.as_bytes()),
+                request.timeout,
+                CODEX_MAX_STDOUT_BYTES,
+                CODEX_MAX_STDERR_BYTES,
+            )
+            .map_err(|_| {
+                "AUDIT_CODEX_PROCESS_ERROR: Codex process could not be started or observed"
+                    .to_string()
+            })?;
+            let final_message = read_bounded_final_message(&final_path)?;
+            Ok(CodexProcessResult {
+                stdout: String::from_utf8_lossy(&process.output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&process.output.stderr).into_owned(),
+                final_message,
+                exit_code: process.output.status.code(),
+                timed_out: process.timed_out,
+                stdout_truncated: process.stdout_truncated,
+                stderr_truncated: process.stderr_truncated,
+            })
+        })();
+        let _ = fs::remove_dir_all(&directory);
+        result
+    }
+}
+
+fn read_bounded_final_message(path: &Path) -> Result<Option<String>, String> {
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    if bytes.len() > CODEX_MAX_FINAL_BYTES {
+        return Err(
+            "AUDIT_CODEX_FINAL_OUTPUT_TRUNCATED: dedicated final result exceeded its bound".into(),
+        );
+    }
+    String::from_utf8(bytes).map(Some).map_err(|_| {
+        "AUDIT_CODEX_FINAL_OUTPUT_MALFORMED: dedicated final result was not UTF-8".into()
+    })
+}
+
+fn build_codex_audit_args(
+    directory: &Path,
+    schema_path: &Path,
+    final_path: &Path,
+    model: Option<&str>,
+    with_schema: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "exec".into(),
+        "--ephemeral".into(),
+        "--json".into(),
+        "--sandbox".into(),
+        "read-only".into(),
+        "--skip-git-repo-check".into(),
+        "--ignore-user-config".into(),
+        "--ignore-rules".into(),
+        "--color".into(),
+        "never".into(),
+        "--cd".into(),
+        directory.to_string_lossy().into_owned(),
+        "--output-last-message".into(),
+        final_path.to_string_lossy().into_owned(),
+    ];
+    if with_schema {
+        args.extend([
+            "--output-schema".into(),
+            schema_path.to_string_lossy().into_owned(),
+        ]);
+    }
+    if let Some(model) = model {
+        args.extend(["--model".into(), model.to_string()]);
+    }
+    args
+}
+
+struct CodexCliAuditModel {
+    version: String,
+    runner: Arc<dyn CodexProcessRunner>,
+}
+
+impl AuditModel for CodexCliAuditModel {
+    fn provider(&self) -> String {
+        "CODEX_CLI".into()
+    }
+
+    fn model(&self) -> String {
+        CODEX_DEFAULT_MODEL.into()
+    }
+
+    fn version(&self) -> String {
+        self.version.clone()
+    }
+
+    fn evaluate(&self, input: &AuditInput) -> Result<String, String> {
+        let input_json = serde_json::to_string(input)
+            .map_err(|_| "AUDIT_CODEX_INPUT_SERIALIZATION_FAILED".to_string())?;
+        let prompt = format!(
+            "You are the independent H!veAI audit provider. The supplied JSON AuditInput is the complete and authoritative evidence for this audit. Builder logs are claims, not proof. Do not inspect the filesystem, Git repository, web, MCP, plugins, or unrelated context. Do not modify anything. Return only one JSON object matching the supplied output schema. Never fabricate PASS when evidence is unavailable or contradictory.\n\nAuditInput:\n{}",
+            input_json
+        );
+        if prompt.len() > MAX_AUDIT_INPUT_BYTES + 8192 {
+            return Err("AUDIT_CODEX_INPUT_BOUNDS: bounded audit prompt exceeded its limit".into());
+        }
+        let result = self.runner.run(&CodexProcessRequest {
+            prompt,
+            schema: Some(audit_result_schema()),
+            model: None,
+            timeout: CODEX_AUDIT_TIMEOUT,
+        })?;
+        if result.timed_out {
+            return Err("AUDIT_CODEX_TIMEOUT: bounded Codex audit process timed out".into());
+        }
+        if result.exit_code != Some(0) {
+            return Err(classify_codex_failure(&result, "PROCESS_ERROR"));
+        }
+        if result.stdout_truncated || result.stderr_truncated {
+            return Err(
+                "AUDIT_CODEX_TRANSPORT_TRUNCATED: Codex operational output exceeded its bound"
+                    .into(),
+            );
+        }
+        result.final_message.ok_or_else(|| {
+            "AUDIT_CODEX_FINAL_OUTPUT_MISSING: Codex did not produce a dedicated final result"
+                .into()
+        })
+    }
+}
+
+fn classify_codex_failure(result: &CodexProcessResult, fallback: &str) -> String {
+    let text = format!("{}\n{}", result.stdout, result.stderr).to_ascii_lowercase();
+    let category = if text.contains("api key") || text.contains("api-key") {
+        "AUTH_POLICY_BLOCKED"
+    } else if text.contains("login")
+        || text.contains("authenticated")
+        || text.contains("unauthorized")
+    {
+        "AUTH_REQUIRED"
+    } else if text.contains("usage") || text.contains("quota") || text.contains("rate limit") {
+        "USAGE_LIMITED"
+    } else if text.contains("network") || text.contains("connect") || text.contains("timeout") {
+        "NETWORK_ERROR"
+    } else {
+        fallback
+    };
+    format!("AUDIT_CODEX_{category}: bounded Codex process did not produce an accepted result")
+}
+
+fn provider_readiness(
+    status: &str,
+    available: bool,
+    version: Option<String>,
+    diagnostic_message: &str,
+) -> AuditProviderReadiness {
+    let login_state = match status {
+        "AUTH_POLICY_BLOCKED" => "API-key authentication unsupported",
+        "AUTH_REQUIRED" => "Not logged in",
+        "AUTH_UNVERIFIED" => "ChatGPT login reported; turn unverified",
+        "READY" => "ChatGPT authenticated",
+        _ => "Unavailable",
+    };
+    AuditProviderReadiness {
+        provider: "Codex CLI".into(),
+        status: status.into(),
+        configured: available,
+        executable_available: version.is_some(),
+        version,
+        login_state: Some(login_state.into()),
+        model: Some(CODEX_DEFAULT_MODEL.into()),
+        credential_source: Some("Codex-managed login state".into()),
+        error_category: (!diagnostic_message.is_empty()).then(|| diagnostic_message.into()),
+    }
+}
+
+pub fn audit_provider_readiness(
+    _database: &DatabaseState,
+) -> Result<AuditProviderReadiness, String> {
+    let resolution = resolve_codex_executable();
+    let Some(executable) = resolution.selected else {
+        return Ok(provider_readiness(
+            "CODEX_NOT_FOUND",
+            false,
+            None,
+            "No native Codex executable was found.",
+        ));
+    };
+    let version = match probe_version(&executable, READINESS_TIMEOUT) {
+        Ok(value) => value,
+        Err(ProbeError::Timeout) => {
+            return Ok(provider_readiness(
+                "TIMEOUT",
+                false,
+                None,
+                "Codex version probe timed out.",
+            ))
+        }
+        Err(ProbeError::Malformed) => {
+            return Ok(provider_readiness(
+                "PROCESS_ERROR",
+                false,
+                None,
+                "Codex version output was malformed.",
+            ))
+        }
+        Err(ProbeError::Failed) => {
+            return Ok(provider_readiness(
+                "PROCESS_ERROR",
+                false,
+                None,
+                "Codex version probe failed.",
+            ))
+        }
+    };
+    match probe_login_status(&executable, READINESS_TIMEOUT) {
+        Ok(LoginState::ChatGpt) => Ok(provider_readiness(
+            "AUTH_UNVERIFIED",
+            true,
+            Some(version),
+            "Codex reports a ChatGPT login; end-to-end readiness requires Check readiness.",
+        )),
+        Ok(LoginState::ApiKey) => Ok(provider_readiness(
+            "AUTH_POLICY_BLOCKED",
+            false,
+            Some(version),
+            "Codex reports API-key authentication, which H!veAI does not accept for audits.",
+        )),
+        Ok(LoginState::NotLoggedIn) => Ok(provider_readiness(
+            "AUTH_REQUIRED",
+            false,
+            Some(version),
+            "Codex is not logged in through a supported ChatGPT session.",
+        )),
+        Ok(LoginState::Unknown) => Ok(provider_readiness(
+            "AUTH_UNVERIFIED",
+            false,
+            Some(version),
+            "Codex executable is available but its bounded login status was not recognized.",
+        )),
+        Err(ProbeError::Timeout) => Ok(provider_readiness(
+            "TIMEOUT",
+            false,
+            Some(version),
+            "Codex login status timed out.",
+        )),
+        Err(_) => Ok(provider_readiness(
+            "PROCESS_ERROR",
+            false,
+            Some(version),
+            "Codex login status could not be verified.",
+        )),
+    }
+}
+
+fn check_codex_readiness_with_runner(
+    version: String,
+    runner: &dyn CodexProcessRunner,
+) -> AuditProviderReadiness {
+    let result = runner.run(&CodexProcessRequest {
+        prompt: "Reply with exactly READY. Do not inspect files, repositories, web, MCP, plugins, or unrelated context.".into(),
+        schema: None,
+        model: None,
+        timeout: CODEX_READINESS_TIMEOUT,
+    });
+    let failure = |status: &str, message: String| AuditProviderReadiness {
+        provider: "Codex CLI".into(),
+        status: status.into(),
+        configured: status == "READY",
+        executable_available: true,
+        version: Some(version.clone()),
+        login_state: Some(
+            match status {
+                "AUTH_POLICY_BLOCKED" => "API-key authentication unsupported",
+                "AUTH_REQUIRED" => "Not logged in",
+                _ => "ChatGPT login end-to-end check failed",
+            }
+            .into(),
+        ),
+        model: Some(CODEX_DEFAULT_MODEL.into()),
+        credential_source: Some("Codex-managed login state".into()),
+        error_category: Some(format!("{} ({})", message, version)),
+    };
+    match result {
+        Err(error) => failure("PROCESS_ERROR", error),
+        Ok(result) if result.timed_out => {
+            failure("TIMEOUT", "Codex readiness probe timed out".into())
+        }
+        Ok(result) if result.exit_code != Some(0) => {
+            let error = classify_codex_failure(&result, "PROCESS_ERROR");
+            let status = if error.contains("AUTH_POLICY_BLOCKED") {
+                "AUTH_POLICY_BLOCKED"
+            } else if error.contains("AUTH_REQUIRED") {
+                "AUTH_REQUIRED"
+            } else if error.contains("USAGE_LIMITED") {
+                "USAGE_LIMITED"
+            } else if error.contains("NETWORK_ERROR") {
+                "NETWORK_ERROR"
+            } else {
+                "PROCESS_ERROR"
+            };
+            failure(status, error)
+        }
+        Ok(result) if result.stdout_truncated || result.stderr_truncated => failure(
+            "PROCESS_ERROR",
+            "Codex readiness diagnostics were truncated".into(),
+        ),
+        Ok(result) if result.final_message.as_deref().map(str::trim) == Some("READY") => {
+            AuditProviderReadiness {
+                provider: "Codex CLI".into(),
+                status: "READY".into(),
+                configured: true,
+                executable_available: true,
+                version: Some(version),
+                login_state: Some("ChatGPT authenticated".into()),
+                model: Some(CODEX_DEFAULT_MODEL.into()),
+                credential_source: Some("Codex-managed login state".into()),
+                error_category: None,
             }
         }
-        Value::Array(values) => values.iter().for_each(|child| collect_output_text(child, candidates)),
-        _ => {}
+        Ok(_) => failure(
+            "PROCESS_ERROR",
+            "Codex readiness final output was not exactly READY".into(),
+        ),
+    }
+}
+
+pub fn check_audit_provider_readiness(
+    database: &DatabaseState,
+) -> Result<AuditProviderReadiness, String> {
+    let local = audit_provider_readiness(database)?;
+    if local.status != "AUTH_UNVERIFIED" || !local.configured {
+        return Ok(local);
+    }
+    let resolution = resolve_codex_executable();
+    let Some(executable) = resolution.selected else {
+        return Ok(provider_readiness(
+            "CODEX_NOT_FOUND",
+            false,
+            None,
+            "No native Codex executable was found.",
+        ));
+    };
+    let version =
+        probe_version(&executable, READINESS_TIMEOUT).unwrap_or_else(|_| "UNAVAILABLE".into());
+    Ok(check_codex_readiness_with_runner(
+        version,
+        &NativeCodexProcessRunner { executable },
+    ))
+}
+
+fn resolve_production_model(database: &DatabaseState) -> ProductionAuditModel {
+    let readiness = match audit_provider_readiness(database) {
+        Ok(value) => value,
+        Err(_) => return ProductionAuditModel::Unavailable(UnavailableAuditModel),
+    };
+    if readiness.status != "AUTH_UNVERIFIED" || !readiness.configured {
+        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
+    }
+    let resolution = resolve_codex_executable();
+    let Some(executable) = resolution.selected else {
+        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
+    };
+    let Ok(version) = probe_version(&executable, READINESS_TIMEOUT) else {
+        return ProductionAuditModel::Unavailable(UnavailableAuditModel);
+    };
+    ProductionAuditModel::Codex(CodexCliAuditModel {
+        version,
+        runner: Arc::new(NativeCodexProcessRunner { executable }),
+    })
+}
+
+enum ProductionAuditModel {
+    Codex(CodexCliAuditModel),
+    Unavailable(UnavailableAuditModel),
+}
+
+impl AuditModel for ProductionAuditModel {
+    fn provider(&self) -> String {
+        match self {
+            Self::Codex(model) => model.provider(),
+            Self::Unavailable(model) => model.provider(),
+        }
+    }
+
+    fn model(&self) -> String {
+        match self {
+            Self::Codex(model) => model.model(),
+            Self::Unavailable(model) => model.model(),
+        }
+    }
+
+    fn version(&self) -> String {
+        match self {
+            Self::Codex(model) => model.version(),
+            Self::Unavailable(model) => model.version(),
+        }
+    }
+
+    fn evaluate(&self, input: &AuditInput) -> Result<String, String> {
+        match self {
+            Self::Codex(model) => model.evaluate(input),
+            Self::Unavailable(model) => model.evaluate(input),
+        }
     }
 }
 
@@ -1679,7 +1733,7 @@ fn read_source_evidence(
             let canonical = canonical?;
             let mut file = File::open(canonical).ok()?;
             let mut bytes = Vec::new();
-            file.by_ref()
+            std::io::Read::by_ref(&mut file)
                 .take((MAX_SOURCE_SNIPPET_BYTES * 16 + 1) as u64)
                 .read_to_end(&mut bytes)
                 .ok()?;
@@ -2514,22 +2568,37 @@ fn unavailable_evaluation<M: AuditModel>(
             coverage.push(RequirementCoverage { id: format!("coverage-{index}"), logical_coverage_id: requirement_ref.clone(), requirement_ref, requirement_text: truncate_utf8(requirement, 4096), status: CoverageStatus::Unverified, evidence_refs: vec![format!("TASK_REQUIREMENTS:{}", task.task_id)], rationale: "No configured GPT audit model was available to verify this requirement.".into() });
         }
     }
-    let model_status = if error.starts_with("AUDIT_PROVIDER_AUTH_ERROR") {
-        "AUTH_ERROR"
-    } else if error.starts_with("AUDIT_PROVIDER_RATE_LIMITED") {
-        "RATE_LIMITED"
-    } else if error.starts_with("AUDIT_PROVIDER_NETWORK_ERROR")
-        || error.starts_with("AUDIT_PROVIDER_HTTP_5XX")
-    {
+    let model_status = if error.contains("AUTH_POLICY_BLOCKED") {
+        "AUTH_POLICY_BLOCKED"
+    } else if error.contains("AUTH_REQUIRED") {
+        "AUTH_REQUIRED"
+    } else if error.contains("USAGE_LIMITED") {
+        "USAGE_LIMITED"
+    } else if error.contains("TIMEOUT") {
+        "TIMEOUT"
+    } else if error.contains("NETWORK_ERROR") {
         "NETWORK_ERROR"
+    } else if error.contains("PROCESS_ERROR") || error.contains("FINAL_OUTPUT") {
+        "PROCESS_ERROR"
     } else {
         "UNAVAILABLE"
     };
     let summary = match model_status {
-        "AUTH_ERROR" => "The configured OpenAI GPT audit credential was rejected; no model verdict is treated as PASS.",
-        "RATE_LIMITED" => "The OpenAI GPT audit provider is rate or quota limited; no model verdict is treated as PASS.",
-        "NETWORK_ERROR" => "The OpenAI GPT audit provider was unavailable; no model verdict is treated as PASS.",
-        _ => "Audit evidence was collected, but no configured GPT audit provider is available.",
+        "AUTH_POLICY_BLOCKED" => {
+            "Codex reports API-key authentication, which H!veAI does not accept for audits."
+        }
+        "AUTH_REQUIRED" => {
+            "Codex is not authenticated through the owner's supported ChatGPT login."
+        }
+        "USAGE_LIMITED" => "Codex usage is limited; no model verdict is treated as PASS.",
+        "TIMEOUT" => "Codex audit execution timed out; no model verdict is treated as PASS.",
+        "NETWORK_ERROR" => {
+            "The Codex audit provider was unavailable; no model verdict is treated as PASS."
+        }
+        "PROCESS_ERROR" => "Codex audit execution failed; no model verdict is treated as PASS.",
+        _ => {
+            "Audit evidence was collected, but no supported Codex CLI audit provider is available."
+        }
     };
     AuditEvaluation {
         verdict: AuditVerdict::Conditional,
@@ -5005,143 +5074,112 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct MockAuditTransport {
-        response: AuditHttpResponse,
-        readiness_response: Option<AuditHttpResponse>,
-        readiness_error: Option<String>,
-        request: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
+    struct MockCodexProcessRunner {
+        result: CodexProcessResult,
+        requests: std::sync::Arc<std::sync::Mutex<Vec<CodexProcessRequest>>>,
     }
 
-    impl AuditHttpTransport for MockAuditTransport {
-        fn post_responses(&self, _api_key: &str, body: &Value) -> Result<AuditHttpResponse, String> {
-            *self.request.lock().unwrap() = Some(body.clone());
-            Ok(self.response.clone())
-        }
-
-        fn get_model(&self, _api_key: &str, _model: &str) -> Result<AuditHttpResponse, String> {
-            if let Some(error) = &self.readiness_error {
-                return Err(error.clone());
-            }
-            Ok(self
-                .readiness_response
-                .clone()
-                .unwrap_or_else(|| self.response.clone()))
+    impl CodexProcessRunner for MockCodexProcessRunner {
+        fn run(&self, request: &CodexProcessRequest) -> Result<CodexProcessResult, String> {
+            self.requests.lock().unwrap().push(request.clone());
+            Ok(self.result.clone())
         }
     }
 
-    fn provider_model(response: AuditHttpResponse) -> (OpenAiAuditModel, std::sync::Arc<std::sync::Mutex<Option<Value>>>) {
-        let request = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let transport = MockAuditTransport { response, readiness_response: None, readiness_error: None, request: request.clone() };
-        let model = OpenAiAuditModel { model: "gpt-audit-test".into(), api_key: "sk-test-never-persist".into(), transport: std::sync::Arc::new(transport) };
-        (model, request)
+    fn mock_codex_result(final_message: Option<&str>) -> CodexProcessResult {
+        CodexProcessResult {
+            stdout: "progress".into(),
+            stderr: String::new(),
+            final_message: final_message.map(str::to_string),
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        }
     }
 
     #[test]
-    fn openai_responses_request_is_bounded_private_and_strict() {
-        let raw = r#"{"verdict":"FAIL","confidence":"HIGH","regressionRisk":"HIGH","summary":"provider result","model":"gpt-audit-test","modelVersion":"responses-api-v1","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#;
-        let (model, request) = provider_model(AuditHttpResponse {
-            status: 200,
-            body: json!({"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":raw}]}]}).to_string(),
-        });
+    fn codex_audit_process_policy_is_read_only_ephemeral_and_final_file_first() {
+        let args = build_codex_audit_args(
+            Path::new("C:\\Tools\\codex.exe"),
+            Path::new("C:\\Temp\\schema.json"),
+            Path::new("C:\\Temp\\final.json"),
+            None,
+            true,
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(args.contains(&"--ephemeral".into()));
+        assert!(args.contains(&"--ignore-user-config".into()));
+        assert!(args.contains(&"--ignore-rules".into()));
+        assert!(!args.iter().any(|value| value.contains("dangerously")));
+        assert!(args.contains(&"--output-schema".into()));
+        assert!(args.contains(&"--output-last-message".into()));
+        assert!(!args.contains(&"--model".into()));
+    }
+
+    #[test]
+    fn codex_audit_uses_dedicated_final_message_and_runtime_provenance() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let model = CodexCliAuditModel {
+            version: "codex-cli 0.153.4".into(),
+            runner: std::sync::Arc::new(MockCodexProcessRunner {
+                result: mock_codex_result(Some(
+                    r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"final","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#,
+                )),
+                requests: requests.clone(),
+            }),
+        };
         let output = model.evaluate(&input()).unwrap();
-        let evaluation = parse_model_output(&output).unwrap();
-        assert_eq!(evaluation.verdict, AuditVerdict::Fail);
-        let request = request.lock().unwrap().clone().unwrap();
-        assert_eq!(request["store"], false);
-        assert!(request.get("tools").is_none());
-        assert_eq!(request["text"]["format"]["type"], "json_schema");
-        assert_eq!(request["text"]["format"]["strict"], true);
-        assert!(!serde_json::to_string(&request).unwrap().contains("sk-test-never-persist"));
+        assert!(output.contains("\"verdict\":\"CONDITIONAL\""));
+        let request = requests.lock().unwrap().pop().unwrap();
+        assert!(request.prompt.contains("authoritative evidence"));
+        assert!(request.prompt.contains("Do not inspect"));
+        assert!(request.schema.is_some());
+        assert_eq!(model.provider(), "CODEX_CLI");
+        assert_eq!(model.model(), "CLI_DEFAULT");
+        assert_eq!(model.version(), "codex-cli 0.153.4");
     }
 
     #[test]
-    fn openai_provider_rejects_malformed_and_schema_invalid_output() {
-        let (malformed, _) = provider_model(AuditHttpResponse { status: 200, body: "not-json".into() });
-        assert!(malformed.evaluate(&input()).unwrap_err().starts_with("AUDIT_MODEL_SCHEMA_INVALID"));
-        let (invalid, _) = provider_model(AuditHttpResponse {
-            status: 200,
-            body: json!({"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"not-json"}]}]}).to_string(),
-        });
-        let raw = invalid.evaluate(&input()).unwrap();
-        assert!(parse_model_output(&raw).unwrap_err().starts_with("AUDIT_MODEL_SCHEMA_INVALID"));
-    }
-
-    #[test]
-    fn openai_provider_status_failures_never_become_pass() {
-        for (status, prefix) in [(401, "AUDIT_PROVIDER_AUTH_ERROR"), (403, "AUDIT_PROVIDER_AUTH_ERROR"), (429, "AUDIT_PROVIDER_RATE_LIMITED"), (503, "AUDIT_PROVIDER_HTTP_5XX")] {
-            let (model, _) = provider_model(AuditHttpResponse { status, body: "{}".into() });
-            let error = model.evaluate(&input()).unwrap_err();
-            assert!(error.starts_with(prefix), "status {status}: {error}");
-            let evaluation = unavailable_evaluation(error, &input(), &model);
-            assert_ne!(evaluation.verdict, AuditVerdict::Pass);
-        }
-    }
-
-    #[test]
-    fn audit_provider_model_setting_is_non_secret_and_readiness_is_truthful() {
-        let app_data = tempdir().unwrap();
-        let database = DatabaseState::initialize(app_data.path().to_path_buf()).unwrap();
-        let readiness = set_audit_provider_model(&database, AuditProviderModelRequest { model: "gpt-audit-test".into() }).unwrap();
-        assert_eq!(readiness.model.as_deref(), Some("gpt-audit-test"));
-        let stored: String = database.open_connection().unwrap().query_row("SELECT value_json FROM settings WHERE key=?1", [OPENAI_MODEL_SETTING], |row| row.get(0)).unwrap();
-        assert!(!stored.contains("sk-"));
-    }
-
-    #[test]
-    fn readiness_probe_classifies_model_endpoint_truthfully_without_audit_persistence() {
-        let cases = [
-            (200, json!({"id":"gpt-audit-test","object":"model"}).to_string(), "READY"),
-            (401, "{}".into(), "AUTH_ERROR"),
-            (403, "{}".into(), "AUTH_ERROR"),
-            (429, "{}".into(), "RATE_LIMITED"),
-            (503, "{}".into(), "NETWORK_ERROR"),
-            (404, "{}".into(), "MODEL_UNAVAILABLE"),
-        ];
-        for (status, body, expected) in cases {
-            let transport = MockAuditTransport {
-                response: AuditHttpResponse { status: 200, body: "{}".into() },
-                readiness_response: Some(AuditHttpResponse { status, body }),
-                readiness_error: None,
-                request: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    fn codex_readiness_classifies_success_failure_timeout_and_never_persists_audit() {
+        for (result, expected) in [
+            (mock_codex_result(Some("READY")), "READY"),
+            (mock_codex_result(Some("not-ready")), "PROCESS_ERROR"),
+            (
+                CodexProcessResult {
+                    timed_out: true,
+                    ..mock_codex_result(None)
+                },
+                "TIMEOUT",
+            ),
+        ] {
+            let runner = MockCodexProcessRunner {
+                result,
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             };
-            let result = check_readiness_with_transport(
-                "gpt-audit-test".into(),
-                "sk-mock-only",
-                &transport,
-            );
-            assert_eq!(result.status, expected);
-            assert_eq!(result.credential_source.as_deref(), Some("OPENAI_API_KEY environment"));
+            let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
+            assert_eq!(readiness.status, expected);
         }
-        let invalid = MockAuditTransport {
-            response: AuditHttpResponse { status: 200, body: "{}".into() },
-            readiness_response: None,
-            readiness_error: None,
-            request: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        };
-        let invalid_result = check_readiness_with_transport("gpt/audit".into(), "sk-mock-only", &invalid);
-        assert_eq!(invalid_result.status, "MODEL_UNAVAILABLE");
-
-        let failed = MockAuditTransport {
-            response: AuditHttpResponse { status: 200, body: "{}".into() },
-            readiness_response: None,
-            readiness_error: Some("AUDIT_MODEL_OUTPUT_TRUNCATED: bounded".into()),
-            request: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        };
-        let failed_result = check_readiness_with_transport("gpt-audit-test".into(), "sk-mock-only", &failed);
-        assert_eq!(failed_result.status, "NETWORK_ERROR");
-        assert!(!failed_result.configured || failed_result.status != "READY");
     }
 
     #[test]
     fn successful_audit_identity_is_runtime_authoritative_and_round_trips() {
         let response = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"runtime identity","model":"spoofed-model","modelVersion":"spoofed-version","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#;
-        let model = FixtureAuditModel { response: response.into() };
+        let model = FixtureAuditModel {
+            response: response.into(),
+        };
         let evaluation = evaluate_fixture(&input(), &model);
         assert_eq!(evaluation.auditor_provider.as_deref(), Some("FIXTURE"));
-        assert_eq!(evaluation.auditor_model.as_deref(), Some("deterministic-fixture"));
+        assert_eq!(
+            evaluation.auditor_model.as_deref(),
+            Some("deterministic-fixture")
+        );
         assert_eq!(evaluation.auditor_version.as_deref(), Some("1"));
 
-        let (_app, _project_dir, database, project_id) = git_project_fixture("Runtime identity fixture");
+        let (_app, _project_dir, database, project_id) =
+            git_project_fixture("Runtime identity fixture");
         let persisted = run_with_model(
             &database,
             AuditInputRequest {
@@ -5155,13 +5193,24 @@ mod tests {
         .unwrap();
         let reloaded = get(&database, &project_id, &persisted.id).unwrap();
         assert_eq!(reloaded.auditor_provider.as_deref(), Some("FIXTURE"));
-        assert_eq!(reloaded.auditor_model.as_deref(), Some("deterministic-fixture"));
+        assert_eq!(
+            reloaded.auditor_model.as_deref(),
+            Some("deterministic-fixture")
+        );
         assert_eq!(reloaded.auditor_version.as_deref(), Some("1"));
 
-        let malformed = evaluate_fixture(&input(), &FixtureAuditModel { response: "not-json".into() });
+        let malformed = evaluate_fixture(
+            &input(),
+            &FixtureAuditModel {
+                response: "not-json".into(),
+            },
+        );
         assert_eq!(malformed.model_status, "MALFORMED");
         assert_eq!(malformed.auditor_provider.as_deref(), Some("FIXTURE"));
-        assert_eq!(malformed.auditor_model.as_deref(), Some("deterministic-fixture"));
+        assert_eq!(
+            malformed.auditor_model.as_deref(),
+            Some("deterministic-fixture")
+        );
         assert_eq!(malformed.auditor_version.as_deref(), Some("1"));
     }
 }

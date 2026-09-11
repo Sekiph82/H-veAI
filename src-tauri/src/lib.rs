@@ -8,6 +8,7 @@ use tauri_plugin_log::{Target, TargetKind};
 mod agent_session_center;
 mod audit_engine;
 mod codex_adapter;
+mod codex_runtime;
 mod command_center;
 mod control_plane;
 mod db;
@@ -33,9 +34,7 @@ use agent_session_center::{
     SessionEvent,
 };
 #[cfg(not(test))]
-use audit_engine::{
-    AuditInput, AuditInputRequest, AuditProviderModelRequest, AuditProviderReadiness, AuditRun,
-};
+use audit_engine::{AuditInput, AuditInputRequest, AuditProviderReadiness, AuditRun};
 #[cfg(not(test))]
 use codex_adapter::{AgentAdapter, CodexAdapter, CodexReadiness, CodexSession, CodexStartRequest};
 #[cfg(not(test))]
@@ -520,14 +519,6 @@ mod app_commands {
     }
 
     #[tauri::command]
-    fn hiveai_audit_provider_set_model(
-        database: tauri::State<'_, DatabaseState>,
-        request: AuditProviderModelRequest,
-    ) -> Result<AuditProviderReadiness, String> {
-        audit_engine::set_audit_provider_model(&database, request)
-    }
-
-    #[tauri::command]
     fn hiveai_audits_list(
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
@@ -845,7 +836,6 @@ mod app_commands {
                 hiveai_audit_run,
                 hiveai_audit_provider_readiness,
                 hiveai_audit_provider_check_readiness,
-                hiveai_audit_provider_set_model,
                 hiveai_audits_list,
                 hiveai_audit_get,
                 hiveai_audit_create_remediation_prompt,
