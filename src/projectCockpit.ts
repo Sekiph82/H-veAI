@@ -202,5 +202,88 @@ export type ProjectCockpitSnapshot = {
   };
 };
 
+export type RemoteTasksViewState =
+  | "CURRENT_POPULATED"
+  | "CURRENT_EMPTY"
+  | "STALE_CACHED"
+  | "STALE_EMPTY"
+  | "DEGRADED_CACHED"
+  | "REMOTE_UNAVAILABLE"
+  | "STRUCTURALLY_INCONSISTENT";
+
+export type RemoteTasksView = {
+  state: RemoteTasksViewState;
+  title: string;
+  detail: string;
+  showCachedWarning: boolean;
+};
+
+export function getRemoteTasksView(
+  snapshot: Pick<ProjectCockpitSnapshot, "githubTracking" | "remoteTasks">,
+): RemoteTasksView | null {
+  const remote = snapshot.githubTracking;
+  if (!remote) return null;
+
+  const rows = snapshot.remoteTasks ?? [];
+  const health = remote.remoteHealth.toUpperCase();
+  if (health === "CURRENT") {
+    if ((remote.totalTasks ?? 0) > 0 && rows.length === 0) {
+      return {
+        state: "STRUCTURALLY_INCONSISTENT",
+        title: "Remote tasks need refresh",
+        detail: `The remote snapshot reports ${remote.totalTasks} task(s) but contains no materialized rows.`,
+        showCachedWarning: true,
+      };
+    }
+    if ((remote.totalTasks ?? 0) === 0 && rows.length === 0) {
+      return {
+        state: "CURRENT_EMPTY",
+        title: "No canonical remote tasks",
+        detail: "GitHub root TASKS.md was observed successfully and contains no parseable task rows.",
+        showCachedWarning: false,
+      };
+    }
+    return {
+      state: "CURRENT_POPULATED",
+      title: "Canonical remote tasks",
+      detail: `${rows.length} remote TASKS.md row(s)`,
+      showCachedWarning: false,
+    };
+  }
+
+  if (health === "STALE") {
+    if (rows.length > 0) {
+      return {
+        state: "STALE_CACHED",
+        title: "Showing stale remote tasks",
+        detail: `${rows.length} cached remote TASKS.md row(s). ${remote.error ?? "A fresh GitHub observation is pending."}`,
+        showCachedWarning: true,
+      };
+    }
+    return {
+      state: "STALE_EMPTY",
+      title: "Remote tasks unavailable",
+      detail: `The last remote snapshot is stale and contains no usable task rows. ${remote.error ?? "A fresh GitHub observation is pending."}`,
+      showCachedWarning: true,
+    };
+  }
+
+  if (rows.length > 0) {
+    return {
+      state: "DEGRADED_CACHED",
+      title: "Showing cached remote tasks",
+      detail: `${rows.length} cached remote TASKS.md row(s). ${remote.error ?? `GitHub remote status is ${health}.`}`,
+      showCachedWarning: true,
+    };
+  }
+
+  return {
+    state: "REMOTE_UNAVAILABLE",
+    title: "Remote tasks unavailable",
+    detail: `GitHub remote observation is ${health.toLowerCase()}: ${remote.error ?? "no usable remote snapshot is available."}`,
+    showCachedWarning: true,
+  };
+}
+
 export const getProjectCockpitSnapshot = (projectId: string) =>
   invoke<ProjectCockpitSnapshot>("hiveai_project_cockpit_snapshot", { projectId });

@@ -64,6 +64,7 @@ import {
   type CommandCenterProject,
 } from "./commandCenter";
 import {
+  getRemoteTasksView,
   getProjectCockpitSnapshot,
   type ProjectCockpitSnapshot,
 } from "./projectCockpit";
@@ -2021,6 +2022,7 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
   const isRemote = Boolean(snapshot.githubTracking);
   const tasks = snapshot.taskIntelligence?.tasks ?? [];
   const remoteTasks = snapshot.remoteTasks ?? [];
+  const remoteTasksView = getRemoteTasksView(snapshot);
   const workflowById = new Map(
     snapshot.workflow.tasks.map((task) => [task.taskId, task]),
   );
@@ -2030,12 +2032,17 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
         title="Canonical tasks"
         detail={
           isRemote
-            ? `${remoteTasks.length} remote TASKS.md row(s)`
+            ? remoteTasksView?.detail ?? "Remote task state unavailable"
             : snapshot.taskIntelligence
             ? `${tasks.length} persisted parsed task(s)`
             : "Task intelligence unavailable"
         }
       >
+        {remoteTasksView?.showCachedWarning ? (
+          <div className="safe-notice">
+            {remoteTasksView.title}: {remoteTasksView.detail}
+          </div>
+        ) : null}
         {snapshot.taskIntelligenceError ? (
           <div className="safe-notice">
             Unknown: {snapshot.taskIntelligenceError}
@@ -2103,10 +2110,10 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
             );
           })}
         </div>
-        {((isRemote && !remoteTasks.length) || (!isRemote && !tasks.length && !snapshot.taskIntelligenceError)) ? (
+        {((isRemote && remoteTasksView && remoteTasksView.state !== "CURRENT_POPULATED" && !remoteTasks.length) || (!isRemote && !tasks.length && !snapshot.taskIntelligenceError)) ? (
           <EmptyState
-            title={isRemote ? "No canonical remote tasks" : "No parsed tasks"}
-            detail={isRemote ? "The remote root TASKS.md contains no parseable task rows." : "The selected project's persisted task intelligence contains no tasks."}
+            title={isRemote ? remoteTasksView?.title ?? "Remote tasks unavailable" : "No parsed tasks"}
+            detail={isRemote ? remoteTasksView?.detail ?? "No usable remote snapshot is available." : "The selected project's persisted task intelligence contains no tasks."}
           />
         ) : null}
       </CockpitPanel>

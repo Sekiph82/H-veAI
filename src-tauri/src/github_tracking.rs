@@ -461,9 +461,7 @@ pub fn observe_project(
     match fetch_github_head(&repository_name, &branch) {
         Ok(head) => {
             if let Some(snapshot) = previous.as_ref() {
-                if snapshot.remote_head.as_deref() == Some(head.as_str())
-                    && snapshot.remote_health == "CURRENT"
-                {
+                if same_head_cache_is_reusable(snapshot, &head) {
                     return Ok((snapshot.clone(), RemoteObservationChange::Unchanged));
                 }
             }
@@ -506,6 +504,26 @@ pub fn observe_project(
                 Ok((snapshot, RemoteObservationChange::Changed))
             }
         },
+    }
+}
+
+/// Same-head reuse is valid only when the durable snapshot contains the
+/// materialized task rows required by the current remote-primary contract.
+/// Historical snapshots deserialize with an empty `task_rows` default, so a
+/// populated cache must be reparsed even when GitHub HEAD has not changed.
+pub(crate) fn same_head_cache_is_reusable(
+    snapshot: &RemoteTrackingSnapshot,
+    fetched_head: &str,
+) -> bool {
+    if snapshot.remote_head.as_deref() != Some(fetched_head) || snapshot.remote_health != "CURRENT"
+    {
+        return false;
+    }
+
+    match snapshot.total_tasks {
+        Some(0) => snapshot.task_rows.is_empty(),
+        Some(_) => !snapshot.task_rows.is_empty(),
+        None => false,
     }
 }
 
@@ -1309,6 +1327,105 @@ mod tests {
             snapshot.latest_commit_message.as_deref(),
             Some("update tracker")
         );
+    }
+
+    #[test]
+    fn legacy_remote_snapshot_without_task_rows_is_not_reusable_at_same_head() {
+        let raw = RootTasksRemote {
+            head: "0123456789012345678901234567890123456789".into(),
+            tasks: "## Project Status\n- Current Task: TASK-1 — Current work\n\n## Tasks\n- [~] TASK-1 — Current work\n".into(),
+            tasks_blob_sha: "sha256:test".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let current = parse_root_tasks(&raw, "Sekiph82/demo", "main", "now".into()).unwrap();
+        let mut historical_json = serde_json::to_value(&current).unwrap();
+        historical_json.as_object_mut().unwrap().remove("taskRows");
+        let historical: RemoteTrackingSnapshot = serde_json::from_value(historical_json).unwrap();
+
+        assert_eq!(historical.total_tasks, Some(1));
+        assert!(historical.task_rows.is_empty());
+        assert!(!same_head_cache_is_reusable(&historical, raw.head.as_str()));
+    }
+
+    #[test]
+    fn same_head_cache_reuse_accepts_materialized_populated_and_empty_snapshots() {
+        let populated_raw = RootTasksRemote {
+            head: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            tasks: "## Tasks\n- [ ] TASK-1 — Backlog\n".into(),
+            tasks_blob_sha: "sha256:populated".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let populated =
+            parse_root_tasks(&populated_raw, "Sekiph82/demo", "main", "now".into()).unwrap();
+        assert!(same_head_cache_is_reusable(
+            &populated,
+            populated_raw.head.as_str()
+        ));
+
+        let empty_raw = RootTasksRemote {
+            head: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+            tasks: "# Empty project\n\n## Tasks\n".into(),
+            tasks_blob_sha: "sha256:empty".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let empty = parse_root_tasks(&empty_raw, "Sekiph82/demo", "main", "now".into()).unwrap();
+        assert_eq!(empty.total_tasks, Some(0));
+        assert!(empty.task_rows.is_empty());
+        assert!(same_head_cache_is_reusable(&empty, empty_raw.head.as_str()));
+    }
+
+    #[test]
+    fn reparsing_and_persisting_legacy_snapshot_materializes_rows() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        ensure_portfolio(&database).unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let raw = RootTasksRemote {
+            head: "cccccccccccccccccccccccccccccccccccccccc".into(),
+            tasks: "## Project Status\n- Current Task: TASK-1 — Current work\n\n## Tasks\n- [~] TASK-1 — Current work\n- [ ] TASK-2 — Next work\n".into(),
+            tasks_blob_sha: "sha256:repair".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let reparsed = parse_root_tasks(&raw, "Sekiph82/H-veAI", "main", "now".into()).unwrap();
+        let mut historical_json = serde_json::to_value(&reparsed).unwrap();
+        historical_json.as_object_mut().unwrap().remove("taskRows");
+        let historical_json = serde_json::to_string(&historical_json).unwrap();
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    format!("{}:{REMOTE_TASKS_RESOURCE_KIND}", project.id),
+                    &project.id,
+                    REMOTE_TASKS_RESOURCE_KIND,
+                    raw.head,
+                    "now",
+                    historical_json,
+                ],
+            )
+            .unwrap();
+        let legacy = cached(&database, &project, "").unwrap().unwrap();
+        assert!(!same_head_cache_is_reusable(
+            &legacy,
+            "cccccccccccccccccccccccccccccccccccccccc"
+        ));
+
+        persist(&database, &project, &reparsed).unwrap();
+        let repaired = cached(&database, &project, "").unwrap().unwrap();
+        assert_eq!(repaired.task_rows.len(), 2);
+        assert!(same_head_cache_is_reusable(
+            &repaired,
+            "cccccccccccccccccccccccccccccccccccccccc"
+        ));
     }
 
     #[test]
