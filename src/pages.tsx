@@ -713,7 +713,7 @@ export function Projects() {
                   onRemove={() => {
                     if (
                       window.confirm(
-                        `Remove ${project.name} from H!veAI registry? The folder will not be deleted.`,
+                        `Remove ${project.name} from H!veAI tracking? This removes it from active H!veAI views; the GitHub repository and local folder will not be deleted.`,
                       )
                     )
                       void act(() => removeProject(project.id));
@@ -1222,7 +1222,7 @@ function LiveProjectCockpit({
   const remove = () => {
     if (
       !window.confirm(
-        `Remove ${snapshot.project.name} from H!veAI registry? The folder will not be deleted.`,
+        `Remove ${snapshot.project.name} from H!veAI tracking? This removes it from active H!veAI views; the GitHub repository and local folder will not be deleted.`,
       )
     )
       return;
