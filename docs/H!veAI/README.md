@@ -24,8 +24,8 @@ GitHub repository:
 Canonical development branch:
 `main`
 
-Canonical local repository root:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI`
+Canonical local repository root: wherever this standalone checkout is cloned;
+the directory containing this file's repository root is authoritative.
 
 The repository root is the H!veAI application root. The historical
 `AI-Commerce-HQ` checkout is migration/source history only.

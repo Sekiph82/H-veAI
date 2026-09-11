@@ -8,8 +8,10 @@ Use `hiveai` only for technical identifiers where punctuation is unsafe.
 
 ## Roots
 
-Run Git commands from the standalone repository root:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI`
+Run Git commands from the standalone repository root: the directory containing
+this file and the repository's `.git` metadata. The canonical remote is
+`https://github.com/Sekiph82/H-veAI` on `main`; the checkout may be located
+anywhere on a workstation.
 
 Put H!veAI application code, product docs, prompts, audits, Codex logs, tests,
 desktop shell files, and application configuration in this repository root.
@@ -20,7 +22,7 @@ new work into the historical `AI-Commerce-HQ` checkout.
 
 Canonical UI reference assets are located in this repository at:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\src\assets`
+`src/assets/`
 
 Use the assets in this folder as authoritative visual references:
 
@@ -58,7 +60,7 @@ During active development, the user must be able to launch the latest validated 
 
 Canonical stable development executable:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\dev-bin\H!veAI.exe`
+`dev-bin/H!veAI.exe` relative to the current repository root
 
 Canonical Desktop shortcut:
 
@@ -66,13 +68,13 @@ Canonical Desktop shortcut:
 
 Canonical shortcut icon source image:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\src\assets\hiveai-small-logo.png`
+`src/assets/hiveai-small-logo.png`
 
 Use this exact image as the authoritative visual source for the Desktop shortcut icon. Do not substitute, redesign, recolor, crop, or replace it unless the user explicitly changes this rule.
 
 Because Windows `.lnk` icon locations should use a Windows-compatible icon resource rather than depend directly on PNG rendering, create or refresh a deterministic `.ico` derivative from this exact PNG when needed. Prefer the stable local derivative:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI\dev-bin\H!veAI.ico`
+`dev-bin/H!veAI.ico` relative to the current repository root
 
 The `.ico` derivative must preserve the source logo and should include standard Windows icon sizes where tooling permits, including 16, 32, 48, 64, 128, and 256 pixels. The Desktop `H!veAI.lnk` IconLocation must point to this stable `.ico` derivative, or to an equivalent Windows icon resource generated from the same canonical PNG if technically required.
 

@@ -30,6 +30,16 @@ function Assert-Shortcut([string]$Target) {
     if ($resolvedTarget -ne [IO.Path]::GetFullPath($Target)) { throw "Shortcut target mismatch: $resolvedTarget" }
     if ($shortcut.IconLocation -notlike "$expectedIcon,*") { throw "Shortcut icon mismatch: $($shortcut.IconLocation)" }
 }
+function Set-Shortcut([string]$Target) {
+    if (-not (Test-Path -LiteralPath $expectedIcon)) { throw "Shortcut icon resource missing: $expectedIcon" }
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcut = $shell.CreateShortcut($desktopShortcut)
+    $shortcut.TargetPath = [IO.Path]::GetFullPath($Target)
+    $shortcut.WorkingDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Target))
+    $shortcut.IconLocation = "$expectedIcon,0"
+    $shortcut.Arguments = ''
+    $shortcut.Save()
+}
 function Get-LogBaseline {
     $baseline = @{}
     $logDir = Join-Path $env:LOCALAPPDATA 'ai.hiveai.desktop\logs'
@@ -95,7 +105,6 @@ try { & npm run tauri:build -- --no-bundle; if ($LASTEXITCODE -ne 0) { throw "Ta
 finally { Pop-Location }
 Assert-Pe $Candidate
 Assert-NoH1vePorts
-Assert-Shortcut $stable
 Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
 Copy-Item -LiteralPath $Candidate -Destination $staged
 $priorStableHash = if (Test-Path -LiteralPath $stable) { Get-Sha256 $stable } else { $null }
@@ -108,6 +117,7 @@ try {
     try {
         Move-Item -LiteralPath $staged -Destination $stable
         Assert-Pe $stable
+        Set-Shortcut $stable
         Assert-Shortcut $stable
         Invoke-ReadySmoke $stable
         if ((Get-Sha256 $stable) -ne $candidateHash) { throw 'Stable executable hash does not match the smoke-tested candidate.' }

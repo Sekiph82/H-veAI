@@ -6,8 +6,8 @@ This repository is the complete application root. It has no runtime or build dep
 
 ## Canonical roots
 
-Git root:
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H-veAI`
+Local checkout root: the directory containing this README and the repository's
+`.git` metadata. The checkout is intentionally relocatable.
 
 Canonical repository/branch:
 `Sekiph82/H-veAI` / `main`

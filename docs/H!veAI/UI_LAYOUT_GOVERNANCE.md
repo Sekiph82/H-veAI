@@ -6,7 +6,7 @@ This document is a durable visual-layout contract for H!veAI. It exists because 
 
 Canonical visual reference assets are located at:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI`
+The repository-relative assets under `src/assets/`.
 
 The dashboard reference image in that folder is authoritative for the Command Center / Global Overview composition, density, hierarchy, proportions, and dark visual language.
 
@@ -16,7 +16,7 @@ The user has explicitly required that the primary overview fit in one desktop vi
 
 Sidebar visible brand source:
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI\H!veAI logo.png`
+`src/assets/hiveai-logo.png`
 
 Rules:
 
@@ -28,7 +28,7 @@ Rules:
 
 Desktop shortcut icon source (unchanged):
 
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI\H!veAI small logo.png`
+`src/assets/hiveai-small-logo.png`
 
 Use the small logo only for the ICO/Windows shortcut icon. Do not use the
 combined sidebar source for the shortcut icon.
@@ -267,21 +267,15 @@ Future milestones may replace task/workflow placeholders with real data. They mu
 
 ## M08.00 Presentation Bootstrap
 
-The global application background source is:
-
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI\scene 3 starting point.png`
-
-The repository asset is `src/assets/hiveai-app-background.png`. Use one fixed
+The repository asset `src/assets/hiveai-app-background.png` is the global
+application background source. Use one fixed
 full-application background layer across every route with preserved aspect ratio,
 no tiling, and a dark navy/black readability overlay. The background remains
 subordinate to operational content and must not alter the approved viewport,
 sidebar, topbar, project rail, footer, or Command Center geometry.
 
-The canonical native opening video source is:
-
-`C:\Users\sekip\Desktop\AI-Commerce-HQ files\H!veAI\videos and gifs\opening video.mp4`
-
-The repository asset is `src/assets/opening-video.mp4`. It plays only in the
+The canonical native opening video source is `src/assets/opening-video.mp4`. It
+plays only in the
 native in-window startup overlay, once per native application lifecycle. Native
 restart creates a new lifecycle and may play it again; SPA navigation, project
 selection, route changes, minimize/restore, and ordinary in-app actions must not
