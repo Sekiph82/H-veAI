@@ -89,6 +89,8 @@ pub struct RemoteTrackingSnapshot {
     pub error: Option<String>,
     #[serde(default)]
     pub recent_events: Vec<RemoteTrackingEvent>,
+    #[serde(default)]
+    pub task_rows: Vec<RemoteTaskRow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,15 +106,19 @@ pub struct RemoteTrackingEvent {
     pub commit_sha: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTaskRow {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub source_path: String,
+    pub source_line: usize,
+}
+
 pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
-    const TARGETS: [(&str, &str, &str, &str); 9] = [
+    const TARGETS: [(&str, &str, &str, &str); 8] = [
         ("h-veai", "H-veAI", "Sekiph82/H-veAI", "main"),
-        (
-            "ai-commerce-hq",
-            "AI-Commerce-HQ",
-            "Sekiph82/AI-Commerce-HQ",
-            "H!veAI",
-        ),
         ("bulk-edit", "Bulk-Edit", "Sekiph82/Bulk-Edit", "main"),
         (
             "fmcg-erp-system",
@@ -188,21 +194,7 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                     .flatten()
             })
             .unwrap_or(target_id);
-        let branch = if repository.eq_ignore_ascii_case("Sekiph82/AI-Commerce-HQ") {
-            transaction
-                .query_row(
-                    "SELECT default_branch FROM projects WHERE id=?1",
-                    [&project_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-                .map_err(db_error)?
-                .flatten()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| branch.to_string())
-        } else {
-            branch.to_string()
-        };
+        let branch = branch.to_string();
         target_project_ids.insert(project_id.clone());
         let existing = transaction
             .query_row("SELECT 1 FROM projects WHERE id=?1", [&project_id], |row| {
@@ -822,12 +814,28 @@ fn parse_root_tasks(
     let mut total = 0_u64;
     let mut completed = 0_u64;
     let mut last_completed = None;
-    for line in raw.tasks.lines() {
+    let mut task_rows = Vec::new();
+    for (line_index, line) in raw.tasks.lines().enumerate() {
         if let Some((status, id, title)) = task_row(line) {
             total += 1;
             if matches!(status, 'x' | 'X') {
                 completed += 1;
-                last_completed = Some((id.clone(), title));
+                last_completed = Some((id.clone(), title.clone()));
+            }
+            if task_rows.len() < 4096 {
+                let normalized_status = match status {
+                    'x' | 'X' => "TASK_COMPLETE",
+                    '~' => "IN_PROGRESS",
+                    '!' => "BLOCKED",
+                    _ => "BACKLOG",
+                };
+                task_rows.push(RemoteTaskRow {
+                    id,
+                    title,
+                    status: normalized_status.into(),
+                    source_path: "TASKS.md".into(),
+                    source_line: line_index + 1,
+                });
             }
         }
     }
@@ -899,6 +907,7 @@ fn parse_root_tasks(
         remote_health: "CURRENT".into(),
         error: None,
         recent_events: Vec::new(),
+        task_rows,
     })
 }
 
@@ -992,6 +1001,7 @@ fn unavailable(
         remote_health: "UNAVAILABLE".into(),
         error: Some(error),
         recent_events: Vec::new(),
+        task_rows: Vec::new(),
     }
 }
 
@@ -1290,6 +1300,10 @@ mod tests {
         assert_eq!(snapshot.next_task_id.as_deref(), Some("TASK-3"));
         assert_eq!(snapshot.completed_tasks, Some(1));
         assert_eq!(snapshot.total_tasks, Some(3));
+        assert_eq!(snapshot.task_rows.len(), 3);
+        assert_eq!(snapshot.task_rows[1].id, "TASK-2");
+        assert_eq!(snapshot.task_rows[1].status, "IN_PROGRESS");
+        assert_eq!(snapshot.task_rows[1].source_path, "TASKS.md");
         assert!((snapshot.progress_percent.unwrap() - 33.333333333333336).abs() < 0.0001);
         assert_eq!(
             snapshot.latest_commit_message.as_deref(),
@@ -1363,9 +1377,9 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(projects.len(), 9);
+        assert_eq!(projects.len(), 8);
         assert!(!projects.iter().any(|project| project.id == duplicate.id));
-        assert!(projects.iter().any(|project| {
+        assert!(!projects.iter().any(|project| {
             project
                 .repository
                 .as_ref()
@@ -1408,7 +1422,7 @@ mod tests {
             )
             .unwrap()
             .len(),
-            10
+            9
         );
         let connection = database.open_connection().unwrap();
         connection
@@ -1427,8 +1441,15 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(active.len(), 9);
+        assert_eq!(active.len(), 8);
         assert!(!active.iter().any(|project| project.id == extra.id));
+        assert!(!active.iter().any(|project| {
+            project
+                .repository
+                .as_ref()
+                .and_then(|repository| repository.github_repo.as_deref())
+                == Some("AI-Commerce-HQ")
+        }));
         assert_eq!(
             crate::projects::fetch_project(&database, &extra.id)
                 .unwrap()

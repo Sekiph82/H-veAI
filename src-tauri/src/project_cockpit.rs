@@ -4,7 +4,7 @@ use crate::db::DatabaseState;
 use crate::git_engine::{
     self, GitDiff, GitDiffRequest, GitDiffScope, GitSnapshot, GitSnapshotRequest,
 };
-use crate::github_tracking::{self, RemoteTrackingSnapshot};
+use crate::github_tracking::{self, RemoteTaskRow, RemoteTrackingSnapshot};
 use crate::project_dashboard::{self, ProjectDashboardResolution};
 use crate::projects::{fetch_project, ProjectRecord};
 use crate::task_intelligence::TaskIntelligenceSnapshot;
@@ -130,6 +130,7 @@ pub struct ProjectCockpitSnapshot {
     pub generated_at: String,
     pub github_tracking: Option<RemoteTrackingSnapshot>,
     pub remote_primary: Option<RemoteCockpitPrimary>,
+    pub remote_tasks: Vec<RemoteTaskRow>,
     pub local_workspace_telemetry: Option<LocalWorkspaceTelemetry>,
 }
 
@@ -330,6 +331,7 @@ pub fn snapshot(
             None
         },
         github_tracking,
+        remote_tasks: Vec::new(),
     })
 }
 
@@ -437,6 +439,7 @@ fn snapshot_remote_primary(
     let project_summary = command_center::remote_project_summary(&project, &remote);
     let warnings = remote_warnings(&remote);
     let local_path = project.original_path.clone();
+    let remote_tasks = remote.task_rows.clone();
 
     Ok(ProjectCockpitSnapshot {
         project,
@@ -473,6 +476,7 @@ fn snapshot_remote_primary(
             git_diff_error: local_git_diff_error,
         }),
         github_tracking: Some(remote),
+        remote_tasks,
     })
 }
 
@@ -954,6 +958,31 @@ mod tests {
             remote_health: health.into(),
             error: (health != "CURRENT").then(|| format!("remote health is {health}")),
             recent_events: Vec::new(),
+            task_rows: (0..8)
+                .map(|index| match index {
+                    0 => RemoteTaskRow {
+                        id: "PAG-M05-001".into(),
+                        title: "Remote canonical task".into(),
+                        status: "IN_PROGRESS".into(),
+                        source_path: "TASKS.md".into(),
+                        source_line: 10,
+                    },
+                    1 => RemoteTaskRow {
+                        id: "PAG-M04-099".into(),
+                        title: "Remote completed task".into(),
+                        status: "TASK_COMPLETE".into(),
+                        source_path: "TASKS.md".into(),
+                        source_line: 9,
+                    },
+                    index => RemoteTaskRow {
+                        id: format!("PAG-M05-{index:03}"),
+                        title: format!("Remote backlog task {index}"),
+                        status: "BACKLOG".into(),
+                        source_path: "TASKS.md".into(),
+                        source_line: 10 + index,
+                    },
+                })
+                .collect(),
         }
     }
 
@@ -1135,6 +1164,59 @@ mod tests {
             summary.current_task.as_ref().map(|task| &task.title),
             remote.current_task_title.as_ref()
         );
+        assert_eq!(
+            cockpit.remote_tasks[0].id,
+            remote.current_task_id.as_deref().unwrap()
+        );
+        assert_eq!(cockpit.remote_tasks[0].status, "IN_PROGRESS");
+        assert_eq!(cockpit.remote_tasks[0].source_path, "TASKS.md");
+        assert_eq!(
+            cockpit.remote_tasks.len(),
+            remote.total_tasks.unwrap() as usize
+        );
+    }
+
+    #[test]
+    fn m21r02_remote_tasks_materialize_when_legacy_intelligence_is_empty() {
+        let db_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let (project_id, remote) = seed_remote_project(&database, "CURRENT");
+        let cockpit = snapshot(&database, &project_id).unwrap();
+
+        assert!(cockpit.task_intelligence.is_none());
+        assert!(cockpit.task_intelligence_error.is_none());
+        assert_eq!(cockpit.remote_tasks.len(), 8);
+        assert_eq!(
+            cockpit.remote_tasks[0].title,
+            remote.current_task_title.unwrap()
+        );
+        assert_eq!(cockpit.remote_tasks[1].status, "TASK_COMPLETE");
+    }
+
+    #[test]
+    fn m21r02_remote_empty_tasks_is_truthful_and_not_legacy_error() {
+        let db_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let (project_id, mut remote) = seed_remote_project(&database, "CURRENT");
+        remote.task_rows.clear();
+        remote.total_tasks = Some(0);
+        remote.completed_tasks = Some(0);
+        remote.progress_completed = Some(0);
+        remote.progress_total = Some(0);
+        remote.progress_percent = None;
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE github_sync_state SET metadata_json=?1 WHERE project_id=?2 AND resource_kind='GITHUB_TASKS_REMOTE'",
+                rusqlite::params![serde_json::to_string(&remote).unwrap(), project_id],
+            )
+            .unwrap();
+
+        let cockpit = snapshot(&database, &project_id).unwrap();
+        assert!(cockpit.remote_tasks.is_empty());
+        assert!(cockpit.task_intelligence.is_none());
+        assert!(cockpit.task_intelligence_error.is_none());
+        assert_eq!(cockpit.project_summary.total_tasks, Some(0));
     }
 
     #[test]

@@ -76,6 +76,14 @@ export type CockpitFileEntry = {
   evidence: string;
 };
 
+export type RemoteTaskRow = {
+  id: string;
+  title: string;
+  status: string;
+  sourcePath: string;
+  sourceLine: number;
+};
+
 export type ProjectDashboardResolution = {
   projectId: string;
   manifestStatus: string;
@@ -157,6 +165,7 @@ export type ProjectCockpitSnapshot = {
   warnings: string[];
   generatedAt: string;
   githubTracking?: GitHubTrackingSnapshot;
+  remoteTasks: RemoteTaskRow[];
   remotePrimary?: {
     repository: string;
     branch: string;
@@ -169,6 +178,7 @@ export type ProjectCockpitSnapshot = {
     currentSprint: string | null;
     currentTaskId: string | null;
     currentTaskTitle: string | null;
+    currentTaskStatus: string | null;
     workflowState: string | null;
     requiredActor: string | null;
     nextAction: string | null;

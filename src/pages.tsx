@@ -2018,7 +2018,9 @@ function CockpitLegacyOverview({
 }
 
 function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
+  const isRemote = Boolean(snapshot.githubTracking);
   const tasks = snapshot.taskIntelligence?.tasks ?? [];
+  const remoteTasks = snapshot.remoteTasks ?? [];
   const workflowById = new Map(
     snapshot.workflow.tasks.map((task) => [task.taskId, task]),
   );
@@ -2027,7 +2029,9 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
       <CockpitPanel
         title="Canonical tasks"
         detail={
-          snapshot.taskIntelligence
+          isRemote
+            ? `${remoteTasks.length} remote TASKS.md row(s)`
+            : snapshot.taskIntelligence
             ? `${tasks.length} persisted parsed task(s)`
             : "Task intelligence unavailable"
         }
@@ -2038,7 +2042,24 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
           </div>
         ) : null}
         <div className="cockpit-record-list">
-          {tasks.map((task) => {
+          {isRemote
+            ? remoteTasks.map((task) => (
+                <details className="cockpit-record" key={task.id}>
+                  <summary>
+                    <strong>{task.title}</strong>
+                    <span>{formatCockpitState(task.status)}</span>
+                  </summary>
+                  <CockpitFacts
+                    facts={[
+                      ["Task ID", task.id],
+                      ["Status", task.status],
+                      ["Source", `${task.sourcePath}:${task.sourceLine}`],
+                      ["Evidence", snapshot.remotePrimary?.remoteHead ?? "Remote snapshot"],
+                    ]}
+                  />
+                </details>
+              ))
+            : tasks.map((task) => {
             const workflow = workflowById.get(task.id);
             return (
               <details className="cockpit-record" key={task.id}>
@@ -2082,10 +2103,10 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
             );
           })}
         </div>
-        {!tasks.length && !snapshot.taskIntelligenceError ? (
+        {((isRemote && !remoteTasks.length) || (!isRemote && !tasks.length && !snapshot.taskIntelligenceError)) ? (
           <EmptyState
-            title="No parsed tasks"
-            detail="The selected project's persisted task intelligence contains no tasks."
+            title={isRemote ? "No canonical remote tasks" : "No parsed tasks"}
+            detail={isRemote ? "The remote root TASKS.md contains no parseable task rows." : "The selected project's persisted task intelligence contains no tasks."}
           />
         ) : null}
       </CockpitPanel>
@@ -2098,21 +2119,36 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
               : "M09 structured handoff evidence"
           }
         >
-          <CockpitList
-            title="Current"
-            values={snapshot.taskIntelligence?.handoff?.current ?? []}
-            empty="Unknown"
-          />
-          <CockpitList
-            title="Next"
-            values={snapshot.taskIntelligence?.handoff?.next ?? []}
-            empty="Unknown"
-          />
-          <CockpitList
-            title="Waiting"
-            values={snapshot.taskIntelligence?.handoff?.waiting ?? []}
-            empty="No verified wait"
-          />
+          {isRemote ? (
+            <>
+              <CockpitList
+                title="Current"
+                values={[
+                  snapshot.remotePrimary?.currentTaskId && snapshot.remotePrimary.currentTaskTitle
+                    ? `${snapshot.remotePrimary.currentTaskId} — ${snapshot.remotePrimary.currentTaskTitle}`
+                    : "",
+                  snapshot.remotePrimary?.currentTaskStatus ?? "",
+                ].filter(Boolean)}
+                empty="Unknown"
+              />
+              <CockpitList
+                title="Next"
+                values={[snapshot.remotePrimary?.nextAction ?? ""].filter(Boolean)}
+                empty="Unknown"
+              />
+              <CockpitList
+                title="Waiting"
+                values={snapshot.remotePrimary?.blockers ?? []}
+                empty="No verified wait"
+              />
+            </>
+          ) : (
+            <>
+              <CockpitList title="Current" values={snapshot.taskIntelligence?.handoff?.current ?? []} empty="Unknown" />
+              <CockpitList title="Next" values={snapshot.taskIntelligence?.handoff?.next ?? []} empty="Unknown" />
+              <CockpitList title="Waiting" values={snapshot.taskIntelligence?.handoff?.waiting ?? []} empty="No verified wait" />
+            </>
+          )}
         </CockpitPanel>
         <CockpitPanel
           title="Task authority"
