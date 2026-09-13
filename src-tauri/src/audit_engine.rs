@@ -526,7 +526,50 @@ pub struct AuditProviderReadiness {
     pub error_category: Option<String>,
 }
 
-fn audit_result_schema() -> Value {
+fn audit_result_schema(input: &AuditInput) -> Value {
+    let canonical_refs = input
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.required)
+        .map(|requirement| requirement.requirement_ref.clone())
+        .collect::<Vec<_>>();
+    let freeform = canonical_refs.is_empty();
+    let finding_requirement_refs = if freeform {
+        json!({
+            "type": "array",
+            "maxItems": 0,
+            "items": { "type": "string" }
+        })
+    } else {
+        json!({
+            "type": "array",
+            "items": { "type": "string", "enum": canonical_refs.clone() }
+        })
+    };
+    let coverage_requirement_ref = if freeform {
+        json!({ "type": "string", "enum": ["project-audit"] })
+    } else {
+        json!({ "type": "string", "enum": canonical_refs.clone() })
+    };
+    let coverage_status = if freeform {
+        json!({ "type": "string", "enum": ["NOT_APPLICABLE"] })
+    } else {
+        json!({ "type": "string", "enum": ["VERIFIED", "PARTIAL", "UNVERIFIED", "FAILED", "NOT_APPLICABLE"] })
+    };
+    let coverage_evidence_refs = if freeform {
+        json!({
+            "type": "array",
+            "maxItems": 0,
+            "items": { "type": "string" }
+        })
+    } else {
+        json!({ "type": "array", "items": { "type": "string" } })
+    };
+    let coverage_bounds = if freeform {
+        json!({ "minItems": 1, "maxItems": 1 })
+    } else {
+        json!({ "minItems": canonical_refs.len(), "maxItems": canonical_refs.len(), "uniqueItems": true })
+    };
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -536,10 +579,10 @@ fn audit_result_schema() -> Value {
             "regressionRisk": { "type": "string", "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL"] },
             "summary": { "type": "string" },
             "findings": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": {
-                "findingKey": { "type": "string" }, "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "NOTE"] }, "title": { "type": "string" }, "detail": { "type": "string" }, "requirementRefs": { "type": "array", "items": { "type": "string" } }, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "sourceLocator": { "type": ["string", "null"] }, "testLocator": { "type": ["string", "null"] }, "remediationGuidance": { "type": "string" }, "blocksRelease": { "type": "boolean" }
+                "findingKey": { "type": "string" }, "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "NOTE"] }, "title": { "type": "string" }, "detail": { "type": "string" }, "requirementRefs": finding_requirement_refs, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "sourceLocator": { "type": ["string", "null"] }, "testLocator": { "type": ["string", "null"] }, "remediationGuidance": { "type": "string" }, "blocksRelease": { "type": "boolean" }
             }, "required": ["findingKey", "severity", "title", "detail", "requirementRefs", "evidenceRefs", "sourceLocator", "testLocator", "remediationGuidance", "blocksRelease"] } },
-            "requirementCoverage": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": {
-                "requirementRef": { "type": "string" }, "requirementText": { "type": "string" }, "status": { "type": "string", "enum": ["VERIFIED", "PARTIAL", "UNVERIFIED", "FAILED", "NOT_APPLICABLE"] }, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "rationale": { "type": "string" }
+            "requirementCoverage": { "type": "array", "minItems": coverage_bounds["minItems"], "maxItems": coverage_bounds["maxItems"], "uniqueItems": coverage_bounds["uniqueItems"].as_bool().unwrap_or(false), "items": { "type": "object", "additionalProperties": false, "properties": {
+                "requirementRef": coverage_requirement_ref, "requirementText": { "type": "string" }, "status": coverage_status, "evidenceRefs": coverage_evidence_refs, "rationale": { "type": "string" }
             }, "required": ["requirementRef", "requirementText", "status", "evidenceRefs", "rationale"] } },
             "priorFindingDispositions": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": {
                 "priorFindingKey": { "type": "string" }, "disposition": { "type": "string", "enum": ["STILL_OPEN", "CLOSED", "SUPERSEDED"] }, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "rationale": { "type": "string" }, "replacementFindingKey": { "type": ["string", "null"] }
@@ -719,7 +762,7 @@ impl AuditModel for CodexCliAuditModel {
         }
         let result = self.runner.run(&CodexProcessRequest {
             prompt,
-            schema: Some(audit_result_schema()),
+            schema: Some(audit_result_schema(input)),
             model: None,
             timeout: CODEX_AUDIT_TIMEOUT,
         })?;
@@ -737,18 +780,18 @@ impl AuditModel for CodexCliAuditModel {
 }
 
 fn audit_output_contract(input: &AuditInput) -> String {
-    if input.requirements.is_empty() {
-        return "This is a project/freeform audit with no task-scoped requirements. Return exactly one requirementCoverage row: requirementRef must be project-audit, status must be NOT_APPLICABLE, evidenceRefs must be an empty array, and requirementText and rationale must be bounded and state that no task-scoped criteria apply. Do not invent task requirement references.".into();
-    }
     let references = input
         .requirements
         .iter()
         .filter(|requirement| requirement.required)
         .map(|requirement| requirement.requirement_ref.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if references.is_empty() {
+        return "This is a project/freeform audit with zero canonical task-scoped requirements. Return exactly one requirementCoverage row: requirementRef must be project-audit, status must be NOT_APPLICABLE, evidenceRefs must be an empty array, and requirementText and rationale must be bounded and state that no task-scoped criteria apply. Every finding must use requirementRefs: []; project-audit is a synthetic coverage identifier only and must never appear in a finding requirementRefs array. Evidence-backed project-level findings are allowed, but do not invent task requirement references.".into();
+    }
+    let references = references.join(", ");
     format!(
-        "This is a task-scoped audit. Return exactly one requirementCoverage row for each required requirementRef, and use only these canonical references: [{references}]. Do not invent, omit, or duplicate requirement references."
+        "This is a task-scoped audit. Return exactly one requirementCoverage row for each required requirementRef, and use only these canonical references: [{references}]. Finding requirementRefs, when present, must also use only this supplied canonical list. Do not invent, omit, or duplicate requirement references."
     )
 }
 
@@ -4080,6 +4123,153 @@ mod tests {
             r#"{"verdict":"PASS","confidence":"HIGH","regressionRisk":"LOW","summary":"ok","unexpected":true}"#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn dynamic_schema_and_prompt_constrain_freeform_requirement_identities() {
+        let freeform = input();
+        let schema = audit_result_schema(&freeform);
+        let finding_refs =
+            &schema["properties"]["findings"]["items"]["properties"]["requirementRefs"];
+        assert_eq!(finding_refs["maxItems"], json!(0));
+        let coverage = &schema["properties"]["requirementCoverage"];
+        assert_eq!(coverage["minItems"], json!(1));
+        assert_eq!(coverage["maxItems"], json!(1));
+        assert_eq!(
+            coverage["items"]["properties"]["requirementRef"]["enum"],
+            json!(["project-audit"])
+        );
+        assert_eq!(
+            coverage["items"]["properties"]["status"]["enum"],
+            json!(["NOT_APPLICABLE"])
+        );
+        assert_eq!(
+            coverage["items"]["properties"]["evidenceRefs"]["maxItems"],
+            json!(0)
+        );
+
+        let contract = audit_output_contract(&freeform);
+        assert!(contract.contains("Every finding must use requirementRefs: []"));
+        assert!(contract.contains("project-audit is a synthetic coverage identifier only"));
+        assert!(contract.contains("must never appear in a finding requirementRefs array"));
+    }
+
+    #[test]
+    fn dynamic_schema_and_prompt_preserve_canonical_task_requirement_references() {
+        let mut task_input = input();
+        task_input.requirements = vec![
+            AuditRequirement {
+                requirement_ref: "req-a".into(),
+                requirement_text: "A".into(),
+                required: true,
+            },
+            AuditRequirement {
+                requirement_ref: "req-b".into(),
+                requirement_text: "B".into(),
+                required: true,
+            },
+        ];
+        let schema = audit_result_schema(&task_input);
+        let coverage = &schema["properties"]["requirementCoverage"];
+        assert_eq!(coverage["minItems"], json!(2));
+        assert_eq!(coverage["maxItems"], json!(2));
+        assert_eq!(
+            coverage["items"]["properties"]["requirementRef"]["enum"],
+            json!(["req-a", "req-b"])
+        );
+        assert_eq!(
+            schema["properties"]["findings"]["items"]["properties"]["requirementRefs"]["items"]
+                ["enum"],
+            json!(["req-a", "req-b"])
+        );
+        let contract = audit_output_contract(&task_input);
+        assert!(contract.contains("Finding requirementRefs, when present, must also use only this supplied canonical list"));
+        assert!(contract.contains("[req-a, req-b]"));
+    }
+
+    #[test]
+    fn freeform_finding_requirement_refs_are_empty_and_semantic_validation_stays_fail_closed() {
+        let mut freeform = input();
+        freeform.evidence = vec![evidence(
+            "SOURCE_SNIPPET",
+            "project",
+            VerificationStatus::Verified,
+            "project source",
+            None,
+            Some("project evidence".into()),
+            false,
+        )];
+        let response = |requirement_ref: &str| {
+            format!(
+                r#"{{"verdict":"CONDITIONAL","confidence":"HIGH","regressionRisk":"LOW","summary":"project review","findings":[{{"findingKey":"project-finding","severity":"MAJOR","title":"Project issue","detail":"Evidence-backed project issue.","requirementRefs":{requirement_ref},"evidenceRefs":["SOURCE_SNIPPET:project"],"sourceLocator":"project.rs:1","testLocator":null,"remediationGuidance":"Address the issue.","blocksRelease":false}}],"requirementCoverage":[{{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Project-level audit."}}],"priorFindingDispositions":[]}}"#
+            )
+        };
+
+        let valid = evaluate_fixture(
+            &freeform,
+            &FixtureAuditModel {
+                response: response("[]"),
+            },
+        );
+        assert_eq!(valid.model_status, "AVAILABLE");
+        assert_eq!(valid.findings[0].requirement_refs, Vec::<String>::new());
+
+        for invalid in [r#"["project-audit"]"#, r#"["invented-freeform-ref"]"#] {
+            let degraded = evaluate_fixture(
+                &freeform,
+                &FixtureAuditModel {
+                    response: response(invalid),
+                },
+            );
+            assert_eq!(degraded.model_status, "MALFORMED");
+            assert_eq!(
+                degraded.diagnostic.as_deref(),
+                Some("AUDIT_REQUIREMENT_REFERENCE_UNKNOWN")
+            );
+        }
+    }
+
+    #[test]
+    fn task_finding_requirement_refs_accept_only_canonical_requirements() {
+        let mut task_input = input();
+        task_input.requirements = vec![AuditRequirement {
+            requirement_ref: "req-a".into(),
+            requirement_text: "Required task evidence".into(),
+            required: true,
+        }];
+        task_input.evidence = vec![evidence(
+            "SOURCE_SNIPPET",
+            "task",
+            VerificationStatus::Verified,
+            "task source",
+            None,
+            Some("task evidence".into()),
+            false,
+        )];
+        let response = |requirement_ref: &str| {
+            format!(
+                r#"{{"verdict":"CONDITIONAL","confidence":"HIGH","regressionRisk":"LOW","summary":"task review","findings":[{{"findingKey":"task-finding","severity":"MAJOR","title":"Task issue","detail":"Evidence-backed task issue.","requirementRefs":{requirement_ref},"evidenceRefs":["SOURCE_SNIPPET:task"],"sourceLocator":"task.rs:1","testLocator":null,"remediationGuidance":"Address the issue.","blocksRelease":false}}],"requirementCoverage":[{{"requirementRef":"req-a","requirementText":"Required task evidence","status":"VERIFIED","evidenceRefs":["SOURCE_SNIPPET:task"],"rationale":"Direct evidence."}}],"priorFindingDispositions":[]}}"#
+            )
+        };
+        let valid = evaluate_fixture(
+            &task_input,
+            &FixtureAuditModel {
+                response: response("[\"req-a\"]"),
+            },
+        );
+        assert_eq!(valid.model_status, "AVAILABLE");
+
+        let invalid = evaluate_fixture(
+            &task_input,
+            &FixtureAuditModel {
+                response: response("[\"invented-task-ref\"]"),
+            },
+        );
+        assert_eq!(invalid.model_status, "MALFORMED");
+        assert_eq!(
+            invalid.diagnostic.as_deref(),
+            Some("AUDIT_REQUIREMENT_REFERENCE_UNKNOWN")
+        );
     }
 
     #[test]
