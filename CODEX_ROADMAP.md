@@ -15,10 +15,10 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M10A remediation, independent re-audit, and Akilta native click acceptance: PASS/CLOSED.
 - M11 original and remediation failures remain historical evidence; accepted strict audits close M11A REV7 and the final Projects visual cleanup.
 - M11 = PASS/CLOSED.
-- M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 remains OPEN during M16T Codex-only provider migration; M17-M20 remain planned/blocked.
+- M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 is PASS/CLOSED after independent strict audit and final owner-native acceptance; M17 is active; M18-M20 remain planned/blocked by dependency order.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is implementation-complete and awaiting independent strict audit and owner native re-acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
-- Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16T V11, and the pre-M10 hotfix is not a numbered roadmap milestone.
+- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. Required Actor is CODEX for active M17 implementation; M18-M20 remain blocked by dependency order.
+- Strict completed progress is 17/20 = 85%; M16 is PASS/CLOSED and M17 is active; the pre-M10 hotfix is not a numbered roadmap milestone.
 
 ---
 
@@ -508,7 +508,7 @@ Packages:
 
 Exit: Codex and Claude operate through one consistent H!veAI agent model.
 
-Status: PLANNED/BLOCKED.
+Status: ACTIVE / IMPLEMENTATION_IN_PROGRESS.
 
 ---
 

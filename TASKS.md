@@ -4,12 +4,12 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 ## Project Status
 
-- Current Milestone: M16
-- Current Sprint: M16T-CODEX-ONLY
-- Current Task: M16T V11 — Structured-output subset and readiness diagnostic parity remediation
-- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_AUDIT_AND_OWNER_NATIVE_REACCEPTANCE
-- Next Task/Action: Independent M16T V11 strict audit, then owner Settings readiness; only if READY, run the native three-run freeform acceptance gate.
-- Required Actor: HUMAN
+- Current Milestone: M17
+- Current Sprint: M17-CLAUDE-ADAPTER
+- Current Task: M17 V01 — Claude Code Adapter
+- Current Task Status: IMPLEMENTATION_IN_PROGRESS
+- Next Task/Action: Implement and verify the local Claude Code CLI adapter, then independent M17 strict audit and owner-native Claude acceptance.
+- Required Actor: CODEX
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -19,7 +19,8 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R02 — Project Cockpit Tasks and AI-Commerce retirement remediation V02 (independent strict audit PASS and owner native re-acceptance PASS)
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
 - [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
-- [~] M16T — Codex-only audit provider native acceptance remediation V11 (implementation complete; awaiting independent strict audit and owner native re-acceptance; M16 remains OPEN)
+- [x] M16T — Codex-only audit provider native acceptance remediation V11 (validated complete; M16 PASS/CLOSED)
+- [~] M17 — Claude Code Adapter V01 (implementation in progress; M18-M20 remain planned/blocked)
 
 # H!veAI MASTER TASKS
 
@@ -51,12 +52,12 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 - Pre-M10 Native UX Hotfix X01/X02 = PASS/CLOSED after independent source audit plus user native acceptance.
   - X01: terminal/console popup suppression accepted fixed after approximately 45 minutes of native runtime with no unwanted terminal windows.
   - X02: startup intro audio/replay behavior accepted fixed; audio works and same-process route navigation does not replay the intro.
-- Strict completed milestone count remains **16 / 20 = 80%**; M16 remains OPEN during M16T V11 pending independent strict audit and owner native re-acceptance; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 hotfix is not a numbered roadmap milestone.
+- Strict completed milestone count is **17 / 20 = 85%**; M16 is PASS/CLOSED, M16T is validated complete, and M17 is active; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 hotfix is not a numbered roadmap milestone.
 - M10 original strict audit = historical FAIL with 5 MAJOR findings.
 - M10A remediation, independent re-audit, and Akilta native click acceptance are complete; Akilta footer link = PASS/ACCEPTED.
 - Original M11 implementation is a historical strict-audit FAIL with 8 MAJOR findings.
 - M11A REV4, REV5, REV6, and REV7 remediation history remains immutable; all findings are closed by the accepted strict audits. M11A REV7 = PASS/CLOSED and the final Projects visual cleanup = PASS/CLOSED.
-- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 through V11 are implementation-complete pending independent strict audit and owner native re-acceptance; M16 remains OPEN; M17-M20 remain planned/blocked.
+- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 through V11 are validated complete; M16 is PASS/CLOSED; M17 is active; M18-M20 remain planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository remains retained for preservation and has not been deleted.
 
 ---
@@ -1413,7 +1414,7 @@ M15D REMEDIATION COMPLETE / ACCEPTED STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPT
 - [x] Full regression/publication.
 - [x] Independent release-gate audit of the audit engine itself.
 
-M16 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + USER NATIVE/VISUAL ACCEPTANCE.
+M16 PASS/CLOSED after independent strict audit and final owner-native acceptance.
 
 The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16T V11 is implementation-complete and awaiting independent audit plus owner native acceptance, and M17 is not activated.
 
@@ -1583,7 +1584,7 @@ M21 NOT STARTED.
 - [ ] Production QA publication.
 - [ ] Independent strict audit.
 
-M17 PLANNED/BLOCKED until common session/prompt/audit infrastructure exists.
+M17 ACTIVE / IMPLEMENTATION_IN_PROGRESS. M18-M20 remain planned/blocked by dependency order.
 
 ---
 
