@@ -8,6 +8,7 @@ const finding = { id: "finding-1", findingKey: "known-bad-fixture", severity: "M
 const audit = { id: "audit-1", projectId: project.id, taskId: null, auditType: "IMPLEMENTATION", auditedBranch: "H!veAI", auditedHeadSha: "abc123", baselineRef: "origin/H!veAI", inputManifestSha256: "input-hash", schemaVersion: 1, verdict: "CONDITIONAL", confidence: "LOW", regressionRisk: "HIGH", state: "FAILED", summary: "Evidence collected; Codex CLI provider unavailable.", startedAt: "2026-09-08T10:01:00Z", finishedAt: "2026-09-08T10:01:01Z", auditorProvider: "CODEX_CLI", auditorModel: "CLI_DEFAULT", auditorVersion: "UNAVAILABLE", modelStatus: "UNAVAILABLE", diagnostic: "AUDIT_CODEX_UNAVAILABLE", priorAuditId: null, remediationPromptId: null, remediationPromptVersionId: null, remediationSessionId: null, findings: [finding], coverage: [{ id: "coverage-1", requirementRef: "req-1", requirementText: "Required source symbol exists", status: "UNVERIFIED", evidenceRefs: ["SOURCE_SNIPPET:src/lib.rs"], rationale: "No configured model was available." }], evidence: [{ id: "evidence-1", kind: "SOURCE_SNIPPET", verificationStatus: "VERIFIED", locator: "src/lib.rs", summary: "Direct source inspection", content: "fn required_symbol() {}", contentSha256: "source-hash", byteCount: 24, truncated: false }, { id: "evidence-2", kind: "BUILDER_LOG_CLAIM", verificationStatus: "CLAIM_ONLY", locator: "M16.log", summary: "Builder claim", content: "all tests pass", contentSha256: "claim-hash", byteCount: 14, truncated: false }] };
 const completedAudit = { ...audit, id: "audit-completed", state: "COMPLETED", modelStatus: "AVAILABLE", auditorVersion: "1.0.0", diagnostic: null, summary: "Structured audit model output accepted." };
 const malformedAudit = { ...audit, id: "audit-malformed", state: "FAILED", modelStatus: "MALFORMED", diagnostic: "AUDIT_REQUIREMENT_COVERAGE_INVALID", summary: "Structured audit model output was semantically invalid." };
+const schemaIncompatibleAudit = { ...audit, id: "audit-schema", state: "FAILED", modelStatus: "SCHEMA_INCOMPATIBLE", diagnostic: "AUDIT_CODEX_SCHEMA_INCOMPATIBLE: invalid output schema", summary: "Codex structured-output support is incompatible with the audit contract." };
 const prompt = { promptId: "remediation-prompt", id: "remediation-version", version: 1, title: "Remediate audit", approvalState: "DRAFT", content: "Address the selected finding." };
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -91,7 +92,7 @@ describe("M16 Audit Center", () => {
   it("distinguishes valid and degraded immutable history rows with selectable diagnostics", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "hiveai_projects_list") return Promise.resolve([project]);
-      if (command === "hiveai_audits_list") return Promise.resolve([completedAudit, malformedAudit]);
+      if (command === "hiveai_audits_list") return Promise.resolve([completedAudit, malformedAudit, schemaIncompatibleAudit]);
       if (command === "hiveai_audit_get") return Promise.resolve(completedAudit);
       if (command === "hiveai_prompt_versions") return Promise.resolve([]);
       return Promise.resolve({});
@@ -101,11 +102,16 @@ describe("M16 Audit Center", () => {
     const completedRow = await screen.findByRole("button", { name: /Select CONDITIONAL audit COMPLETED AVAILABLE/ });
     expect(completedRow).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Select CONDITIONAL audit FAILED MALFORMED/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Select CONDITIONAL audit FAILED SCHEMA_INCOMPATIBLE/ })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Select CONDITIONAL audit FAILED MALFORMED/ }));
     expect(await screen.findByText("AUDIT_REQUIREMENT_COVERAGE_INVALID")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("MALFORMED");
     expect(screen.getByRole("button", { name: /Select CONDITIONAL audit COMPLETED AVAILABLE/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Select CONDITIONAL audit FAILED SCHEMA_INCOMPATIBLE/ }));
+    expect(await screen.findByText("AUDIT_CODEX_SCHEMA_INCOMPATIBLE: invalid output schema")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("SCHEMA_INCOMPATIBLE");
   });
 });

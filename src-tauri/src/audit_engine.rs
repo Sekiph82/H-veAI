@@ -592,6 +592,48 @@ fn audit_result_schema(input: &AuditInput) -> Value {
     })
 }
 
+fn synthetic_readiness_input() -> AuditInput {
+    AuditInput {
+        project_id: "readiness-probe".into(),
+        task_id: None,
+        task: None,
+        requirements: Vec::new(),
+        git: AuditGitEvidence {
+            scope: GitDiffScope::WorkingTree,
+            target_origin: AuditTargetOrigin::Auto,
+            branch: Some("readiness-probe".into()),
+            head_sha: Some("readiness-probe".into()),
+            baseline_ref: None,
+            base_sha: None,
+            staged_files: Vec::new(),
+            unstaged_files: Vec::new(),
+            untracked_files: Vec::new(),
+            conflicted_files: Vec::new(),
+            diff: None,
+            diff_truncated: false,
+            repository_identity: Some("readiness-probe".into()),
+            changed_files: Vec::new(),
+            full_change_set_sha256: None,
+            staged_content_sha256: None,
+            working_tracked_content_sha256: None,
+            untracked_content_sha256: None,
+            conflict_identity: None,
+            committed_range_identity: None,
+            identity_complete: true,
+            identity_diagnostic: None,
+        },
+        evidence: Vec::new(),
+        audited_branch: Some("readiness-probe".into()),
+        audited_head_sha: Some("readiness-probe".into()),
+        baseline_ref: None,
+        collected_at: "readiness-probe".into(),
+        input_manifest_sha256: "readiness-probe".into(),
+        freshness_token: "readiness-probe".into(),
+        audited_session_id: None,
+        audited_prompt_version_id: None,
+    }
+}
+
 const CODEX_DEFAULT_MODEL: &str = "CLI_DEFAULT";
 const CODEX_AUDIT_TIMEOUT: Duration = Duration::from_secs(120);
 const CODEX_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -732,20 +774,7 @@ fn build_codex_audit_args(
 }
 
 fn codex_readiness_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "ready": { "type": "boolean", "enum": [true] }
-        },
-        "required": ["ready"]
-    })
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexReadinessOutput {
-    ready: bool,
+    audit_result_schema(&synthetic_readiness_input())
 }
 
 const MAX_CODEX_DIAGNOSTIC_BYTES: usize = 2048;
@@ -1053,7 +1082,7 @@ fn check_codex_readiness_with_runner(
     runner: &dyn CodexProcessRunner,
 ) -> AuditProviderReadiness {
     let result = runner.run(&CodexProcessRequest {
-        prompt: "Return only {\"ready\":true}. This is a bounded structured-output readiness probe for the production audit boundary. Do not inspect files, repositories, web, MCP, plugins, or unrelated context.".into(),
+        prompt: "Return exactly one JSON object conforming to the supplied audit schema for a tiny freeform project audit. Use verdict CONDITIONAL, confidence LOW, regressionRisk HIGH, summary \"readiness probe\", findings [], exactly one requirementCoverage row with requirementRef \"project-audit\", requirementText \"No task-scoped criteria apply\", status NOT_APPLICABLE, evidenceRefs [], and rationale \"Representative structured-output compatibility probe.\", and priorFindingDispositions []. Return no prose. This is a bounded read-only readiness probe. Do not inspect files, repositories, web, MCP, plugins, or unrelated context.".into(),
         schema: Some(codex_readiness_schema()),
         model: None,
         timeout: CODEX_READINESS_TIMEOUT,
@@ -1094,9 +1123,11 @@ fn check_codex_readiness_with_runner(
             let schema_conformant = result
                 .final_message
                 .as_deref()
-                .and_then(|message| serde_json::from_str::<CodexReadinessOutput>(message).ok())
-                .map(|output| output.ready)
-                .unwrap_or(false);
+                .and_then(|message| {
+                    let mut evaluation = parse_model_output(message).ok()?;
+                    validate_semantic_evaluation(&synthetic_readiness_input(), &mut evaluation).ok()
+                })
+                .is_some();
             if schema_conformant {
                 AuditProviderReadiness {
                     provider: "Codex CLI".into(),
@@ -2772,6 +2803,8 @@ fn unavailable_evaluation<M: AuditModel>(
         "AUTH_POLICY_BLOCKED"
     } else if error.contains("AUTH_REQUIRED") {
         "AUTH_REQUIRED"
+    } else if error.contains("SCHEMA_INCOMPATIBLE") {
+        "SCHEMA_INCOMPATIBLE"
     } else if error.contains("USAGE_LIMITED") {
         "USAGE_LIMITED"
     } else if error.contains("TIMEOUT") {
@@ -2789,6 +2822,9 @@ fn unavailable_evaluation<M: AuditModel>(
         }
         "AUTH_REQUIRED" => {
             "Codex is not authenticated through the owner's supported ChatGPT login."
+        }
+        "SCHEMA_INCOMPATIBLE" => {
+            "Codex structured-output support is incompatible with the audit contract; no model verdict is treated as PASS."
         }
         "USAGE_LIMITED" => "Codex usage is limited; no model verdict is treated as PASS.",
         "TIMEOUT" => "Codex audit execution timed out; no model verdict is treated as PASS.",
@@ -5510,7 +5546,9 @@ mod tests {
     }
 
     fn mock_codex_readiness_result() -> CodexProcessResult {
-        mock_codex_result(Some(r#"{"ready":true}"#))
+        mock_codex_result(Some(
+            r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"readiness probe","findings":[],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Representative structured-output compatibility probe."}],"priorFindingDispositions":[]}"#,
+        ))
     }
 
     fn failed_codex_result(stderr: &str) -> CodexProcessResult {
@@ -5577,6 +5615,45 @@ mod tests {
         let diagnostic = classify_codex_failure(&oversized, "PROCESS_ERROR");
         assert!(diagnostic.len() <= 2_100);
         assert!(diagnostic.contains("TRUNCATED") || diagnostic.len() < 2_100);
+    }
+
+    #[test]
+    fn schema_incompatible_degraded_audit_persists_explicit_failed_truth() {
+        let (_app, _project_dir, database, project_id) =
+            git_project_fixture("Schema incompatibility fixture");
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let model = CodexCliAuditModel {
+            version: "codex-cli 0.153.4".into(),
+            runner: std::sync::Arc::new(MockCodexProcessRunner {
+                result: failed_codex_result("invalid output schema: unsupported keyword"),
+                requests,
+            }),
+        };
+        let result = run_with_model(
+            &database,
+            AuditInputRequest {
+                project_id: project_id.clone(),
+                task_id: None,
+                prior_audit_id: None,
+                git_target: AuditGitTarget::default(),
+            },
+            &model,
+        )
+        .unwrap();
+
+        assert_eq!(result.model_status, "SCHEMA_INCOMPATIBLE");
+        assert_eq!(result.state, AuditState::Failed);
+        assert_eq!(result.verdict, AuditVerdict::Conditional);
+        assert!(result
+            .summary
+            .contains("structured-output support is incompatible"));
+        assert!(result
+            .diagnostic
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("unsupported keyword")));
+        let persisted = get(&database, &project_id, &result.id).unwrap();
+        assert_eq!(persisted.model_status, "SCHEMA_INCOMPATIBLE");
+        assert_eq!(persisted.state, AuditState::Failed);
     }
 
     #[test]
@@ -5712,7 +5789,30 @@ mod tests {
             };
             let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
             assert_eq!(readiness.status, expected);
-            assert!(runner.requests.lock().unwrap()[0].schema.is_some());
+            let request = runner.requests.lock().unwrap().pop().unwrap();
+            let schema = request.schema.expect("representative readiness schema");
+            assert_eq!(
+                schema["properties"]["findings"]["items"]["additionalProperties"],
+                json!(false)
+            );
+            assert_eq!(
+                schema["properties"]["findings"]["items"]["properties"]["requirementRefs"]
+                    ["maxItems"],
+                json!(0)
+            );
+            assert_eq!(
+                schema["properties"]["requirementCoverage"]["minItems"],
+                json!(1)
+            );
+            assert_eq!(
+                schema["properties"]["requirementCoverage"]["maxItems"],
+                json!(1)
+            );
+            assert_eq!(
+                schema["properties"]["requirementCoverage"]["items"]["properties"]["evidenceRefs"]
+                    ["maxItems"],
+                json!(0)
+            );
         }
 
         let runner = MockCodexProcessRunner {
@@ -5726,6 +5826,41 @@ mod tests {
         assert_eq!(
             check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner).status,
             "READY"
+        );
+    }
+
+    #[test]
+    fn representative_readiness_schema_exposes_v08_contract_features() {
+        let schema = codex_readiness_schema();
+        assert_eq!(schema["additionalProperties"], json!(false));
+        assert_eq!(
+            schema["properties"]["verdict"]["enum"],
+            json!(["PASS", "CONDITIONAL", "FAIL"])
+        );
+        assert_eq!(
+            schema["properties"]["findings"]["items"]["properties"]["severity"]["enum"],
+            json!(["BLOCKER", "MAJOR", "MINOR", "NOTE"])
+        );
+        assert_eq!(
+            schema["properties"]["findings"]["items"]["properties"]["requirementRefs"]["maxItems"],
+            json!(0)
+        );
+        assert_eq!(
+            schema["properties"]["requirementCoverage"]["minItems"],
+            json!(1)
+        );
+        assert_eq!(
+            schema["properties"]["requirementCoverage"]["maxItems"],
+            json!(1)
+        );
+        assert_eq!(
+            schema["properties"]["requirementCoverage"]["items"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            schema["properties"]["requirementCoverage"]["items"]["properties"]["evidenceRefs"]
+                ["maxItems"],
+            json!(0)
         );
     }
 
