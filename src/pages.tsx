@@ -4950,6 +4950,7 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
       </div>
       <p className="settings-hint">H!veAI uses the local Codex installation and the login managed by Codex itself. The explicit readiness check performs a bounded structured-output probe; audit history is created only when you run an audit.</p>
       {status === "SCHEMA_INCOMPATIBLE" ? <p className="settings-hint">Codex is installed and authenticated, but its structured-output capability is incompatible with the audit contract.</p> : null}
+      {status === "MALFORMED" ? <p className="settings-hint">Codex completed the bounded probe, but its final result failed H!veAI parsing or semantic validation.</p> : null}
       {status === "USAGE_LIMITED" ? <p className="settings-hint">Codex reported an external usage or rate limit; no authoritative audit result was accepted.</p> : null}
       {readiness?.errorCategory ? <div className="safe-notice" role="status">{readiness.errorCategory}</div> : null}
       {message ? <div className="safe-notice" role="status">{message}</div> : null}

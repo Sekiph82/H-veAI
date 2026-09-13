@@ -568,7 +568,7 @@ fn audit_result_schema(input: &AuditInput) -> Value {
     let coverage_bounds = if freeform {
         json!({ "minItems": 1, "maxItems": 1 })
     } else {
-        json!({ "minItems": canonical_refs.len(), "maxItems": canonical_refs.len(), "uniqueItems": true })
+        json!({ "minItems": canonical_refs.len(), "maxItems": canonical_refs.len() })
     };
     json!({
         "type": "object",
@@ -581,7 +581,7 @@ fn audit_result_schema(input: &AuditInput) -> Value {
             "findings": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": {
                 "findingKey": { "type": "string" }, "severity": { "type": "string", "enum": ["BLOCKER", "MAJOR", "MINOR", "NOTE"] }, "title": { "type": "string" }, "detail": { "type": "string" }, "requirementRefs": finding_requirement_refs, "evidenceRefs": { "type": "array", "items": { "type": "string" } }, "sourceLocator": { "type": ["string", "null"] }, "testLocator": { "type": ["string", "null"] }, "remediationGuidance": { "type": "string" }, "blocksRelease": { "type": "boolean" }
             }, "required": ["findingKey", "severity", "title", "detail", "requirementRefs", "evidenceRefs", "sourceLocator", "testLocator", "remediationGuidance", "blocksRelease"] } },
-            "requirementCoverage": { "type": "array", "minItems": coverage_bounds["minItems"], "maxItems": coverage_bounds["maxItems"], "uniqueItems": coverage_bounds["uniqueItems"].as_bool().unwrap_or(false), "items": { "type": "object", "additionalProperties": false, "properties": {
+            "requirementCoverage": { "type": "array", "minItems": coverage_bounds["minItems"], "maxItems": coverage_bounds["maxItems"], "items": { "type": "object", "additionalProperties": false, "properties": {
                 "requirementRef": coverage_requirement_ref, "requirementText": { "type": "string" }, "status": coverage_status, "evidenceRefs": coverage_evidence_refs, "rationale": { "type": "string" }
             }, "required": ["requirementRef", "requirementText", "status", "evidenceRefs", "rationale"] } },
             "priorFindingDispositions": { "type": "array", "items": { "type": "object", "additionalProperties": false, "properties": {
@@ -1120,34 +1120,30 @@ fn check_codex_readiness_with_runner(
             failure(&status, error)
         }
         Ok(result) => {
-            let schema_conformant = result
-                .final_message
-                .as_deref()
-                .and_then(|message| {
-                    let mut evaluation = parse_model_output(message).ok()?;
-                    validate_semantic_evaluation(&synthetic_readiness_input(), &mut evaluation).ok()
-                })
-                .is_some();
-            if schema_conformant {
-                AuditProviderReadiness {
-                    provider: "Codex CLI".into(),
-                    status: "READY".into(),
-                    configured: true,
-                    executable_available: true,
-                    version: Some(version),
-                    login_state: Some("ChatGPT authenticated".into()),
-                    model: Some(CODEX_DEFAULT_MODEL.into()),
-                    credential_source: Some("Codex-managed login state".into()),
-                    error_category: None,
+            let Some(final_message) = result.final_message.as_deref() else {
+                return failure("PROCESS_ERROR", "AUDIT_CODEX_FINAL_OUTPUT_MISSING".into());
+            };
+            let mut evaluation = match parse_model_output(final_message) {
+                Ok(evaluation) => evaluation,
+                Err(error) => {
+                    return failure("MALFORMED", sanitize_process_diagnostic(&error));
                 }
-            } else {
-                failure(
-                    "SCHEMA_INCOMPATIBLE",
-                    format!(
-                        "AUDIT_CODEX_SCHEMA_INCOMPATIBLE: structured readiness result was not schema-conformant: {}",
-                        sanitize_process_diagnostic(&diagnostic_source(&result))
-                    ),
-                )
+            };
+            if let Err(error) =
+                validate_semantic_evaluation(&synthetic_readiness_input(), &mut evaluation)
+            {
+                return failure("MALFORMED", sanitize_process_diagnostic(&error));
+            }
+            AuditProviderReadiness {
+                provider: "Codex CLI".into(),
+                status: "READY".into(),
+                configured: true,
+                executable_available: true,
+                version: Some(version),
+                login_state: Some("ChatGPT authenticated".into()),
+                model: Some(CODEX_DEFAULT_MODEL.into()),
+                credential_source: Some("Codex-managed login state".into()),
+                error_category: None,
             }
         }
     }
@@ -5559,6 +5555,34 @@ mod tests {
         }
     }
 
+    fn assert_transport_schema_is_closed(value: &Value) {
+        match value {
+            Value::Object(object) => {
+                assert!(!object.contains_key("uniqueItems"));
+                if object.get("type").and_then(Value::as_str) == Some("object") {
+                    assert_eq!(object["additionalProperties"], json!(false));
+                    let properties = object["properties"].as_object().unwrap();
+                    let required = object["required"].as_array().unwrap();
+                    let property_names = properties.keys().cloned().collect::<HashSet<_>>();
+                    let required_names = required
+                        .iter()
+                        .map(|name| name.as_str().unwrap().to_string())
+                        .collect::<HashSet<_>>();
+                    assert_eq!(property_names, required_names);
+                }
+                for child in object.values() {
+                    assert_transport_schema_is_closed(child);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    assert_transport_schema_is_closed(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[test]
     fn codex_failure_classifier_requires_explicit_signals_and_preserves_safe_diagnostics() {
         let cases = [
@@ -5774,7 +5798,7 @@ mod tests {
     fn codex_readiness_classifies_success_failure_timeout_and_never_persists_audit() {
         for (result, expected) in [
             (mock_codex_readiness_result(), "READY"),
-            (mock_codex_result(Some("READY")), "SCHEMA_INCOMPATIBLE"),
+            (mock_codex_result(Some("READY")), "MALFORMED"),
             (
                 CodexProcessResult {
                     timed_out: true,
@@ -5827,6 +5851,100 @@ mod tests {
             check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner).status,
             "READY"
         );
+    }
+
+    #[test]
+    fn transport_schema_removes_unique_items_without_weakening_contracts() {
+        let freeform = codex_readiness_schema();
+        assert_transport_schema_is_closed(&freeform);
+        assert_eq!(
+            freeform["properties"]["requirementCoverage"]["minItems"],
+            json!(1)
+        );
+        assert_eq!(
+            freeform["properties"]["requirementCoverage"]["maxItems"],
+            json!(1)
+        );
+        assert_eq!(
+            freeform["properties"]["findings"]["items"]["properties"]["requirementRefs"]
+                ["maxItems"],
+            json!(0)
+        );
+
+        let mut task_input = input();
+        task_input.requirements = vec![
+            AuditRequirement {
+                requirement_ref: "req-a".into(),
+                requirement_text: "A".into(),
+                required: true,
+            },
+            AuditRequirement {
+                requirement_ref: "req-b".into(),
+                requirement_text: "B".into(),
+                required: true,
+            },
+        ];
+        let task_schema = audit_result_schema(&task_input);
+        assert_transport_schema_is_closed(&task_schema);
+        assert_eq!(
+            task_schema["properties"]["requirementCoverage"]["items"]["properties"]
+                ["requirementRef"]["enum"],
+            json!(["req-a", "req-b"])
+        );
+        assert_eq!(
+            task_schema["properties"]["requirementCoverage"]["minItems"],
+            json!(2)
+        );
+    }
+
+    #[test]
+    fn readiness_preserves_missing_parse_and_semantic_failure_stages() {
+        let cases = [
+            (
+                CodexProcessResult {
+                    stderr: "Reading prompt from stdin...".into(),
+                    ..mock_codex_result(None)
+                },
+                "PROCESS_ERROR",
+                "AUDIT_CODEX_FINAL_OUTPUT_MISSING",
+            ),
+            (
+                CodexProcessResult {
+                    stderr: "Reading prompt from stdin...".into(),
+                    final_message: Some("not-json".into()),
+                    ..mock_codex_result(None)
+                },
+                "MALFORMED",
+                "AUDIT_MODEL_SCHEMA_INVALID",
+            ),
+        ];
+        for (result, status, diagnostic) in cases {
+            let runner = MockCodexProcessRunner {
+                result,
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            };
+            let readiness = check_codex_readiness_with_runner("codex-cli 0.154.0".into(), &runner);
+            assert_eq!(readiness.status, status);
+            let error = readiness.error_category.unwrap();
+            assert!(error.contains(diagnostic));
+            assert!(!error.contains("Reading prompt from stdin"));
+        }
+
+        let semantic_invalid = CodexProcessResult {
+            stderr: "Reading prompt from stdin...".into(),
+            final_message: Some(r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"probe","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#.into()),
+            ..mock_codex_result(None)
+        };
+        let runner = MockCodexProcessRunner {
+            result: semantic_invalid,
+            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let readiness = check_codex_readiness_with_runner("codex-cli 0.154.0".into(), &runner);
+        assert_eq!(readiness.status, "MALFORMED");
+        assert!(readiness
+            .error_category
+            .unwrap()
+            .contains("AUDIT_PROJECT_COVERAGE_CONTRACT_INVALID"));
     }
 
     #[test]
@@ -5893,7 +6011,11 @@ mod tests {
             requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
         let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
-        assert_eq!(readiness.status, "SCHEMA_INCOMPATIBLE");
+        assert_eq!(readiness.status, "MALFORMED");
+        assert!(readiness
+            .error_category
+            .as_deref()
+            .is_some_and(|diagnostic| diagnostic.contains("AUDIT_MODEL_SCHEMA_INVALID")));
     }
 
     #[test]

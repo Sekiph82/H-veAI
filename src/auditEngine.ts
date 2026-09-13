@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 export type AuditProviderReadiness = {
   provider: string;
-  status: "READY" | "AUTH_UNVERIFIED" | "CODEX_NOT_FOUND" | "AUTH_REQUIRED" | "AUTH_POLICY_BLOCKED" | "USAGE_LIMITED" | "SCHEMA_INCOMPATIBLE" | "NETWORK_ERROR" | "TIMEOUT" | "PROCESS_ERROR";
+  status: "READY" | "AUTH_UNVERIFIED" | "CODEX_NOT_FOUND" | "AUTH_REQUIRED" | "AUTH_POLICY_BLOCKED" | "USAGE_LIMITED" | "SCHEMA_INCOMPATIBLE" | "MALFORMED" | "NETWORK_ERROR" | "TIMEOUT" | "PROCESS_ERROR";
   configured: boolean;
   executableAvailable: boolean;
   version: string | null;
