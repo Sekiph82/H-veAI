@@ -126,12 +126,7 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
             "Sekiph82/fmcg-erp-system",
             "main",
         ),
-        (
-            "formulab",
-            "FormuLab",
-            "Sekiph82/FormuLab",
-            "feature/laboratory-stability",
-        ),
+        ("formulab", "FormuLab", "Sekiph82/FormuLab", "main"),
         ("packlab", "PackLab", "Sekiph82/PackLab", "main"),
         ("packlab-3d", "PackLab 3D", "Sekiph82/PackLab-3D", "main"),
         ("scrubbots", "ScrubBots", "Sekiph82/Scrubbots", "main"),
@@ -212,6 +207,14 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                 params![format!("{project_id}:repository"), project_id, format!("https://github.com/{repository}.git"), owner, repo, branch, now],
             ).map_err(db_error)?;
         } else {
+            let previous_branch: Option<String> = transaction
+                .query_row(
+                    "SELECT default_branch FROM repositories WHERE project_id=?1 LIMIT 1",
+                    [&project_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_error)?;
             transaction
                 .execute(
                     "UPDATE projects SET name=?2, default_branch=?3, task_source_policy=?4, status=CASE WHEN status='ARCHIVED' THEN 'ACTIVE' ELSE status END, archived_at=NULL, updated_at=?5 WHERE id=?1",
@@ -229,6 +232,14 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                     .execute(
                         "INSERT INTO repositories (id,project_id,remote_url,github_owner,github_repo,default_branch,created_at,updated_at,is_git_repository) VALUES (?1,?2,?3,?4,?5,?6,?7,?7,1)",
                         params![format!("{project_id}:repository"), project_id, format!("https://github.com/{repository}.git"), owner, repo, branch, now],
+                    )
+                    .map_err(db_error)?;
+            }
+            if previous_branch.as_deref() != Some(branch.as_str()) {
+                transaction
+                    .execute(
+                        "DELETE FROM github_sync_state WHERE project_id=?1 AND resource_kind=?2",
+                        params![project_id, REMOTE_TASKS_RESOURCE_KIND],
                     )
                     .map_err(db_error)?;
             }
@@ -461,7 +472,7 @@ pub fn observe_project(
     match fetch_github_head(&repository_name, &branch) {
         Ok(head) => {
             if let Some(snapshot) = previous.as_ref() {
-                if same_head_cache_is_reusable(snapshot, &head) {
+                if same_head_cache_is_reusable(snapshot, &head, &branch) {
                     return Ok((snapshot.clone(), RemoteObservationChange::Unchanged));
                 }
             }
@@ -514,8 +525,11 @@ pub fn observe_project(
 pub(crate) fn same_head_cache_is_reusable(
     snapshot: &RemoteTrackingSnapshot,
     fetched_head: &str,
+    expected_branch: &str,
 ) -> bool {
-    if snapshot.remote_head.as_deref() != Some(fetched_head) || snapshot.remote_health != "CURRENT"
+    if snapshot.branch != expected_branch
+        || snapshot.remote_head.as_deref() != Some(fetched_head)
+        || snapshot.remote_health != "CURRENT"
     {
         return false;
     }
@@ -1330,6 +1344,190 @@ mod tests {
     }
 
     #[test]
+    fn ensure_portfolio_bootstraps_exactly_eight_canonical_targets() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+
+        ensure_portfolio(&database).unwrap();
+        let projects = list_projects(
+            &database,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let expected = [
+            ("Sekiph82/H-veAI", "main"),
+            ("Sekiph82/Bulk-Edit", "main"),
+            ("Sekiph82/fmcg-erp-system", "main"),
+            ("Sekiph82/FormuLab", "main"),
+            ("Sekiph82/PackLab", "main"),
+            ("Sekiph82/PackLab-3D", "main"),
+            ("Sekiph82/Scrubbots", "main"),
+            ("Sekiph82/ScrubBots-Level-Factory", "main"),
+        ];
+        assert_eq!(projects.len(), expected.len());
+        for (repository, branch) in expected {
+            let matches = projects
+                .iter()
+                .filter(|project| {
+                    project
+                        .repository
+                        .as_ref()
+                        .map(|value| {
+                            format!(
+                                "{}/{}",
+                                value.github_owner.as_deref().unwrap_or_default(),
+                                value.github_repo.as_deref().unwrap_or_default()
+                            ) == repository
+                                && value.default_branch.as_deref() == Some(branch)
+                        })
+                        .unwrap_or(false)
+                })
+                .count();
+            assert_eq!(matches, 1, "expected exactly one {repository}@{branch}");
+        }
+        assert_eq!(
+            projects
+                .iter()
+                .filter(|project| {
+                    project
+                        .repository
+                        .as_ref()
+                        .and_then(|value| value.github_repo.as_deref())
+                        == Some("FormuLab")
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn ensure_portfolio_migrates_formulab_branch_without_duplicate_or_cache_reuse() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        let local_dir = tempdir().unwrap();
+        let old_branch = "feature/laboratory-stability";
+        let old_project = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: local_dir.path().to_string_lossy().into_owned(),
+                name: Some("FormuLab local workspace".into()),
+            },
+        )
+        .unwrap();
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE projects SET default_branch=?1, task_source_policy=?2 WHERE id=?3",
+                params![old_branch, GITHUB_TASKS_ONLY_POLICY, old_project.id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE repositories SET remote_url=?1, github_owner='Sekiph82', github_repo='FormuLab', default_branch=?2, is_git_repository=1 WHERE project_id=?3",
+                params![
+                    "https://github.com/Sekiph82/FormuLab.git",
+                    old_branch,
+                    old_project.id
+                ],
+            )
+            .unwrap();
+
+        let persisted = crate::projects::fetch_project(&database, &old_project.id).unwrap();
+        let old_snapshot = parse_root_tasks(
+            &RootTasksRemote {
+                head: "same-formulab-head".into(),
+                tasks: "# FormuLab\n\n## Tasks\n".into(),
+                tasks_blob_sha: "sha256:old-branch".into(),
+                latest_commit_message: None,
+                latest_commit_author: None,
+                latest_commit_at: None,
+            },
+            "Sekiph82/FormuLab",
+            old_branch,
+            "now".into(),
+        )
+        .unwrap();
+        persist(&database, &persisted, &old_snapshot).unwrap();
+        assert_eq!(
+            cached_snapshot(&database, &persisted)
+                .unwrap()
+                .unwrap()
+                .branch,
+            old_branch
+        );
+        assert!(!same_head_cache_is_reusable(
+            &old_snapshot,
+            "same-formulab-head",
+            "main"
+        ));
+
+        ensure_portfolio(&database).unwrap();
+        let projects = list_projects(
+            &database,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(projects.len(), 8);
+        let formulab = projects
+            .iter()
+            .filter(|project| {
+                project
+                    .repository
+                    .as_ref()
+                    .and_then(|value| value.github_repo.as_deref())
+                    == Some("FormuLab")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(formulab.len(), 1);
+        assert_eq!(formulab[0].id, old_project.id);
+        assert_eq!(
+            formulab[0]
+                .repository
+                .as_ref()
+                .unwrap()
+                .default_branch
+                .as_deref(),
+            Some("main")
+        );
+        assert_eq!(formulab[0].normalized_path, persisted.normalized_path);
+        assert_eq!(formulab[0].original_path, persisted.original_path);
+        assert!(cached_snapshot(&database, formulab[0]).unwrap().is_none());
+
+        let other_repositories = [
+            "H-veAI",
+            "Bulk-Edit",
+            "fmcg-erp-system",
+            "PackLab",
+            "PackLab-3D",
+            "Scrubbots",
+            "ScrubBots-Level-Factory",
+        ];
+        for repository in other_repositories {
+            assert_eq!(
+                projects
+                    .iter()
+                    .filter(|project| {
+                        project
+                            .repository
+                            .as_ref()
+                            .and_then(|value| value.github_repo.as_deref())
+                            == Some(repository)
+                    })
+                    .count(),
+                1,
+                "expected exactly one {repository}@main"
+            );
+        }
+    }
+
+    #[test]
     fn legacy_remote_snapshot_without_task_rows_is_not_reusable_at_same_head() {
         let raw = RootTasksRemote {
             head: "0123456789012345678901234567890123456789".into(),
@@ -1346,7 +1544,11 @@ mod tests {
 
         assert_eq!(historical.total_tasks, Some(1));
         assert!(historical.task_rows.is_empty());
-        assert!(!same_head_cache_is_reusable(&historical, raw.head.as_str()));
+        assert!(!same_head_cache_is_reusable(
+            &historical,
+            raw.head.as_str(),
+            "main"
+        ));
     }
 
     #[test]
@@ -1363,7 +1565,8 @@ mod tests {
             parse_root_tasks(&populated_raw, "Sekiph82/demo", "main", "now".into()).unwrap();
         assert!(same_head_cache_is_reusable(
             &populated,
-            populated_raw.head.as_str()
+            populated_raw.head.as_str(),
+            "main"
         ));
 
         let empty_raw = RootTasksRemote {
@@ -1377,7 +1580,11 @@ mod tests {
         let empty = parse_root_tasks(&empty_raw, "Sekiph82/demo", "main", "now".into()).unwrap();
         assert_eq!(empty.total_tasks, Some(0));
         assert!(empty.task_rows.is_empty());
-        assert!(same_head_cache_is_reusable(&empty, empty_raw.head.as_str()));
+        assert!(same_head_cache_is_reusable(
+            &empty,
+            empty_raw.head.as_str(),
+            "main"
+        ));
     }
 
     #[test]
@@ -1416,7 +1623,8 @@ mod tests {
         let legacy = cached(&database, &project, "").unwrap().unwrap();
         assert!(!same_head_cache_is_reusable(
             &legacy,
-            "cccccccccccccccccccccccccccccccccccccccc"
+            "cccccccccccccccccccccccccccccccccccccccc",
+            "main"
         ));
 
         persist(&database, &project, &reparsed).unwrap();
@@ -1424,7 +1632,8 @@ mod tests {
         assert_eq!(repaired.task_rows.len(), 2);
         assert!(same_head_cache_is_reusable(
             &repaired,
-            "cccccccccccccccccccccccccccccccccccccccc"
+            "cccccccccccccccccccccccccccccccccccccccc",
+            "main"
         ));
     }
 
