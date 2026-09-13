@@ -51,6 +51,9 @@ export type AgentSession = {
   promptVersion: number | null;
   promptVersionSha256: string | null;
   providerVersion: string | null;
+  providerSessionId: string | null;
+  providerSessionProvenance: Record<string, unknown> | null;
+  providerCwdIdentity: string;
   elapsedMs: number | null;
   supportsResume: boolean;
   supportsPty: boolean;

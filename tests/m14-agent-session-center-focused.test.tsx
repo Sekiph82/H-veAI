@@ -29,10 +29,11 @@ beforeEach(() => {
 });
 
 describe("M14 Agent Session Center", () => {
-  it("keeps readiness native and removes the large readiness card", async () => {
+  it("keeps readiness native and exposes the compact Claude capability panel", async () => {
     render(<App />);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_agent_readiness"));
-    expect(screen.queryByText("2.1.248 (Claude Code)")).not.toBeInTheDocument();
+    expect(screen.getByTestId("claude-readiness")).toHaveTextContent("2.1.248 (Claude Code)");
+    expect(screen.getByTestId("claude-readiness")).toHaveTextContent("BOUNDED_STREAM_JSON");
     expect(screen.queryByText("codex-cli 0.149.1")).not.toBeInTheDocument();
     expect(screen.queryByText("Provider readiness")).not.toBeInTheDocument();
     expect(screen.queryByTestId("agent-center-readiness")).not.toBeInTheDocument();

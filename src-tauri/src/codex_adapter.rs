@@ -1,7 +1,8 @@
 use crate::codex_runtime::{
-    probe_version, resolve_codex_executable, resolve_codex_executable_from_entries, ProbeError,
+    probe_version, resolve_codex_executable, ProbeError,
     PROCESS_POLL, READINESS_TIMEOUT,
 };
+pub use crate::agent_adapter::{AdapterReadiness, AdapterSession, AdapterStartRequest, AgentAdapter, AgentProvider};
 use crate::db::DatabaseState;
 use crate::final_response::{FinalResponseCapture, FinalResponseState, ProviderKind};
 use crate::process_policy::background_command;
@@ -9,7 +10,6 @@ use crate::projects::{fetch_project, ProjectRecord};
 use crate::stream_sanitizer::StreamRedactor;
 use crate::time::utc_timestamp;
 use rusqlite::params;
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -32,76 +32,6 @@ const PERSIST_RETRY_ATTEMPTS: usize = 3;
 const PERSIST_RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(10), Duration::from_millis(25)];
 const STOP_GRACE: Duration = Duration::from_millis(750);
 const STOP_ESCALATION_TIMEOUT: Duration = Duration::from_secs(2);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum AgentProvider {
-    Codex,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdapterReadiness {
-    pub provider: String,
-    pub available: bool,
-    pub version: Option<String>,
-    pub readiness_state: String,
-    pub diagnostic_code: Option<String>,
-    pub diagnostic_message: Option<String>,
-    pub checked_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdapterStartRequest {
-    pub project_id: String,
-    pub task_id: Option<String>,
-    pub prompt: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AdapterSession {
-    pub id: String,
-    pub provider: String,
-    pub project_id: String,
-    pub task_id: Option<String>,
-    pub operation_kind: String,
-    pub state: String,
-    pub cwd: String,
-    pub started_at: Option<String>,
-    pub ended_at: Option<String>,
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub final_response: Option<String>,
-    pub final_response_truncated: bool,
-    pub final_response_state: String,
-    pub final_response_role: Option<String>,
-    pub diagnostic_code: Option<String>,
-    pub diagnostic_message: Option<String>,
-    pub prompt_body: Option<String>,
-}
-
-pub trait AgentAdapter {
-    fn provider(&self) -> AgentProvider;
-    fn readiness(&self) -> AdapterReadiness;
-    fn start(
-        &self,
-        database: &DatabaseState,
-        request: AdapterStartRequest,
-    ) -> Result<AdapterSession, String>;
-    fn list(
-        &self,
-        database: &DatabaseState,
-        project_id: &str,
-    ) -> Result<Vec<AdapterSession>, String>;
-    fn stop(&self, database: &DatabaseState, session_id: &str) -> Result<AdapterSession, String>;
-    fn resume(&self, database: &DatabaseState, session_id: &str) -> Result<AdapterSession, String>;
-    fn reconcile(&self, database: &DatabaseState) -> Result<(), String>;
-}
 
 pub type CodexReadiness = AdapterReadiness;
 pub type CodexStartRequest = AdapterStartRequest;
@@ -462,6 +392,8 @@ pub fn readiness() -> CodexReadiness {
             readiness_state: "UNAVAILABLE".into(),
             diagnostic_code: Some(code.into()),
             diagnostic_message: Some(message),
+            capabilities: vec!["LIST".into(), "STOP".into()],
+            supports_resume: false,
             checked_at,
         };
     };
@@ -473,6 +405,8 @@ pub fn readiness() -> CodexReadiness {
             readiness_state: "VERSION_VERIFIED_AUTH_UNKNOWN".into(),
             diagnostic_code: Some("AUTH_READINESS_UNVERIFIED".into()),
             diagnostic_message: Some(selected_executable_message(resolution.skipped_candidates)),
+            capabilities: vec!["START".into(), "LIST".into(), "STOP".into(), "BOUNDED_OUTPUT".into()],
+            supports_resume: false,
             checked_at,
         },
         Err(ProbeError::Timeout) => unavailable_readiness(
@@ -520,6 +454,8 @@ fn unavailable_readiness(
         readiness_state: state.into(),
         diagnostic_code: Some(code.into()),
         diagnostic_message: Some(message.into()),
+        capabilities: vec!["LIST".into(), "STOP".into()],
+        supports_resume: false,
         checked_at,
     }
 }
@@ -1418,6 +1354,7 @@ pub fn reconcile(database: &DatabaseState) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex_runtime::resolve_codex_executable_from_entries;
     use crate::stream_sanitizer::MAX_PROVIDER_RECORD_BYTES;
     use std::io;
     use std::process::Command;

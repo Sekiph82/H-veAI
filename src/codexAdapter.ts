@@ -7,6 +7,8 @@ export type CodexReadiness = {
   readinessState: string;
   diagnosticCode: string | null;
   diagnosticMessage: string | null;
+  capabilities: string[];
+  supportsResume: boolean;
   checkedAt: string;
 };
 

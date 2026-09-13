@@ -73,6 +73,7 @@ import {
   listAgentSessions,
   resizeAgentTerminal,
   retryAgentSession,
+  resumeAgentSession,
   startAgentSession,
   stopAgentSession,
   type AgentSession,
@@ -4449,6 +4450,23 @@ export function Agents() {
       setBusy(false);
     }
   };
+  const resume = async () => {
+    if (!selectedSession || !selectedSession.supportsResume) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const session = await resumeAgentSession(
+        selectedSession.projectId,
+        selectedSession.id,
+      );
+      setSelectedSessionId(session.id);
+      await refreshSessions();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
   const chooseProvider = async (value: SessionProvider) => {
     setProvider(value);
     if (selected) {
@@ -4495,6 +4513,27 @@ export function Agents() {
         <div className="safe-notice" role="status">
           {routeNotice}
         </div>
+      ) : null}
+      {desktop ? (
+        <section className="panel agent-readiness-panel" data-testid="claude-readiness">
+          <SectionHeader title="Claude Code readiness" detail="Installed local CLI only" />
+          {(() => {
+            const claude = readiness.find((item) => item.provider === "CLAUDE");
+            if (!claude) return <p className="agent-output-empty">Readiness evidence unavailable.</p>;
+            return <>
+              <div className="agent-session-summary">
+                <ProviderBadge provider="CLAUDE" />
+                <strong>{claude.readinessState.replaceAll("_", " ")}</strong>
+                <span>{claude.version ?? "Version unavailable"}</span>
+                <span>{claude.supportsResume ? "Resume supported" : "Resume unavailable"}</span>
+              </div>
+              <div className="agent-capability-list">
+                {claude.capabilities.map((capability) => <span key={capability}>{capability}</span>)}
+              </div>
+              {claude.diagnosticMessage ? <p className="agent-field-note">{claude.diagnosticMessage}</p> : null}
+            </>;
+          })()}
+        </section>
       ) : null}
       <section className="panel agent-operation-panel">
         <SectionHeader
@@ -4570,7 +4609,7 @@ export function Agents() {
             <Terminal size={15} /> Start {provider} session
           </button>
           {selectedSession &&
-          ["FAILED", "STOPPED", "CRASHED"].includes(selectedSession.state) ? (
+          ["FAILED", "STOPPED", "CRASHED", "ORPHANED", "USAGE_LIMITED", "AUTH_REQUIRED", "NETWORK_ERROR"].includes(selectedSession.state) ? (
             <button
               className="secondary-button"
               type="button"
@@ -4629,7 +4668,7 @@ export function Agents() {
               <span>{selectedSession.operationKind.replaceAll("_", " ")}</span>
             </div>
             <div className="agent-session-actions">
-              {["STARTING", "RUNNING"].includes(selectedSession.state) ? (
+              {["STARTING", "RUNNING", "WAITING_PERMISSION", "WAITING_USER"].includes(selectedSession.state) ? (
                 <button
                   className="secondary-button"
                   type="button"
@@ -4643,14 +4682,10 @@ export function Agents() {
                 <button
                   className="secondary-button"
                   type="button"
-                  onClick={() =>
-                    setError(
-                      `${selectedSession.provider} resume is not supported by the verified provider capability`,
-                    )
-                  }
+                  onClick={() => void resume()}
                   disabled={busy}
                 >
-                  Resume
+                  Resume exact session
                 </button>
               ) : null}
               {selectedSession.state === "FAILED" ? (
@@ -4711,6 +4746,14 @@ export function Agents() {
                   [
                     "Provider version",
                     selectedSession.providerVersion ?? "Unavailable",
+                  ],
+                  [
+                    "Provider session ID",
+                    selectedSession.providerSessionId ?? "Not captured",
+                  ],
+                  [
+                    "Canonical cwd",
+                    selectedSession.providerCwdIdentity || selectedSession.cwd,
                   ],
                   [
                     "Prompt reference",

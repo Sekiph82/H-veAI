@@ -543,6 +543,13 @@ CREATE TABLE github_project_exclusions (
 );
 "#;
 
+const AGENT_PROVIDER_PROVENANCE_FIELDS: &str = r#"
+ALTER TABLE agent_sessions ADD COLUMN provider_session_id TEXT;
+ALTER TABLE agent_sessions ADD COLUMN provider_session_provenance_json TEXT;
+ALTER TABLE agent_sessions ADD COLUMN provider_cwd_identity TEXT;
+CREATE INDEX idx_agent_sessions_provider_identity ON agent_sessions(provider, provider_session_id);
+"#;
+
 pub fn migrations() -> &'static [Migration] {
     &[
         Migration {
@@ -660,6 +667,11 @@ pub fn migrations() -> &'static [Migration] {
             name: "github_project_removal_exclusions",
             sql: PROJECT_REMOVAL_EXCLUSIONS,
         },
+        Migration {
+            version: 24,
+            name: "agent_provider_session_provenance",
+            sql: AGENT_PROVIDER_PROVENANCE_FIELDS,
+        },
     ]
 }
 
@@ -758,8 +770,8 @@ mod tests {
     fn fresh_database_reaches_latest_version() {
         let (_directory, mut connection) = temp_connection();
         let report = apply_migrations(&mut connection, migrations()).expect("migrations apply");
-        assert_eq!(report.schema_version, 23);
-        assert_eq!(report.migration_count, 23);
+        assert_eq!(report.schema_version, 24);
+        assert_eq!(report.migration_count, 24);
         assert_eq!(report.last_migration_status, "APPLIED");
     }
 
@@ -769,7 +781,7 @@ mod tests {
         apply_migrations(&mut connection, migrations()).expect("first apply");
         let report = apply_migrations(&mut connection, migrations()).expect("second apply");
         assert_eq!(report.last_migration_status, "ALREADY_CURRENT");
-        assert_eq!(report.migration_count, 23);
+        assert_eq!(report.migration_count, 24);
     }
 
     #[test]
@@ -880,7 +892,7 @@ mod tests {
         let (_directory, mut connection) = temp_connection();
         let first = apply_migrations(&mut connection, migrations()).expect("first apply");
         let second = apply_migrations(&mut connection, migrations()).expect("rerun");
-        assert_eq!(first.schema_version, 23);
+        assert_eq!(first.schema_version, 24);
         assert_eq!(second.last_migration_status, "ALREADY_CURRENT");
         let mismatch = [Migration {
             version: 1,
@@ -930,6 +942,7 @@ mod tests {
                 (21, "transactional_truth_generation".to_string()),
                 (22, "truth_generation_zero_bootstrap".to_string()),
                 (23, "github_project_removal_exclusions".to_string()),
+                (24, "agent_provider_session_provenance".to_string()),
             ]
         );
     }
@@ -1156,6 +1169,7 @@ mod tests {
             "idx_prompt_versions_dispatch_state",
             "idx_prompt_versions_dispatch_reservation",
             "idx_agent_sessions_project_state",
+            "idx_agent_sessions_provider_identity",
             "idx_audit_findings_audit",
             "idx_audit_evidence_audit_logical",
             "idx_audit_findings_audit_logical",

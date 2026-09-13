@@ -6,6 +6,7 @@ use tauri::{webview::PageLoadEvent, Emitter, Manager};
 use tauri_plugin_log::{Target, TargetKind};
 
 mod agent_session_center;
+mod agent_adapter;
 mod audit_engine;
 mod codex_adapter;
 mod codex_runtime;
@@ -381,11 +382,12 @@ mod app_commands {
 
     #[tauri::command]
     fn hiveai_agent_resume(
+        center: tauri::State<'_, AgentSessionCenter>,
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
         session_id: String,
     ) -> Result<AgentSession, String> {
-        agent_session_center::resume(&database, &project_id, &session_id)
+        agent_session_center::resume(&center, &database, &project_id, &session_id)
     }
 
     #[tauri::command]
