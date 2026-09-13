@@ -6,6 +6,8 @@ const invoke = vi.hoisted(() => vi.fn());
 const project = { id: "audit-project", name: "Audit Fixture", originalPath: "C:\\Projects\\Audit Fixture", normalizedPath: "C:\\Projects\\Audit Fixture", status: "ACTIVE", priority: 1, preferredBuilder: null, preferredAuditor: "GPT", taskSourcePolicy: "DISCOVER_STANDARD_FILES", preferredAgentProvider: "CODEX", registeredAt: "2026-09-08T10:00:00Z", lastValidatedAt: "2026-09-08T10:00:00Z", repository: null };
 const finding = { id: "finding-1", findingKey: "known-bad-fixture", severity: "MAJOR", title: "Known defect", detail: "The fixture omits the required source symbol.", requirementRefs: ["req-1"], evidenceRefs: ["SOURCE_SNIPPET:src/lib.rs"], sourceLocator: "src/lib.rs:10", testLocator: "tests/audit.rs:12", confidence: "HIGH", status: "OPEN", remediationGuidance: "Add the symbol and a direct test.", blocksRelease: true, closedByAuditId: null };
 const audit = { id: "audit-1", projectId: project.id, taskId: null, auditType: "IMPLEMENTATION", auditedBranch: "H!veAI", auditedHeadSha: "abc123", baselineRef: "origin/H!veAI", inputManifestSha256: "input-hash", schemaVersion: 1, verdict: "CONDITIONAL", confidence: "LOW", regressionRisk: "HIGH", state: "FAILED", summary: "Evidence collected; Codex CLI provider unavailable.", startedAt: "2026-09-08T10:01:00Z", finishedAt: "2026-09-08T10:01:01Z", auditorProvider: "CODEX_CLI", auditorModel: "CLI_DEFAULT", auditorVersion: "UNAVAILABLE", modelStatus: "UNAVAILABLE", diagnostic: "AUDIT_CODEX_UNAVAILABLE", priorAuditId: null, remediationPromptId: null, remediationPromptVersionId: null, remediationSessionId: null, findings: [finding], coverage: [{ id: "coverage-1", requirementRef: "req-1", requirementText: "Required source symbol exists", status: "UNVERIFIED", evidenceRefs: ["SOURCE_SNIPPET:src/lib.rs"], rationale: "No configured model was available." }], evidence: [{ id: "evidence-1", kind: "SOURCE_SNIPPET", verificationStatus: "VERIFIED", locator: "src/lib.rs", summary: "Direct source inspection", content: "fn required_symbol() {}", contentSha256: "source-hash", byteCount: 24, truncated: false }, { id: "evidence-2", kind: "BUILDER_LOG_CLAIM", verificationStatus: "CLAIM_ONLY", locator: "M16.log", summary: "Builder claim", content: "all tests pass", contentSha256: "claim-hash", byteCount: 14, truncated: false }] };
+const completedAudit = { ...audit, id: "audit-completed", state: "COMPLETED", modelStatus: "AVAILABLE", auditorVersion: "1.0.0", diagnostic: null, summary: "Structured audit model output accepted." };
+const malformedAudit = { ...audit, id: "audit-malformed", state: "FAILED", modelStatus: "MALFORMED", diagnostic: "AUDIT_REQUIREMENT_COVERAGE_INVALID", summary: "Structured audit model output was semantically invalid." };
 const prompt = { promptId: "remediation-prompt", id: "remediation-version", version: 1, title: "Remediate audit", approvalState: "DRAFT", content: "Address the selected finding." };
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -31,7 +33,7 @@ describe("M16 Audit Center", () => {
     expect(await screen.findByRole("heading", { name: "Audit Center" })).toBeInTheDocument();
     expect(await screen.findByText("Evidence collected; Codex CLI provider unavailable.")).toBeInTheDocument();
     expect(screen.getByText(/Codex CLI audit provider is not configured/)).toBeInTheDocument();
-    expect(screen.getByText("FAILED", { selector: ".audit-badge" })).toBeInTheDocument();
+    expect(screen.getAllByText("FAILED", { selector: ".audit-badge" }).length).toBeGreaterThan(0);
     expect(screen.getByText("Required source symbol exists")).toBeInTheDocument();
     expect(screen.getByText("MAJOR", { selector: ".audit-badge" })).toBeInTheDocument();
     expect(screen.getByText(/Builder logs are claims only/)).toBeInTheDocument();
@@ -68,5 +70,26 @@ describe("M16 Audit Center", () => {
     expect(await screen.findByText("UNAVAILABLE", { selector: ".settings-provider-facts b" })).toBeInTheDocument();
     expect(screen.queryByText("CODEX_NOT_FOUND")).not.toBeInTheDocument();
     expect(screen.getByText("command not allowed by ACL")).toBeInTheDocument();
+  });
+
+  it("distinguishes valid and degraded immutable history rows with selectable diagnostics", async () => {
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_projects_list") return Promise.resolve([project]);
+      if (command === "hiveai_audits_list") return Promise.resolve([completedAudit, malformedAudit]);
+      if (command === "hiveai_audit_get") return Promise.resolve(completedAudit);
+      if (command === "hiveai_prompt_versions") return Promise.resolve([]);
+      return Promise.resolve({});
+    });
+    render(<App />);
+
+    const completedRow = await screen.findByRole("button", { name: /Select CONDITIONAL audit COMPLETED AVAILABLE/ });
+    expect(completedRow).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Select CONDITIONAL audit FAILED MALFORMED/ })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Select CONDITIONAL audit FAILED MALFORMED/ }));
+    expect(await screen.findByText("AUDIT_REQUIREMENT_COVERAGE_INVALID")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("MALFORMED");
+    expect(screen.getByRole("button", { name: /Select CONDITIONAL audit COMPLETED AVAILABLE/ })).toBeInTheDocument();
   });
 });
