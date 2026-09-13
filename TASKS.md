@@ -7,9 +7,9 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - Current Milestone: M17
 - Current Sprint: M17-CLAUDE-ADAPTER
 - Current Task: M17 V01 — Claude Code Adapter
-- Current Task Status: IMPLEMENTATION_IN_PROGRESS
-- Next Task/Action: Implement and verify the local Claude Code CLI adapter, then independent M17 strict audit and owner-native Claude acceptance.
-- Required Actor: CODEX
+- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_AUDIT_AND_OWNER_NATIVE_ACCEPTANCE
+- Next Task/Action: Independent M17 strict audit by ChatGPT, followed by owner-native Claude workflow acceptance; only then may M17 close and M18 be considered.
+- Required Actor: HUMAN
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -20,7 +20,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
 - [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
 - [x] M16T — Codex-only audit provider native acceptance remediation V11 (validated complete; M16 PASS/CLOSED)
-- [~] M17 — Claude Code Adapter V01 (implementation in progress; M18-M20 remain planned/blocked)
+- [~] M17 — Claude Code Adapter V01 (implementation complete; awaiting independent strict audit and owner-native acceptance; M18-M20 remain planned/blocked)
 
 # H!veAI MASTER TASKS
 
