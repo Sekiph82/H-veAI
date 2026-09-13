@@ -6,9 +6,9 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 - Current Milestone: M16
 - Current Sprint: M16T-CODEX-ONLY
-- Current Task: M16T V08 — Freeform requirement-reference contract stability remediation
-- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_AUDIT_AND_OWNER_NATIVE_STABILITY_REACCEPTANCE
-- Next Task/Action: Independent M16T V08 strict audit, then owner native readiness plus three-consecutive-freeform-run stability acceptance.
+- Current Task: M16T V09 — Codex failure classification and production-equivalent readiness remediation
+- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_AUDIT_AND_OWNER_NATIVE_REACCEPTANCE
+- Next Task/Action: Independent M16T V09 strict audit, then owner Settings readiness and native freeform acceptance.
 - Required Actor: HUMAN
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
@@ -19,7 +19,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R02 — Project Cockpit Tasks and AI-Commerce retirement remediation V02 (independent strict audit PASS and owner native re-acceptance PASS)
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
 - [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
-- [~] M16T — Codex-only audit provider native acceptance remediation V08 (implementation complete; awaiting independent strict audit and owner native stability acceptance; M16 remains OPEN)
+- [~] M16T — Codex-only audit provider native acceptance remediation V09 (implementation complete; awaiting independent strict audit and owner native re-acceptance; M16 remains OPEN)
 
 # H!veAI MASTER TASKS
 
@@ -51,12 +51,12 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 - Pre-M10 Native UX Hotfix X01/X02 = PASS/CLOSED after independent source audit plus user native acceptance.
   - X01: terminal/console popup suppression accepted fixed after approximately 45 minutes of native runtime with no unwanted terminal windows.
   - X02: startup intro audio/replay behavior accepted fixed; audio works and same-process route navigation does not replay the intro.
-- Strict completed milestone count remains **16 / 20 = 80%**; M16 remains OPEN during M16T V08 pending independent strict audit and owner native stability acceptance; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 hotfix is not a numbered roadmap milestone.
+- Strict completed milestone count remains **16 / 20 = 80%**; M16 remains OPEN during M16T V09 pending independent strict audit and owner native re-acceptance; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 hotfix is not a numbered roadmap milestone.
 - M10 original strict audit = historical FAIL with 5 MAJOR findings.
 - M10A remediation, independent re-audit, and Akilta native click acceptance are complete; Akilta footer link = PASS/ACCEPTED.
 - Original M11 implementation is a historical strict-audit FAIL with 8 MAJOR findings.
 - M11A REV4, REV5, REV6, and REV7 remediation history remains immutable; all findings are closed by the accepted strict audits. M11A REV7 = PASS/CLOSED and the final Projects visual cleanup = PASS/CLOSED.
-- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V08 is implementation-complete pending independent strict audit and owner native stability acceptance; M16 remains OPEN; M17-M20 remain planned/blocked.
+- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 is implementation-complete pending independent strict audit and owner native re-acceptance; M16 remains OPEN; M17-M20 remain planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository remains retained for preservation and has not been deleted.
 
 ---
@@ -1786,7 +1786,7 @@ M20 PLANNED/BLOCKED until M19 and final hardening gates.
 - Subpackage numbering is for traceability, source/evidence mapping, and progress visibility, not an instruction to generate many tiny prompts.
 - Every milestone closes only after production implementation, direct evidence, full regression, governed publication where applicable, and independent audit acceptance.
 - M16O GitHub-first eight-repository tracking reset is implementation-complete: all eight target branches use the unified v3 contract, real branch state is pushed, and Command Center/Project Cockpit read remote GitHub snapshots with stale-cache fallback only. M16 remains OPEN at 16/20 = 80%; M16N is superseded and was not executed.
-- M16S V02 source-audit PASS is superseded before final owner provider acceptance. M16T V02 closes the bounded child-stream drain and canonical tracker-truth findings; the active OpenAI HTTP/API-key path remains removed, local Codex CLI remains the production provider, readiness remains bounded and truthful, and existing audit/workspace contracts remain preserved. M16T V07 adds the bounded audit-history validity presentation; M16T V08 adds input-aware freeform/task requirement-reference contract enforcement; M16T awaits independent strict audit and owner native stability acceptance; M17 is not activated.
+- M16S V02 source-audit PASS is superseded before final owner provider acceptance. M16T V02 closes the bounded child-stream drain and canonical tracker-truth findings; the active OpenAI HTTP/API-key path remains removed, local Codex CLI remains the production provider, readiness remains bounded and truthful, and existing audit/workspace contracts remain preserved. M16T V07 adds the bounded audit-history validity presentation; M16T V08 adds input-aware freeform/task requirement-reference contract enforcement; M16T V09 adds explicit failure classification, structured-output readiness probing, and bounded sanitized diagnostics; M16T awaits independent strict audit and owner native re-acceptance; M17 is not activated.
 - M21 and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence. The historical local AI-Commerce parent is retired from active use; the GitHub repository is retained for preservation and has not been deleted.
 
 

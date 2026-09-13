@@ -72,6 +72,22 @@ describe("M16 Audit Center", () => {
     expect(screen.getByText("command not allowed by ACL")).toBeInTheDocument();
   });
 
+  it("explains structured-output incompatibility separately from quota", async () => {
+    window.history.pushState({}, "", "/settings");
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_projects_list") return Promise.resolve([project]);
+      if (command === "hiveai_audit_provider_readiness") return Promise.resolve({ provider: "Codex CLI", status: "AUTH_UNVERIFIED", configured: true, executableAvailable: true, version: "codex-cli 0.153.4", loginState: "ChatGPT login reported; turn unverified", model: "CLI_DEFAULT", credentialSource: "Codex-managed login state", errorCategory: null });
+      if (command === "hiveai_audit_provider_check_readiness") return Promise.resolve({ provider: "Codex CLI", status: "SCHEMA_INCOMPATIBLE", configured: false, executableAvailable: true, version: "codex-cli 0.153.4", loginState: "ChatGPT login end-to-end check failed", model: "CLI_DEFAULT", credentialSource: "Codex-managed login state", errorCategory: "AUDIT_CODEX_SCHEMA_INCOMPATIBLE: invalid output schema" });
+      return Promise.resolve({});
+    });
+    render(<App />);
+    expect(await screen.findByText("AUTH_UNVERIFIED")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check readiness" }));
+    expect(await screen.findByText("SCHEMA_INCOMPATIBLE")).toBeInTheDocument();
+    expect(screen.getByText(/installed and authenticated, but its structured-output capability/)).toBeInTheDocument();
+    expect(screen.getByText(/invalid output schema/)).toBeInTheDocument();
+  });
+
   it("distinguishes valid and degraded immutable history rows with selectable diagnostics", async () => {
     invoke.mockImplementation((command: string) => {
       if (command === "hiveai_projects_list") return Promise.resolve([project]);

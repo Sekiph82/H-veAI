@@ -731,6 +731,141 @@ fn build_codex_audit_args(
     args
 }
 
+fn codex_readiness_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "ready": { "type": "boolean", "enum": [true] }
+        },
+        "required": ["ready"]
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexReadinessOutput {
+    ready: bool,
+}
+
+const MAX_CODEX_DIAGNOSTIC_BYTES: usize = 2048;
+const MAX_CODEX_DIAGNOSTIC_LINES: usize = 12;
+
+fn sanitize_process_diagnostic(value: &str) -> String {
+    let sanitized = sanitize_text(value);
+    let lines = sanitized
+        .lines()
+        .take(MAX_CODEX_DIAGNOSTIC_LINES)
+        .collect::<Vec<_>>();
+    let excerpt = lines.join("\n");
+    if excerpt.trim().is_empty() {
+        "no bounded provider diagnostic was emitted".into()
+    } else {
+        bound_text(&excerpt, MAX_CODEX_DIAGNOSTIC_BYTES).0
+    }
+}
+
+fn diagnostic_source(result: &CodexProcessResult) -> String {
+    let diagnostic_lines = |value: &str| {
+        value
+            .lines()
+            .filter(|line| {
+                let lower = line.to_ascii_lowercase();
+                lower.contains("error")
+                    || lower.contains("failed")
+                    || lower.contains("invalid")
+                    || lower.contains("unsupported")
+                    || lower.contains("quota")
+                    || lower.contains("rate")
+                    || lower.contains("network")
+                    || lower.contains("auth")
+                    || lower.contains("login")
+                    || lower.contains("429")
+                    || lower.contains("timeout")
+            })
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let stderr = diagnostic_lines(&result.stderr);
+    if !stderr.is_empty() {
+        return stderr.join("\n");
+    }
+    if !result.stderr.trim().is_empty() {
+        return result.stderr.clone();
+    }
+    let stdout = diagnostic_lines(&result.stdout);
+    if !stdout.is_empty() {
+        return stdout.join("\n");
+    }
+    result.stdout.clone()
+}
+
+fn classify_codex_failure_category(result: &CodexProcessResult, fallback: &str) -> String {
+    let text = format!("{}\n{}", result.stdout, result.stderr).to_ascii_lowercase();
+    if text.contains("api key authentication")
+        || text.contains("api-key authentication")
+        || text.contains("api key auth")
+        || text.contains("api-key auth")
+        || text.contains("api key is not supported")
+        || text.contains("api-key is not supported")
+    {
+        "AUTH_POLICY_BLOCKED".into()
+    } else if text.contains("authentication required")
+        || text.contains("authentication failed")
+        || text.contains("login required")
+        || text.contains("not logged in")
+        || text.contains("please log in")
+        || text.contains("unauthorized")
+        || text.contains("no active login")
+        || text.contains("login expired")
+    {
+        "AUTH_REQUIRED".into()
+    } else if text.contains("invalid json schema")
+        || text.contains("invalid output schema")
+        || text.contains("unsupported json schema")
+        || text.contains("unsupported output schema")
+        || text.contains("unknown argument --output-schema")
+        || text.contains("unrecognized option --output-schema")
+        || text.contains("output-schema is not supported")
+        || text.contains("schema validation failed")
+        || text.contains("schema rejected")
+        || text.contains("unsupported keyword")
+        || text.contains("invalid schema")
+        || text.contains("structured output is not supported")
+    {
+        "SCHEMA_INCOMPATIBLE".into()
+    } else if text.contains("usage limit")
+        || text.contains("you've hit your usage limit")
+        || text.contains("you have hit your usage limit")
+        || text.contains("rate limit")
+        || text.contains("rate_limit")
+        || text.contains("quota exceeded")
+        || text.contains("insufficient quota")
+        || text.contains("too many requests")
+        || text.contains("http 429")
+        || text.contains("status: 429")
+        || text.contains("status 429")
+        || text.contains("error 429")
+    {
+        "USAGE_LIMITED".into()
+    } else if text.contains("network error")
+        || text.contains("network failure")
+        || text.contains("failed to connect")
+        || text.contains("connection refused")
+        || text.contains("connection reset")
+        || text.contains("could not connect")
+        || text.contains("connectivity failure")
+        || text.contains("dns resolution")
+        || text.contains("offline")
+    {
+        "NETWORK_ERROR".into()
+    } else if text.contains("timed out") || text.contains("timeout") {
+        "TIMEOUT".into()
+    } else {
+        fallback.into()
+    }
+}
+
 struct CodexCliAuditModel {
     version: String,
     runner: Arc<dyn CodexProcessRunner>,
@@ -767,14 +902,19 @@ impl AuditModel for CodexCliAuditModel {
             timeout: CODEX_AUDIT_TIMEOUT,
         })?;
         if result.timed_out {
-            return Err("AUDIT_CODEX_TIMEOUT: bounded Codex audit process timed out".into());
+            return Err(format!(
+                "AUDIT_CODEX_TIMEOUT: {}",
+                sanitize_process_diagnostic(&diagnostic_source(&result))
+            ));
         }
         if result.exit_code != Some(0) {
             return Err(classify_codex_failure(&result, "PROCESS_ERROR"));
         }
-        result.final_message.ok_or_else(|| {
-            "AUDIT_CODEX_FINAL_OUTPUT_MISSING: Codex did not produce a dedicated final result"
-                .into()
+        result.final_message.clone().ok_or_else(|| {
+            format!(
+                "AUDIT_CODEX_FINAL_OUTPUT_MISSING: {}",
+                sanitize_process_diagnostic(&diagnostic_source(&result))
+            )
         })
     }
 }
@@ -796,22 +936,11 @@ fn audit_output_contract(input: &AuditInput) -> String {
 }
 
 fn classify_codex_failure(result: &CodexProcessResult, fallback: &str) -> String {
-    let text = format!("{}\n{}", result.stdout, result.stderr).to_ascii_lowercase();
-    let category = if text.contains("api key") || text.contains("api-key") {
-        "AUTH_POLICY_BLOCKED"
-    } else if text.contains("login")
-        || text.contains("authenticated")
-        || text.contains("unauthorized")
-    {
-        "AUTH_REQUIRED"
-    } else if text.contains("usage") || text.contains("quota") || text.contains("rate limit") {
-        "USAGE_LIMITED"
-    } else if text.contains("network") || text.contains("connect") || text.contains("timeout") {
-        "NETWORK_ERROR"
-    } else {
-        fallback
-    };
-    format!("AUDIT_CODEX_{category}: bounded Codex process did not produce an accepted result")
+    let category = classify_codex_failure_category(result, fallback);
+    format!(
+        "AUDIT_CODEX_{category}: {}",
+        sanitize_process_diagnostic(&diagnostic_source(result))
+    )
 }
 
 fn provider_readiness(
@@ -924,8 +1053,8 @@ fn check_codex_readiness_with_runner(
     runner: &dyn CodexProcessRunner,
 ) -> AuditProviderReadiness {
     let result = runner.run(&CodexProcessRequest {
-        prompt: "Reply with exactly READY. Do not inspect files, repositories, web, MCP, plugins, or unrelated context.".into(),
-        schema: None,
+        prompt: "Return only {\"ready\":true}. This is a bounded structured-output readiness probe for the production audit boundary. Do not inspect files, repositories, web, MCP, plugins, or unrelated context.".into(),
+        schema: Some(codex_readiness_schema()),
         model: None,
         timeout: CODEX_READINESS_TIMEOUT,
     });
@@ -948,42 +1077,48 @@ fn check_codex_readiness_with_runner(
         error_category: Some(format!("{} ({})", message, version)),
     };
     match result {
-        Err(error) => failure("PROCESS_ERROR", error),
-        Ok(result) if result.timed_out => {
-            failure("TIMEOUT", "Codex readiness probe timed out".into())
-        }
+        Err(error) => failure("PROCESS_ERROR", sanitize_process_diagnostic(&error)),
+        Ok(result) if result.timed_out => failure(
+            "TIMEOUT",
+            format!(
+                "AUDIT_CODEX_TIMEOUT: {}",
+                sanitize_process_diagnostic(&diagnostic_source(&result))
+            ),
+        ),
         Ok(result) if result.exit_code != Some(0) => {
+            let status = classify_codex_failure_category(&result, "PROCESS_ERROR");
             let error = classify_codex_failure(&result, "PROCESS_ERROR");
-            let status = if error.contains("AUTH_POLICY_BLOCKED") {
-                "AUTH_POLICY_BLOCKED"
-            } else if error.contains("AUTH_REQUIRED") {
-                "AUTH_REQUIRED"
-            } else if error.contains("USAGE_LIMITED") {
-                "USAGE_LIMITED"
-            } else if error.contains("NETWORK_ERROR") {
-                "NETWORK_ERROR"
-            } else {
-                "PROCESS_ERROR"
-            };
-            failure(status, error)
+            failure(&status, error)
         }
-        Ok(result) if result.final_message.as_deref().map(str::trim) == Some("READY") => {
-            AuditProviderReadiness {
-                provider: "Codex CLI".into(),
-                status: "READY".into(),
-                configured: true,
-                executable_available: true,
-                version: Some(version),
-                login_state: Some("ChatGPT authenticated".into()),
-                model: Some(CODEX_DEFAULT_MODEL.into()),
-                credential_source: Some("Codex-managed login state".into()),
-                error_category: None,
+        Ok(result) => {
+            let schema_conformant = result
+                .final_message
+                .as_deref()
+                .and_then(|message| serde_json::from_str::<CodexReadinessOutput>(message).ok())
+                .map(|output| output.ready)
+                .unwrap_or(false);
+            if schema_conformant {
+                AuditProviderReadiness {
+                    provider: "Codex CLI".into(),
+                    status: "READY".into(),
+                    configured: true,
+                    executable_available: true,
+                    version: Some(version),
+                    login_state: Some("ChatGPT authenticated".into()),
+                    model: Some(CODEX_DEFAULT_MODEL.into()),
+                    credential_source: Some("Codex-managed login state".into()),
+                    error_category: None,
+                }
+            } else {
+                failure(
+                    "SCHEMA_INCOMPATIBLE",
+                    format!(
+                        "AUDIT_CODEX_SCHEMA_INCOMPATIBLE: structured readiness result was not schema-conformant: {}",
+                        sanitize_process_diagnostic(&diagnostic_source(&result))
+                    ),
+                )
             }
         }
-        Ok(_) => failure(
-            "PROCESS_ERROR",
-            "Codex readiness final output was not exactly READY".into(),
-        ),
     }
 }
 
@@ -1107,10 +1242,15 @@ fn sanitize_text(value: &str) -> String {
             if lower.contains("authorization:")
                 || lower.contains("bearer ")
                 || lower.contains("api_key")
+                || lower.contains("api-key")
                 || lower.contains("apikey")
                 || lower.contains("password=")
                 || lower.contains("token=")
                 || lower.contains("secret=")
+                || (lower.contains("auth") && (lower.contains(".json") || lower.contains("path")))
+                || lower.contains("access_token")
+                || lower.contains("refresh_token")
+                || lower.contains("credentials")
             {
                 "[REDACTED_SENSITIVE_EVIDENCE]".to_string()
             } else {
@@ -5369,6 +5509,76 @@ mod tests {
         }
     }
 
+    fn mock_codex_readiness_result() -> CodexProcessResult {
+        mock_codex_result(Some(r#"{"ready":true}"#))
+    }
+
+    fn failed_codex_result(stderr: &str) -> CodexProcessResult {
+        CodexProcessResult {
+            exit_code: Some(1),
+            stderr: stderr.into(),
+            ..mock_codex_result(None)
+        }
+    }
+
+    #[test]
+    fn codex_failure_classifier_requires_explicit_signals_and_preserves_safe_diagnostics() {
+        let cases = [
+            ("Usage: codex exec ...", "PROCESS_ERROR"),
+            (
+                "error: unknown argument --output-schema\nUsage: codex exec ...",
+                "SCHEMA_INCOMPATIBLE",
+            ),
+            (
+                "You've hit your usage limit; try again later",
+                "USAGE_LIMITED",
+            ),
+            ("rate limit exceeded", "USAGE_LIMITED"),
+            ("quota exceeded", "USAGE_LIMITED"),
+            (
+                "invalid output schema: unsupported keyword",
+                "SCHEMA_INCOMPATIBLE",
+            ),
+            ("authentication required; please log in", "AUTH_REQUIRED"),
+            (
+                "API-key authentication is not supported",
+                "AUTH_POLICY_BLOCKED",
+            ),
+            ("network error: failed to connect", "NETWORK_ERROR"),
+            ("unexpected child process failure", "PROCESS_ERROR"),
+        ];
+        for (message, expected) in cases {
+            let result = failed_codex_result(message);
+            let category = classify_codex_failure_category(&result, "PROCESS_ERROR");
+            assert_eq!(category, expected, "diagnostic: {message}");
+            let diagnostic = classify_codex_failure(&result, "PROCESS_ERROR");
+            assert!(diagnostic.starts_with(&format!("AUDIT_CODEX_{expected}:")));
+            if message.to_ascii_lowercase().contains("api-key") {
+                assert!(diagnostic.contains("REDACTED_SENSITIVE_EVIDENCE"));
+            } else {
+                assert!(
+                    diagnostic.contains(message.lines().next().unwrap()),
+                    "{message} -> {diagnostic}"
+                );
+            }
+        }
+
+        let diagnostic = classify_codex_failure(
+            &failed_codex_result(
+                "Authorization: Bearer secret-token\npassword=secret\nauth path: hidden",
+            ),
+            "PROCESS_ERROR",
+        );
+        assert!(!diagnostic.contains("secret-token"));
+        assert!(!diagnostic.contains("password=secret"));
+        assert!(!diagnostic.contains("auth path: hidden"));
+
+        let oversized = failed_codex_result(&"error: bounded diagnostic\n".repeat(512));
+        let diagnostic = classify_codex_failure(&oversized, "PROCESS_ERROR");
+        assert!(diagnostic.len() <= 2_100);
+        assert!(diagnostic.contains("TRUNCATED") || diagnostic.len() < 2_100);
+    }
+
     #[test]
     fn codex_audit_process_policy_is_read_only_ephemeral_and_final_file_first() {
         let args = build_codex_audit_args(
@@ -5486,8 +5696,8 @@ mod tests {
     #[test]
     fn codex_readiness_classifies_success_failure_timeout_and_never_persists_audit() {
         for (result, expected) in [
-            (mock_codex_result(Some("READY")), "READY"),
-            (mock_codex_result(Some("not-ready")), "PROCESS_ERROR"),
+            (mock_codex_readiness_result(), "READY"),
+            (mock_codex_result(Some("READY")), "SCHEMA_INCOMPATIBLE"),
             (
                 CodexProcessResult {
                     timed_out: true,
@@ -5502,13 +5712,14 @@ mod tests {
             };
             let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
             assert_eq!(readiness.status, expected);
+            assert!(runner.requests.lock().unwrap()[0].schema.is_some());
         }
 
         let runner = MockCodexProcessRunner {
             result: CodexProcessResult {
                 stdout_truncated: true,
                 stderr_truncated: true,
-                ..mock_codex_result(Some("READY"))
+                ..mock_codex_readiness_result()
             },
             requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         };
@@ -5516,6 +5727,38 @@ mod tests {
             check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner).status,
             "READY"
         );
+    }
+
+    #[test]
+    fn codex_readiness_distinguishes_schema_rejection_and_explicit_quota() {
+        for (stderr, expected) in [
+            (
+                "invalid output schema: unsupported keyword",
+                "SCHEMA_INCOMPATIBLE",
+            ),
+            ("You've hit your usage limit", "USAGE_LIMITED"),
+        ] {
+            let runner = MockCodexProcessRunner {
+                result: failed_codex_result(stderr),
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            };
+            let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
+            assert_eq!(readiness.status, expected);
+            assert!(readiness
+                .error_category
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic.contains(stderr)));
+        }
+
+        let runner = MockCodexProcessRunner {
+            result: CodexProcessResult {
+                final_message: Some("{\"ready\":true,\"extra\":false}".into()),
+                ..mock_codex_result(None)
+            },
+            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
+        assert_eq!(readiness.status, "SCHEMA_INCOMPATIBLE");
     }
 
     #[test]
