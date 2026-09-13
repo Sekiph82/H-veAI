@@ -17,8 +17,8 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M11 = PASS/CLOSED.
 - M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 remains OPEN during M16T Codex-only provider migration; M17-M20 remain planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16T V05 FormuLab canonical main tracking remediation is implementation-complete and awaiting independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
-- Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16T V05, and the pre-M10 hotfix is not a numbered roadmap milestone.
+- M16T V06 Codex-only audit provider native acceptance remediation is implementation-complete and awaiting independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
+- Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16T V06, and the pre-M10 hotfix is not a numbered roadmap milestone.
 
 ---
 
@@ -488,7 +488,7 @@ M16S V02 SOURCE-AUDIT PASS / SUPERSEDED BEFORE FINAL OWNER PROVIDER ACCEPTANCE B
 - [~] M16T-F02: reuse the bounded native Codex resolver/process foundation with truthful ChatGPT-login readiness and read-only ephemeral audit execution.
 - [~] M16T-F03: preserve strict audit schema, semantic, freshness, persistence, settings, workspace, and eight-project behavior while completing deterministic provider tests.
 
-M16T V05 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
+M16T V06 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
 
 ---
 

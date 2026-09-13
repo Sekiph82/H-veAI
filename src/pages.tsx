@@ -4934,7 +4934,7 @@ function AuditProviderSettings({ desktop }: { desktop: boolean }) {
     }
   };
 
-  const status = readiness?.status ?? "CODEX_NOT_FOUND";
+  const status = readiness?.status ?? (message ? "UNAVAILABLE" : "CHECKING");
   return (
     <section className="panel settings-panel" aria-label="Codex Audit Provider">
       <SectionHeader title="Codex Audit Provider" detail="Uses the local Codex CLI and its managed ChatGPT login" />

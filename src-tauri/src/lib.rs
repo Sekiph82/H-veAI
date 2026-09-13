@@ -964,6 +964,19 @@ mod capability_tests {
         let permissions = include_str!("../permissions/foundation.toml");
         assert!(permissions.contains("hiveai_project_cockpit_snapshot"));
         assert!(permissions.contains("hiveai_codex_start"));
+        let audit = permissions
+            .split("[[permission]]")
+            .find(|entry| entry.contains("identifier = \"allow-audit-engine\""))
+            .expect("audit engine permission exists");
+        for command in [
+            "hiveai_audit_provider_readiness",
+            "hiveai_audit_provider_check_readiness",
+        ] {
+            assert!(
+                audit.contains(command),
+                "missing audit readiness command {command}"
+            );
+        }
     }
 
     #[test]

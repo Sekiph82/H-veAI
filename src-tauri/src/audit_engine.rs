@@ -201,6 +201,16 @@ impl AuditState {
     }
 }
 
+fn state_for_evaluation(evaluation: &AuditEvaluation, stale: bool) -> AuditState {
+    if stale {
+        AuditState::Stale
+    } else if evaluation.model_status == "AVAILABLE" {
+        AuditState::Completed
+    } else {
+        AuditState::Failed
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuditInputRequest {
@@ -699,9 +709,10 @@ impl AuditModel for CodexCliAuditModel {
     fn evaluate(&self, input: &AuditInput) -> Result<String, String> {
         let input_json = serde_json::to_string(input)
             .map_err(|_| "AUDIT_CODEX_INPUT_SERIALIZATION_FAILED".to_string())?;
+        let contract = audit_output_contract(input);
         let prompt = format!(
-            "You are the independent H!veAI audit provider. The supplied JSON AuditInput is the complete and authoritative evidence for this audit. Builder logs are claims, not proof. Do not inspect the filesystem, Git repository, web, MCP, plugins, or unrelated context. Do not modify anything. Return only one JSON object matching the supplied output schema. Never fabricate PASS when evidence is unavailable or contradictory.\n\nAuditInput:\n{}",
-            input_json
+            "You are the independent H!veAI audit provider. The supplied JSON AuditInput is the complete and authoritative evidence for this audit. Builder logs are claims, not proof. Do not inspect the filesystem, Git repository, web, MCP, plugins, or unrelated context. Do not modify anything. Return only one JSON object matching the supplied output schema. Never fabricate PASS when evidence is unavailable or contradictory.\n\nOutput contract:\n{}\n\nAuditInput:\n{}",
+            contract, input_json
         );
         if prompt.len() > MAX_AUDIT_INPUT_BYTES + 8192 {
             return Err("AUDIT_CODEX_INPUT_BOUNDS: bounded audit prompt exceeded its limit".into());
@@ -723,6 +734,22 @@ impl AuditModel for CodexCliAuditModel {
                 .into()
         })
     }
+}
+
+fn audit_output_contract(input: &AuditInput) -> String {
+    if input.requirements.is_empty() {
+        return "This is a project/freeform audit with no task-scoped requirements. Return exactly one requirementCoverage row: requirementRef must be project-audit, status must be NOT_APPLICABLE, evidenceRefs must be an empty array, and requirementText and rationale must be bounded and state that no task-scoped criteria apply. Do not invent task requirement references.".into();
+    }
+    let references = input
+        .requirements
+        .iter()
+        .filter(|requirement| requirement.required)
+        .map(|requirement| requirement.requirement_ref.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "This is a task-scoped audit. Return exactly one requirementCoverage row for each required requirementRef, and use only these canonical references: [{references}]. Do not invent, omit, or duplicate requirement references."
+    )
 }
 
 fn classify_codex_failure(result: &CodexProcessResult, fallback: &str) -> String {
@@ -2695,6 +2722,14 @@ fn validate_semantic_evaluation(
         );
         failed_coverage |= coverage.status == CoverageStatus::Failed;
     }
+    if canonical_requirements.is_empty()
+        && (evaluation.coverage.len() != 1
+            || evaluation.coverage[0].requirement_ref != "project-audit"
+            || evaluation.coverage[0].status != CoverageStatus::NotApplicable
+            || !evaluation.coverage[0].evidence_refs.is_empty())
+    {
+        return Err("AUDIT_PROJECT_COVERAGE_CONTRACT_INVALID".into());
+    }
     let complete_required_coverage = if canonical_requirements.is_empty() {
         evaluation.coverage.len() == 1
             && evaluation.coverage[0].requirement_ref == "project-audit"
@@ -2921,9 +2956,9 @@ fn run_with_model<M: AuditModel>(
     let input = collect_input(database, request.clone())?;
     let started_at = utc_timestamp();
     let mut evaluation = evaluate_with(model, &input);
-    let state = if current_freshness_token(database, &input.project_id, &request.git_target)?
-        != input.freshness_token
-    {
+    let stale = current_freshness_token(database, &input.project_id, &request.git_target)?
+        != input.freshness_token;
+    let state = if stale {
         evaluation.verdict = AuditVerdict::Conditional;
         evaluation.confidence = ConfidenceLevel::Low;
         evaluation.regression_risk = RegressionRisk::High;
@@ -2935,7 +2970,7 @@ fn run_with_model<M: AuditModel>(
         evaluation.coverage.clear();
         AuditState::Stale
     } else {
-        AuditState::Completed
+        state_for_evaluation(&evaluation, false)
     };
     let result = persist_run(
         database,
@@ -2994,7 +3029,9 @@ fn persist_run(
             apply_prior_finding_dispositions(&tx, prior_id, &audit_id, input, &mut evaluation)?;
         }
     }
-    validate_semantic_evaluation(input, &mut evaluation)?;
+    if state == AuditState::Completed && evaluation.model_status == "AVAILABLE" {
+        validate_semantic_evaluation(input, &mut evaluation)?;
+    }
     tx.execute("INSERT INTO audits (id,project_id,task_id,result,summary,confidence,created_at,audit_type,audited_branch,audited_head_sha,baseline_ref,input_manifest_sha256,schema_version,confidence_level,regression_risk,state,started_at,finished_at,auditor_provider,auditor_model,auditor_version,model_status,diagnostic,prior_audit_id,freshness_token,git_scope,audited_base_sha,audited_change_set_sha256,audited_session_id,audited_prompt_version_id,target_origin) VALUES (?1,?2,?3,?4,?5,?6,?7,'IMPLEMENTATION',?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30)", params![audit_id, input.project_id, input.task_id, evaluation.verdict.as_str(), evaluation.summary, evaluation.confidence.score(), finished_at, input.audited_branch, input.audited_head_sha, input.baseline_ref, input.input_manifest_sha256, AUDIT_SCHEMA_VERSION, evaluation.confidence.as_str(), evaluation.regression_risk.as_str(), state.as_str(), started_at, finished_at, evaluation.auditor_provider, evaluation.auditor_model, evaluation.auditor_version, evaluation.model_status, evaluation.diagnostic, prior_audit_id, input.freshness_token, git_scope_str(input.git.scope), input.git.base_sha, input.git.full_change_set_sha256, input.audited_session_id, input.audited_prompt_version_id, target_origin_str(input.git.target_origin)]).map_err(|e| e.to_string())?;
     for finding in &evaluation.findings {
         let persisted_id = format!(
@@ -4628,7 +4665,7 @@ mod tests {
                 git_target: AuditGitTarget::default(),
             },
             &FixtureAuditModel {
-                response: r#"{"verdict":"FAIL","confidence":"HIGH","regressionRisk":"HIGH","summary":"prior audit","findings":[{"findingKey":"prior-open","severity":"MAJOR","title":"Prior open finding","detail":"Prior evidence requires remediation.","requirementRefs":[],"evidenceRefs":[],"sourceLocator":"tracked.txt:1","testLocator":null,"remediationGuidance":"Address the defect.","blocksRelease":true}]}"#.into(),
+                response: r#"{"verdict":"FAIL","confidence":"HIGH","regressionRisk":"HIGH","summary":"prior audit","findings":[{"findingKey":"prior-open","severity":"MAJOR","title":"Prior open finding","detail":"Prior evidence requires remediation.","requirementRefs":[],"evidenceRefs":[],"sourceLocator":"tracked.txt:1","testLocator":null,"remediationGuidance":"Address the defect.","blocksRelease":true}],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Project audit."}],"priorFindingDispositions":[]}"#.into(),
             },
         )
         .unwrap();
@@ -4649,7 +4686,7 @@ mod tests {
             &UnavailableAuditModel,
         )
         .expect("unavailable re-audit persists as degraded history");
-        assert_eq!(result.state, AuditState::Completed);
+        assert_eq!(result.state, AuditState::Failed);
         assert_eq!(result.model_status, "UNAVAILABLE");
         assert_eq!(result.verdict, AuditVerdict::Conditional);
         assert_eq!(result.prior_audit_id.as_deref(), Some(prior_id.as_str()));
@@ -4664,7 +4701,7 @@ mod tests {
         assert_eq!(prior.findings[0].status, "OPEN");
         assert_eq!(
             get(&database, &project_id, &result.id).unwrap().state,
-            AuditState::Completed
+            AuditState::Failed
         );
     }
 
@@ -4684,7 +4721,7 @@ mod tests {
             },
         )
         .expect("malformed re-audit persists as degraded history");
-        assert_eq!(result.state, AuditState::Completed);
+        assert_eq!(result.state, AuditState::Failed);
         assert_eq!(result.model_status, "MALFORMED");
         assert_eq!(result.verdict, AuditVerdict::Conditional);
         assert_eq!(result.prior_audit_id.as_deref(), Some(prior_id.as_str()));
@@ -4695,6 +4732,60 @@ mod tests {
         assert_eq!(
             get(&database, &project_id, &prior_id).unwrap().findings[0].status,
             "OPEN"
+        );
+    }
+
+    #[test]
+    fn fresh_state_requires_available_model_and_stale_still_dominates() {
+        let mut available = base_evaluation();
+        available.model_status = "AVAILABLE".into();
+        assert_eq!(
+            state_for_evaluation(&available, false),
+            AuditState::Completed
+        );
+
+        for status in [
+            "MALFORMED",
+            "UNAVAILABLE",
+            "PROCESS_ERROR",
+            "AUTH_REQUIRED",
+            "TIMEOUT",
+        ] {
+            let mut degraded = base_evaluation();
+            degraded.model_status = status.into();
+            assert_eq!(
+                state_for_evaluation(&degraded, false),
+                AuditState::Failed,
+                "{status}"
+            );
+            assert_eq!(
+                state_for_evaluation(&degraded, true),
+                AuditState::Stale,
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn freeform_contract_requires_one_project_not_applicable_row() {
+        let fixture_input = input();
+        let valid = FixtureAuditModel {
+            response: r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"project review","findings":[],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"This is a project-level audit."}],"priorFindingDispositions":[]}"#.into(),
+        };
+        let evaluation = evaluate_fixture(&fixture_input, &valid);
+        assert_eq!(evaluation.model_status, "AVAILABLE");
+        assert_eq!(evaluation.coverage.len(), 1);
+        assert_eq!(evaluation.coverage[0].requirement_ref, "project-audit");
+        assert_eq!(evaluation.coverage[0].status, CoverageStatus::NotApplicable);
+
+        let invalid = FixtureAuditModel {
+            response: r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"project review","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#.into(),
+        };
+        let degraded = evaluate_fixture(&fixture_input, &invalid);
+        assert_eq!(degraded.model_status, "MALFORMED");
+        assert_eq!(
+            degraded.diagnostic.as_deref(),
+            Some("AUDIT_PROJECT_COVERAGE_CONTRACT_INVALID")
         );
     }
 
@@ -5052,7 +5143,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.state, AuditState::Stale);
-        assert_eq!(result.model_status, "AVAILABLE");
+        assert_eq!(result.model_status, "MALFORMED");
         assert!(result
             .diagnostic
             .unwrap()
@@ -5116,7 +5207,7 @@ mod tests {
             version: "codex-cli 0.153.4".into(),
             runner: std::sync::Arc::new(MockCodexProcessRunner {
                 result: mock_codex_result(Some(
-                    r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"final","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#,
+                    r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"final","findings":[],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Project audit."}],"priorFindingDispositions":[]}"#,
                 )),
                 requests: requests.clone(),
             }),
@@ -5126,6 +5217,11 @@ mod tests {
         let request = requests.lock().unwrap().pop().unwrap();
         assert!(request.prompt.contains("authoritative evidence"));
         assert!(request.prompt.contains("Do not inspect"));
+        assert!(request.prompt.contains("project-audit"));
+        assert!(request.prompt.contains("NOT_APPLICABLE"));
+        assert!(request
+            .prompt
+            .contains("exactly one requirementCoverage row"));
         assert!(request.schema.is_some());
         assert_eq!(model.provider(), "CODEX_CLI");
         assert_eq!(model.model(), "CLI_DEFAULT");
@@ -5134,7 +5230,7 @@ mod tests {
 
     #[test]
     fn valid_dedicated_final_remains_authoritative_when_operational_streams_are_truncated() {
-        let final_message = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"final survives transport bounds","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#;
+        let final_message = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"final survives transport bounds","findings":[],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Project audit."}],"priorFindingDispositions":[]}"#;
         let model = CodexCliAuditModel {
             version: "codex-cli 0.153.4".into(),
             runner: std::sync::Arc::new(MockCodexProcessRunner {
@@ -5234,7 +5330,7 @@ mod tests {
 
     #[test]
     fn successful_audit_identity_is_runtime_authoritative_and_round_trips() {
-        let response = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"runtime identity","model":"spoofed-model","modelVersion":"spoofed-version","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#;
+        let response = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"runtime identity","model":"spoofed-model","modelVersion":"spoofed-version","findings":[],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Project audit."}],"priorFindingDispositions":[]}"#;
         let model = FixtureAuditModel {
             response: response.into(),
         };

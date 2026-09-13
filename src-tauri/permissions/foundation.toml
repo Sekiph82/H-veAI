@@ -98,4 +98,4 @@ commands.allow = ["hiveai_prompt_context_collect", "hiveai_prompt_generate", "hi
 [[permission]]
 identifier = "allow-audit-engine"
 description = "Allows the main window to use bounded, evidence-first audit collection, persistence, and remediation handoff."
-commands.allow = ["hiveai_audit_input_collect", "hiveai_audit_run", "hiveai_audits_list", "hiveai_audit_get", "hiveai_audit_create_remediation_prompt", "hiveai_audit_link_remediation_session"]
+commands.allow = ["hiveai_audit_input_collect", "hiveai_audit_run", "hiveai_audits_list", "hiveai_audit_get", "hiveai_audit_create_remediation_prompt", "hiveai_audit_link_remediation_session", "hiveai_audit_provider_readiness", "hiveai_audit_provider_check_readiness"]
