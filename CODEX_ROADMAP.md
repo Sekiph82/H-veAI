@@ -17,8 +17,8 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M11 = PASS/CLOSED.
 - M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 remains OPEN during M16T Codex-only provider migration; M17-M20 remain planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16T V02 Codex-only audit provider remediation is implementation-complete and awaiting independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
-- Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16T V02, and the pre-M10 hotfix is not a numbered roadmap milestone.
+- M16T V03 Codex-only audit provider tracker-truth remediation is implementation-complete and awaiting independent strict audit and owner native acceptance. Required Actor is HUMAN; M17 remains NOT ACTIVATED/BLOCKED.
+- Strict completed progress is 16/20 = 80%; M16 remains OPEN during M16T V03, and the pre-M10 hotfix is not a numbered roadmap milestone.
 
 ---
 
@@ -433,7 +433,7 @@ Exit: H!veAI can independently audit implementation evidence and drive bounded r
 
 Status: M16C REV2 COMPREHENSIVE REMEDIATION COMPLETE / PENDING INDEPENDENT WHOLE-M16 STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPTANCE. M16 remains OPEN.
 
-The package notes below are historical implementation snapshots. Current prospective truth is recorded above: M21 and M21-R01 through M21-R03 are accepted, M16T V02 is implementation-complete and awaiting independent audit plus owner native acceptance, and M17 is not activated.
+The package notes below are historical implementation snapshots. Current prospective truth is recorded above: M21 and M21-R01 through M21-R03 are accepted, M16T V03 is implementation-complete and awaiting independent audit plus owner native acceptance, and M17 is not activated.
 
 M16A remediation closes M16-R59 through M16-R61 only: explicit prior-finding dispositions, exact Audit -> Prompt Engine -> Agent session provenance, and repository freshness enforcement before persistence. M17 is not activated and M21 was not started.
 
@@ -488,7 +488,7 @@ M16S V02 SOURCE-AUDIT PASS / SUPERSEDED BEFORE FINAL OWNER PROVIDER ACCEPTANCE B
 - [~] M16T-F02: reuse the bounded native Codex resolver/process foundation with truthful ChatGPT-login readiness and read-only ephemeral audit execution.
 - [~] M16T-F03: preserve strict audit schema, semantic, freshness, persistence, settings, workspace, and eight-project behavior while completing deterministic provider tests.
 
-M16T V02 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
+M16T V03 IMPLEMENTATION COMPLETE / PENDING INDEPENDENT STRICT AUDIT + OWNER NATIVE ACCEPTANCE. M16 REMAINS OPEN. M17 NOT ACTIVATED/BLOCKED.
 
 ---
 
