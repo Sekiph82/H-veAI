@@ -718,12 +718,6 @@ impl AuditModel for CodexCliAuditModel {
         if result.exit_code != Some(0) {
             return Err(classify_codex_failure(&result, "PROCESS_ERROR"));
         }
-        if result.stdout_truncated || result.stderr_truncated {
-            return Err(
-                "AUDIT_CODEX_TRANSPORT_TRUNCATED: Codex operational output exceeded its bound"
-                    .into(),
-            );
-        }
         result.final_message.ok_or_else(|| {
             "AUDIT_CODEX_FINAL_OUTPUT_MISSING: Codex did not produce a dedicated final result"
                 .into()
@@ -903,10 +897,6 @@ fn check_codex_readiness_with_runner(
             };
             failure(status, error)
         }
-        Ok(result) if result.stdout_truncated || result.stderr_truncated => failure(
-            "PROCESS_ERROR",
-            "Codex readiness diagnostics were truncated".into(),
-        ),
         Ok(result) if result.final_message.as_deref().map(str::trim) == Some("READY") => {
             AuditProviderReadiness {
                 provider: "Codex CLI".into(),
@@ -5143,6 +5133,71 @@ mod tests {
     }
 
     #[test]
+    fn valid_dedicated_final_remains_authoritative_when_operational_streams_are_truncated() {
+        let final_message = r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"final survives transport bounds","findings":[],"requirementCoverage":[],"priorFindingDispositions":[]}"#;
+        let model = CodexCliAuditModel {
+            version: "codex-cli 0.153.4".into(),
+            runner: std::sync::Arc::new(MockCodexProcessRunner {
+                result: CodexProcessResult {
+                    stdout: "retained prefix".into(),
+                    stderr: "retained diagnostics".into(),
+                    final_message: Some(final_message.into()),
+                    exit_code: Some(0),
+                    timed_out: false,
+                    stdout_truncated: true,
+                    stderr_truncated: true,
+                },
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+        };
+        let output = model.evaluate(&input()).unwrap();
+        assert!(output.contains("final survives transport bounds"));
+    }
+
+    #[test]
+    fn missing_oversized_and_nonzero_final_results_fail_truthfully() {
+        let missing = CodexCliAuditModel {
+            version: "codex-cli 0.153.4".into(),
+            runner: std::sync::Arc::new(MockCodexProcessRunner {
+                result: mock_codex_result(None),
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+        };
+        assert!(missing
+            .evaluate(&input())
+            .unwrap_err()
+            .contains("FINAL_OUTPUT_MISSING"));
+
+        let nonzero = CodexCliAuditModel {
+            version: "codex-cli 0.153.4".into(),
+            runner: std::sync::Arc::new(MockCodexProcessRunner {
+                result: CodexProcessResult {
+                    exit_code: Some(7),
+                    final_message: Some("valid-looking result".into()),
+                    ..mock_codex_result(None)
+                },
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            }),
+        };
+        assert!(nonzero
+            .evaluate(&input())
+            .unwrap_err()
+            .contains("AUDIT_CODEX_PROCESS_ERROR"));
+
+        let directory = tempdir().unwrap();
+        let oversized = directory.path().join("oversized-final.json");
+        fs::write(&oversized, vec![b'x'; MAX_MODEL_OUTPUT_BYTES + 1]).unwrap();
+        assert!(read_bounded_final_message(&oversized)
+            .unwrap_err()
+            .contains("FINAL_OUTPUT_TRUNCATED"));
+        let malformed = directory.path().join("malformed-final.json");
+        fs::write(&malformed, [0xff, 0xfe]).unwrap();
+        assert!(read_bounded_final_message(&malformed)
+            .unwrap_err()
+            .contains("FINAL_OUTPUT_MALFORMED"));
+    }
+
+    #[test]
     fn codex_readiness_classifies_success_failure_timeout_and_never_persists_audit() {
         for (result, expected) in [
             (mock_codex_result(Some("READY")), "READY"),
@@ -5162,6 +5217,19 @@ mod tests {
             let readiness = check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner);
             assert_eq!(readiness.status, expected);
         }
+
+        let runner = MockCodexProcessRunner {
+            result: CodexProcessResult {
+                stdout_truncated: true,
+                stderr_truncated: true,
+                ..mock_codex_result(Some("READY"))
+            },
+            requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        assert_eq!(
+            check_codex_readiness_with_runner("codex-cli 0.153.4".into(), &runner).status,
+            "READY"
+        );
     }
 
     #[test]

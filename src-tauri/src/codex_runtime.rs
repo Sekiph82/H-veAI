@@ -247,7 +247,6 @@ fn read_bounded<R: Read>(mut reader: R, max: usize) -> (Vec<u8>, bool) {
                 bytes.extend_from_slice(&buffer[..count.min(remaining)]);
                 if count > remaining {
                     truncated = true;
-                    break;
                 }
             }
             Err(_) => {
@@ -336,6 +335,43 @@ fn is_native_codex_candidate(path: &Path) -> bool {
 mod tests {
     use super::*;
     use std::process::Command;
+    use std::sync::OnceLock;
+
+    fn drain_fixture_binary() -> &'static PathBuf {
+        static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            let directory = std::env::temp_dir().join(format!("hiveai-drain-fixture-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).unwrap();
+            let source = directory.join("main.rs");
+            let binary = directory.join(if cfg!(windows) { "drain-fixture.exe" } else { "drain-fixture" });
+            std::fs::write(
+                &source,
+                r#"use std::env; use std::io::{self, Write}; use std::thread; use std::time::Duration;
+fn main() { let stdout_bytes: usize = env::var("HIVEAI_DRAIN_STDOUT_BYTES").unwrap().parse().unwrap(); let stderr_bytes: usize = env::var("HIVEAI_DRAIN_STDERR_BYTES").unwrap().parse().unwrap(); let sleep_ms: u64 = env::var("HIVEAI_DRAIN_SLEEP_MS").unwrap_or_else(|_| "0".into()).parse().unwrap(); let mut out = io::stdout(); let mut err = io::stderr(); out.write_all(&vec![b'o'; stdout_bytes]).unwrap(); out.flush().unwrap(); err.write_all(&vec![b'e'; stderr_bytes]).unwrap(); err.flush().unwrap(); if sleep_ms > 0 { thread::sleep(Duration::from_millis(sleep_ms)); } }"#,
+            ).unwrap();
+            let status = Command::new("rustc")
+                .args([source.to_string_lossy().as_ref(), "-O", "-o"])
+                .arg(&binary)
+                .status()
+                .unwrap();
+            assert!(status.success(), "rustc fixture compilation failed");
+            binary
+        })
+    }
+
+    fn run_fixture(
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+        sleep_ms: u64,
+        timeout: Duration,
+    ) -> BoundedProcessResult {
+        let mut command = Command::new(drain_fixture_binary());
+        command
+            .env("HIVEAI_DRAIN_STDOUT_BYTES", stdout_bytes.to_string())
+            .env("HIVEAI_DRAIN_STDERR_BYTES", stderr_bytes.to_string())
+            .env("HIVEAI_DRAIN_SLEEP_MS", sleep_ms.to_string());
+        run_bounded_process(command, None, timeout, 1024, 1024).unwrap()
+    }
 
     #[test]
     fn login_status_classification_never_reads_auth_files() {
@@ -346,5 +382,55 @@ mod tests {
         });
         let state = parse_login_status(&output).unwrap();
         assert!(matches!(state, LoginState::ChatGpt | LoginState::Unknown));
+    }
+
+    #[test]
+    fn over_cap_stdout_is_drained_and_reaped_with_bounded_retention() {
+        let result = run_fixture(32 * 1024, 0, 0, Duration::from_secs(5));
+        assert!(result.output.status.success());
+        assert!(!result.timed_out);
+        assert!(result.stdout_truncated);
+        assert!(result.output.stdout.len() <= 1024);
+    }
+
+    #[test]
+    fn over_cap_stderr_is_drained_and_reaped_with_bounded_retention() {
+        let result = run_fixture(0, 32 * 1024, 0, Duration::from_secs(5));
+        assert!(result.output.status.success());
+        assert!(!result.timed_out);
+        assert!(result.stderr_truncated);
+        assert!(result.output.stderr.len() <= 1024);
+    }
+
+    #[test]
+    fn concurrent_over_cap_streams_do_not_deadlock_the_child() {
+        let result = run_fixture(64 * 1024, 64 * 1024, 0, Duration::from_secs(5));
+        assert!(result.output.status.success());
+        assert!(!result.timed_out);
+        assert!(result.stdout_truncated);
+        assert!(result.stderr_truncated);
+        assert!(result.output.stdout.len() <= 1024);
+        assert!(result.output.stderr.len() <= 1024);
+    }
+
+    #[test]
+    fn exact_cap_is_not_marked_truncated_without_additional_data() {
+        let result = run_fixture(1024, 1024, 0, Duration::from_secs(5));
+        assert!(result.output.status.success());
+        assert!(!result.timed_out);
+        assert!(!result.stdout_truncated);
+        assert!(!result.stderr_truncated);
+        assert_eq!(result.output.stdout.len(), 1024);
+        assert_eq!(result.output.stderr.len(), 1024);
+    }
+
+    #[test]
+    fn timeout_kills_reaps_and_joins_draining_children() {
+        let result = run_fixture(64 * 1024, 64 * 1024, 5000, Duration::from_millis(100));
+        assert!(result.timed_out);
+        assert!(result.stdout_truncated);
+        assert!(result.stderr_truncated);
+        assert!(result.output.stdout.len() <= 1024);
+        assert!(result.output.stderr.len() <= 1024);
     }
 }
