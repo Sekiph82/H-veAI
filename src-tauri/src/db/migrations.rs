@@ -953,6 +953,7 @@ mod tests {
                 (22, "truth_generation_zero_bootstrap".to_string()),
                 (23, "github_project_removal_exclusions".to_string()),
                 (24, "agent_provider_session_provenance".to_string()),
+                (25, "claude_control_diagnostic_fields".to_string()),
             ]
         );
     }
