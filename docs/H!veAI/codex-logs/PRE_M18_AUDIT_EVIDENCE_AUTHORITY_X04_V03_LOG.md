@@ -55,9 +55,9 @@ F-X04-V02-002 is closed by deriving local current task selection, status, workfl
 
 ## Final publication equality evidence
 
-This section is filled with the actual post-log-push equality check before completion is reported.
+The post-log-push equality check before this final log revision reported:
 
-- Local HEAD: pending final log publication check
-- `origin/main`: pending final log publication check
-- Live GitHub `main`: pending final log publication check
-- Clean worktree: pending final log publication check
+- Local HEAD: `bbcf8046767675f6070c97b5974a18d5c599d68b`
+- `origin/main`: `bbcf8046767675f6070c97b5974a18d5c599d68b`
+- Live GitHub `main`: `bbcf8046767675f6070c97b5974a18d5c599d68b`
+- Clean worktree: yes (`git status --short` empty)
