@@ -15,9 +15,9 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M10A remediation, independent re-audit, and Akilta native click acceptance: PASS/CLOSED.
 - M11 original and remediation failures remain historical evidence; accepted strict audits close M11A REV7 and the final Projects visual cleanup.
 - M11 = PASS/CLOSED.
-- M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 is PASS/CLOSED after independent strict audit and final owner-native acceptance; M17 V01 received a strict-audit CHANGES_REQUIRED verdict and M17 V02 bounded remediation is in progress; M18-M20 remain planned/blocked by dependency order.
+- M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence. M16 is PASS/CLOSED after independent strict audit and final owner-native acceptance; M17 V01 received a strict-audit CHANGES_REQUIRED verdict and M17 V02 bounded remediation is implementation-complete pending independent V02 strict re-audit plus owner-native acceptance; M18-M20 remain planned/blocked by dependency order.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. M17 V02 is the active bounded remediation for the six V01 strict findings and remains open pending independent re-audit plus owner-native Claude workflow acceptance; M18-M20 remain blocked by dependency order.
+- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. M17 V02 closes the six bounded V01 strict findings in implementation and remains open pending independent re-audit plus owner-native Claude workflow acceptance; M18-M20 remain blocked by dependency order.
 - Strict completed progress is 17/20 = 85%; M16 is PASS/CLOSED and M17 remains active pending independent strict audit and owner-native acceptance; the pre-M10 hotfix is not a numbered roadmap milestone.
 
 ---
@@ -508,7 +508,7 @@ Packages:
 
 Exit: Codex and Claude operate through one consistent H!veAI agent model.
 
-Status: ACTIVE / V02_REMEDIATION_IN_PROGRESS.
+Status: ACTIVE / IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_REAUDIT_AND_OWNER_NATIVE_ACCEPTANCE.
 
 ---
 
