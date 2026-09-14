@@ -154,6 +154,9 @@ pub fn resolve(
             ..base
         });
     }
+    if root.join("TASKS.md").is_file() && hidden_control_plane_present(&root) {
+        return Ok(root_tasks_resolution(&project));
+    }
     let control_plane_path = root.join(control_plane::PROJECT_JSON);
     if declares_control_plane_v1(&control_plane_path) {
         return Ok(resolve_control_plane(
@@ -339,6 +342,63 @@ pub fn resolve(
         resolution.provenance_mode = "FALLBACK_M08_M09".into();
     }
     Ok(resolution)
+}
+
+fn hidden_control_plane_present(root: &Path) -> bool {
+    [
+        control_plane::STATE_JSON,
+        control_plane::HANDOFF_MD,
+        control_plane::EVENT_INDEX_JSON,
+        control_plane::PROJECT_JSON,
+        ".hiveai/TASKS.md",
+        control_plane::RULES_MD,
+        control_plane::EVENTS_JSONL,
+    ]
+    .iter()
+    .any(|path| root.join(path).exists())
+}
+
+fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDashboardResolution {
+    let mut roles = BTreeMap::new();
+    roles.insert(
+        "canonicalTask".into(),
+        vec![ResolvedSource {
+            path: "TASKS.md".into(),
+            role: "canonicalTask".into(),
+            status: SourceStatus::Available,
+            exists: true,
+            contained: true,
+        }],
+    );
+    ProjectDashboardResolution {
+        project_id: project.id.clone(),
+        manifest_status: ManifestStatus::Valid,
+        manifest_path: "TASKS.md".into(),
+        schema: Some("hiveai-task-tracker/root-v1".into()),
+        project_key: Some(project.id.clone()),
+        repository: project.repository.as_ref().and_then(|repository| {
+            repository
+                .github_owner
+                .as_ref()
+                .zip(repository.github_repo.as_ref())
+                .map(|(owner, name)| format!("{owner}/{name}"))
+        }),
+        branch_policy: project
+            .repository
+            .as_ref()
+            .and_then(|repository| repository.current_branch.clone()),
+        dashboard_mode: Some("ROOT_TASKS_ONLY".into()),
+        tracking_mode: Some("ROOT_TASKS_ONLY".into()),
+        refresh_policy: Some("ROOT_TASKS".into()),
+        task_authority: TaskAuthorityState::Canonical,
+        canonical_task_source: Some("TASKS.md".into()),
+        roles,
+        provenance_mode: "ROOT_TASKS".into(),
+        materialized: MaterializedDashboardStatus::default(),
+        warnings: vec![
+            "Hidden/local/generated control-plane projections are excluded from current state; repository-root TASKS.md is authoritative.".into(),
+        ],
+    }
 }
 
 pub(crate) fn resolve_remote(
@@ -1184,6 +1244,35 @@ mod tests {
             resolution.canonical_task_source.as_deref(),
             Some("TASKS.md")
         );
+    }
+
+    #[test]
+    fn x04_root_tasks_wins_over_conflicting_hidden_control_plane_projection() {
+        let (_db_dir, project_dir, db, project_id) = fixture();
+        fs::write(
+            project_dir.path().join(control_plane::PROJECT_JSON),
+            r#"{"schema":"hiveai-project/v1","projectKey":"wrong","canonicalTaskSource":".hiveai/TASKS.md"}"#,
+        )
+        .unwrap();
+        fs::write(
+            project_dir.path().join(control_plane::STATE_JSON),
+            r#"{"currentTaskId":"HIDDEN-STATE","workflowState":"BLOCKED"}"#,
+        )
+        .unwrap();
+        fs::write(
+            project_dir.path().join(control_plane::HANDOFF_MD),
+            "Current task ID: HIDDEN-HANDOFF\nWorkflow state: COMPLETE\n",
+        )
+        .unwrap();
+        let resolution = resolve(&db, &project_id).unwrap();
+        assert_eq!(resolution.manifest_path, "TASKS.md");
+        assert_eq!(resolution.canonical_task_source.as_deref(), Some("TASKS.md"));
+        assert_eq!(resolution.provenance_mode, "ROOT_TASKS");
+        assert_eq!(resolution.task_authority, TaskAuthorityState::Canonical);
+        assert!(resolution
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("TASKS.md is authoritative")));
     }
 
     #[test]

@@ -2082,6 +2082,149 @@ fn resolve_truth_impl(database: &DatabaseState, project_id: &str) -> Result<Proj
             .unwrap_or_else(|error| github_tracking::unavailable_for_project(&project, error));
         return Ok(remote_project_truth(&project, &remote));
     }
+    return resolve_root_tasks_truth(database, project_id);
+}
+
+fn resolve_root_tasks_truth(
+    database: &DatabaseState,
+    project_id: &str,
+) -> Result<ProjectTruth, String> {
+    let intelligence = task_intelligence::list(database, project_id).ok();
+    let mut warnings = Vec::new();
+    let mut provenance = vec!["TASKS.md".into()];
+    let canonical_tasks = intelligence
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .tasks
+                .iter()
+                .filter(|task| same_path("TASKS.md", &task.source_path))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(snapshot) = intelligence.as_ref() {
+        warnings.extend(snapshot.warnings.iter().map(|warning| warning.message.clone()));
+    } else {
+        warnings.push("root TASKS.md task intelligence is unavailable".into());
+    }
+    let workflows = workflow::project_list(
+        database,
+        workflow::WorkflowProjectListQuery {
+            project_id: project_id.to_string(),
+            limit: Some(workflow::MAX_HISTORY_LIMIT),
+        },
+    )
+    .map(|value| value.tasks)
+    .unwrap_or_default();
+    let task_by_id = canonical_tasks
+        .iter()
+        .map(|task| (task.id.as_str(), *task))
+        .collect::<std::collections::HashMap<_, _>>();
+    let workflow_candidates = workflows
+        .iter()
+        .filter(|candidate| {
+            candidate.source_active
+                && candidate.workflow_managed
+                && task_by_id.contains_key(candidate.task_id.as_str())
+                && !truth_task_complete(task_by_id[candidate.task_id.as_str()], Some(candidate))
+        })
+        .collect::<Vec<_>>();
+    let active_tasks = canonical_tasks
+        .iter()
+        .filter(|task| !truth_task_complete(task, None))
+        .copied()
+        .collect::<Vec<_>>();
+    let selected_workflow = (workflow_candidates.len() == 1).then(|| workflow_candidates[0]);
+    let selected_task = selected_workflow
+        .and_then(|workflow| task_by_id.get(workflow.task_id.as_str()).copied())
+        .or_else(|| {
+            (selected_workflow.is_none()
+                && active_tasks.len() == 1
+                && matches!(
+                    active_tasks[0].parsed_status.to_ascii_uppercase().as_str(),
+                    "IN_PROGRESS" | "RUNNING" | "BLOCKED" | "WAITING_HUMAN" | "WAITING_EXTERNAL"
+                ))
+            .then(|| active_tasks[0])
+        });
+    if workflow_candidates.len() > 1 {
+        warnings.push(format!(
+            "multiple active canonical workflow tasks require reconciliation: {}",
+            workflow_candidates
+                .iter()
+                .map(|value| value.task_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if active_tasks.len() > 1 && selected_workflow.is_none() {
+        warnings.push("multiple active root TASKS.md tasks require reconciliation".into());
+    }
+    let current_milestone = selected_task.and_then(|task| task.milestone.clone());
+    let progress_scope = current_milestone
+        .as_ref()
+        .map(|milestone| format!("MILESTONE:{milestone}"));
+    let progress_percent = current_milestone.as_ref().and_then(|milestone| {
+        let scoped = canonical_tasks
+            .iter()
+            .filter(|task| task.milestone.as_deref() == Some(milestone.as_str()))
+            .collect::<Vec<_>>();
+        (!scoped.is_empty()).then(|| {
+            let completed = scoped
+                .iter()
+                .filter(|task| truth_task_complete(task, None))
+                .count();
+            ((completed * 100) / scoped.len()) as u8
+        })
+    });
+    if let Some(task) = selected_task {
+        provenance.push(task.source_path.clone());
+        provenance.push(task.evidence.content_hash.clone());
+    }
+    let current_task_id = selected_task.map(|task| task.id.clone());
+    let selected_workflow_state = selected_workflow.map(|workflow| workflow.current_state.to_string());
+    Ok(ProjectTruth {
+        project_id: project_id.into(),
+        current_task_id,
+        current_task_title: selected_task.map(|task| task.title.clone()),
+        current_task_status: selected_workflow_state
+            .clone()
+            .or_else(|| selected_task.map(|task| task.parsed_status.clone())),
+        current_milestone,
+        current_cycle: None,
+        workflow_state: selected_workflow_state
+            .or_else(|| selected_task.map(|task| task.parsed_status.clone()))
+            .or_else(|| (selected_task.is_none()).then_some("NEEDS_RECONCILIATION".into())),
+        required_actor: selected_workflow
+            .and_then(|workflow| workflow.required_actor.clone())
+            .or_else(|| selected_task.and_then(|task| task.required_actor.clone())),
+        next_action: selected_workflow
+            .and_then(|workflow| workflow.allowed_next_states.first())
+            .map(|state| format!("Advance to {state}"))
+            .or_else(|| selected_task.and_then(|task| task.next_step.clone()))
+            .or_else(|| (selected_task.is_none()).then_some("Reconcile current task from TASKS.md".into())),
+        blockers: selected_task.map(|task| task.blockers.clone()).unwrap_or_default(),
+        progress_percent,
+        progress_scope,
+        authority_source: if selected_task.is_some() {
+            "TASKS.md".into()
+        } else {
+            "NEEDS_RECONCILIATION".into()
+        },
+        provenance,
+        reconciliation_state: if selected_task.is_some()
+            && workflow_candidates.len() <= 1
+            && (selected_workflow.is_some() || active_tasks.len() == 1)
+        {
+            "RESOLVED".into()
+        } else {
+            "NEEDS_RECONCILIATION".into()
+        },
+        warnings,
+    })
+}
+
+fn legacy_control_plane_truth_impl(database: &DatabaseState, project_id: &str) -> Result<ProjectTruth, String> {
+    let project = fetch_project(database, project_id)?;
     let control_plane = resolve_project(&project)?;
     let mut warnings = control_plane.warnings.clone();
     let mut provenance = vec![PROJECT_JSON.into(), STATE_JSON.into(), HANDOFF_MD.into()];
@@ -3502,6 +3645,8 @@ fn health_for(snapshot: &ControlPlaneSnapshot, git: &GitControlPlaneState) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::DatabaseState;
+    use crate::projects::{register_project, RegisterProjectRequest};
     use tempfile::tempdir;
 
     fn project(root: &Path) -> ProjectRecord {
@@ -3528,6 +3673,55 @@ mod tests {
         let snapshot = resolve_project(&project(root.path())).unwrap();
         assert!(!snapshot.adopted);
         assert_eq!(snapshot.health, "NEEDS_RECONCILIATION");
+    }
+
+    #[test]
+    fn x04_root_tasks_remains_truth_when_every_hidden_projection_conflicts() {
+        let db_dir = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("TASKS.md"),
+            "# Current\n- [~] TASK-1: Root task authority\n",
+        )
+        .unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let registered = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: root.path().to_string_lossy().into_owned(),
+                name: Some("Root TASKS fixture".into()),
+            },
+        )
+        .unwrap();
+        let parsed = crate::task_intelligence::parse(&database, &registered.id).unwrap();
+        let expected_task_id = parsed.tasks[0].id.clone();
+        fs::create_dir_all(root.path().join(".hiveai")).unwrap();
+        fs::write(
+            root.path().join(PROJECT_JSON),
+            r#"{"schema":"hiveai-control-plane/v1","projectKey":"wrong"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(STATE_JSON),
+            r#"{"workflowState":"BLOCKED","currentTaskId":"HIDDEN-STATE"}"#,
+        )
+        .unwrap();
+        fs::write(root.path().join(HANDOFF_MD), "Current task ID: HIDDEN-HANDOFF\n").unwrap();
+        fs::write(root.path().join(EVENT_INDEX_JSON), "{\"eventIds\":[\"hidden\"]}").unwrap();
+        fs::write(
+            root.path().join(".hiveai/TASKS.md"),
+            "- [ ] HIDDEN-TASK: hidden\n",
+        )
+        .unwrap();
+        fs::write(root.path().join(RULES_MD), "hidden rules").unwrap();
+        fs::write(root.path().join(EVENTS_JSONL), "{\"eventId\":\"hidden\"}\n").unwrap();
+
+        let truth = ProjectTruthResolver::resolve(&database, &registered.id).unwrap();
+        assert_eq!(truth.current_task_id.as_deref(), Some(expected_task_id.as_str()));
+        assert_eq!(truth.authority_source, "TASKS.md");
+        assert_eq!(truth.current_task_status.as_deref(), Some("IN_PROGRESS"));
+        assert!(!truth.provenance.iter().any(|path| path.contains(".hiveai")));
+        assert!(!truth.warnings.iter().any(|warning| warning.contains("STATE")));
     }
 
     #[test]

@@ -1005,6 +1005,7 @@ impl AuditModel for CodexCliAuditModel {
 }
 
 fn audit_output_contract(input: &AuditInput) -> String {
+    let authority_rule = "Current project/task/workflow status authority is the repository-root TASKS.md only. Never use, reconcile, corroborate, override, or infer current state from hidden/local/generated control-plane files such as .hiveai/STATE.json, HANDOFF.md, EVENT_INDEX.json, PROJECT.json, TASKS.md, RULES.md, or EVENTS.jsonl. Their existence or history never creates a missing-authority requirement, and remediation must never recommend creating or reviving them. Git metadata, real implementation files, tests, and architecture/governance evidence remain valid for their own purposes. ";
     let references = input
         .requirements
         .iter()
@@ -1012,11 +1013,11 @@ fn audit_output_contract(input: &AuditInput) -> String {
         .map(|requirement| requirement.requirement_ref.as_str())
         .collect::<Vec<_>>();
     if references.is_empty() {
-        return "This is a project/freeform audit with zero canonical task-scoped requirements. Return exactly one requirementCoverage row: requirementRef must be project-audit, status must be NOT_APPLICABLE, evidenceRefs must be an empty array, and requirementText and rationale must be bounded and state that no task-scoped criteria apply. Every finding must use requirementRefs: []; project-audit is a synthetic coverage identifier only and must never appear in a finding requirementRefs array. Evidence-backed project-level findings are allowed, but do not invent task requirement references.".into();
+        return format!("{authority_rule}This is a project/freeform audit with zero canonical task-scoped requirements. Return exactly one requirementCoverage row: requirementRef must be project-audit, status must be NOT_APPLICABLE, evidenceRefs must be an empty array, and requirementText and rationale must be bounded and state that no task-scoped criteria apply. Every finding must use requirementRefs: []; project-audit is a synthetic coverage identifier only and must never appear in a finding requirementRefs array. Evidence-backed project-level findings are allowed, but do not invent task requirement references.");
     }
     let references = references.join(", ");
     format!(
-        "This is a task-scoped audit. Return exactly one requirementCoverage row for each required requirementRef, and use only these canonical references: [{references}]. Finding requirementRefs, when present, must also use only this supplied canonical list. Do not invent, omit, or duplicate requirement references."
+        "{authority_rule}This is a task-scoped audit. Return exactly one requirementCoverage row for each required requirementRef, and use only these canonical references: [{references}]. Finding requirementRefs, when present, must also use only this supplied canonical list. Do not invent, omit, or duplicate requirement references."
     )
 }
 
@@ -1803,14 +1804,21 @@ fn changed_paths(
     paths
 }
 
-fn authority_evidence(dashboard: &project_dashboard::ProjectDashboardResolution) -> AuditEvidence {
+fn authority_evidence(_dashboard: &project_dashboard::ProjectDashboardResolution) -> AuditEvidence {
     let content = json!({
-        "manifestStatus": dashboard.manifest_status,
-        "taskAuthority": dashboard.task_authority,
-        "canonicalTaskSource": dashboard.canonical_task_source,
-        "provenanceMode": dashboard.provenance_mode,
-        "branchPolicy": dashboard.branch_policy,
-        "warnings": dashboard.warnings,
+        "currentStateAuthority": "repository-root TASKS.md",
+        "taskAuthority": "ROOT_TASKS_ONLY",
+        "canonicalTaskSource": "TASKS.md",
+        "excludedCurrentStateSources": [
+            ".hiveai/STATE.json",
+            ".hiveai/HANDOFF.md",
+            ".hiveai/EVENT_INDEX.json",
+            ".hiveai/PROJECT.json",
+            ".hiveai/TASKS.md",
+            ".hiveai/RULES.md",
+            ".hiveai/EVENTS.jsonl"
+        ],
+        "resolution": "Current-state authority is fixed by this contract; dashboard projections are non-authoritative.",
     })
     .to_string();
     evidence(
@@ -1970,6 +1978,7 @@ fn is_auditable_path(path: &str) -> bool {
         || lower.starts_with('/')
         || lower.contains(":")
         || is_secret_path(&lower)
+        || crate::task_sources::is_hidden_control_plane_path(&lower)
     {
         return false;
     }
@@ -2031,6 +2040,7 @@ fn read_source_evidence(
     let candidate = root.join(relative);
     let canonical = fs::canonicalize(&candidate).ok();
     if is_secret_path(relative)
+        || crate::task_sources::is_hidden_control_plane_path(relative)
         || (scope == GitDiffScope::WorkingTree
             && canonical
                 .as_ref()
@@ -4132,6 +4142,46 @@ mod tests {
         assert!(!is_auditable_path(".env"));
         assert!(!is_auditable_path("C:/outside.ts"));
         assert!(is_auditable_path("src-tauri/src/lib.rs"));
+    }
+
+    #[test]
+    fn x04_hidden_control_plane_is_excluded_but_real_sources_remain_auditable() {
+        let changed = vec![
+            ".hiveai/STATE.json".into(),
+            ".hiveai/HANDOFF.md".into(),
+            ".hiveai/EVENT_INDEX.json".into(),
+            ".hiveai/PROJECT.json".into(),
+            ".hiveai/TASKS.md".into(),
+            ".hiveai/RULES.md".into(),
+            ".hiveai/EVENTS.jsonl".into(),
+            "src/real.rs".into(),
+            "web/real.ts".into(),
+            "web/real.tsx".into(),
+            "config/ordinary.json".into(),
+            "docs/ordinary.md".into(),
+        ];
+        let selected = select_source_paths(&changed, GitDiffScope::WorkingTree);
+        assert_eq!(
+            selected,
+            vec![
+                "config/ordinary.json",
+                "docs/ordinary.md",
+                "src/real.rs",
+                "web/real.ts",
+                "web/real.tsx",
+            ]
+        );
+        assert!(!is_auditable_path("nested/.HIVEAI/STATE.json"));
+        assert!(is_auditable_path("src/implementation.json"));
+        assert!(is_auditable_path("docs/architecture.md"));
+    }
+
+    #[test]
+    fn x04_audit_contract_names_root_tasks_as_the_only_current_state_authority() {
+        let contract = audit_output_contract(&input());
+        assert!(contract.contains("repository-root TASKS.md only"));
+        assert!(contract.contains("Never use, reconcile, corroborate, override"));
+        assert!(contract.contains("never recommend creating or reviving"));
     }
 
     #[test]

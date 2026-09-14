@@ -18,6 +18,15 @@ pub const MAX_CANDIDATE_FILES: usize = 512;
 pub const MAX_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
 pub const MAX_CUSTOM_PATHS: usize = 64;
 
+/// The hidden H!veAI control plane is a derived/local projection, never a
+/// current task or workflow authority. Keep the policy centralized so source
+/// discovery and audit evidence cannot disagree about this boundary.
+pub fn is_hidden_control_plane_path(path: &str) -> bool {
+    path.replace('\\', "/")
+        .split('/')
+        .any(|component| component.eq_ignore_ascii_case(".hiveai"))
+}
+
 const IGNORE_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -30,6 +39,7 @@ const IGNORE_DIRS: &[&str] = &[
     ".venv",
     "venv",
     "vendor",
+    ".hiveai",
 ];
 const ROOT_NAMES: &[&str] = &[
     "tasks.md",
@@ -386,7 +396,7 @@ fn discover_standard(
             }
         }
     }
-    for directory in ["tasks", "plans", "handoffs", ".hiveai"] {
+    for directory in ["tasks", "plans", "handoffs"] {
         let path = root.join(directory);
         if path.is_dir() {
             walk_bounded(
@@ -404,6 +414,9 @@ fn discover_custom(
     output: &mut Vec<DiscoveredProjectSource>,
     budget: &mut DiscoveryBudget,
 ) {
+    if is_hidden_control_plane_path(&custom.normalized_path) {
+        return;
+    }
     let path = root.join(&custom.normalized_path);
     if path.exists() {
         if path.is_dir() {
@@ -629,6 +642,9 @@ fn collect_file(
         return;
     };
     let relative_path = slash_path(relative);
+    if is_hidden_control_plane_path(&relative_path) {
+        return;
+    }
     let metadata = match fs::metadata(&physical) {
         Ok(value) => value,
         Err(_) => {
@@ -951,6 +967,9 @@ fn physical_root(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("registered project root is unavailable: {error}"))
 }
 fn normalize_candidate(root: &Path, value: &str) -> Result<String, String> {
+    if is_hidden_control_plane_path(value.trim()) {
+        return Err("custom source paths may not enter the hidden H!veAI control plane".into());
+    }
     let input = PathBuf::from(value.trim());
     let candidate = if input.is_absolute() {
         input.clone()
@@ -992,6 +1011,9 @@ fn normalize_candidate(root: &Path, value: &str) -> Result<String, String> {
         .join("/");
     if normalized.is_empty() || normalized == "." {
         return Err("custom source path must identify a file or directory".into());
+    }
+    if is_hidden_control_plane_path(&normalized) {
+        return Err("custom source paths may not enter the hidden H!veAI control plane".into());
     }
     Ok(normalized)
 }
@@ -1285,6 +1307,36 @@ mod tests {
             write(&root.path().join(dir).join("bad.md"), "bad");
         }
         assert!(discover(&db, &id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn x04_hidden_control_plane_family_is_never_discovered_or_customized() {
+        let (_db_dir, root, db, id) = fixture();
+        for (relative, body) in [
+            (".hiveai/STATE.json", "state conflict"),
+            (".hiveai/HANDOFF.md", "handoff conflict"),
+            (".hiveai/EVENT_INDEX.json", "index conflict"),
+            (".hiveai/PROJECT.json", "project conflict"),
+            (".hiveai/TASKS.md", "legacy task conflict"),
+            (".hiveai/RULES.md", "rules conflict"),
+            (".hiveai/EVENTS.jsonl", "events conflict"),
+        ] {
+            write(&root.path().join(relative), body);
+        }
+        write(&root.path().join("progress.md"), "real implementation notes\n");
+        let rows = discover(&db, &id).unwrap();
+        assert!(rows.iter().any(|row| row.relative_path == "progress.md"));
+        assert!(rows
+            .iter()
+            .all(|row| !is_hidden_control_plane_path(&row.relative_path)));
+        assert!(custom_path_add(
+            &db,
+            CustomPathRequest {
+                project_id: id,
+                path: ".hiveai/STATE.json".into(),
+            }
+        )
+        .is_err());
     }
     #[test]
     fn outside_and_parent_escape_are_rejected() {
