@@ -19,6 +19,7 @@ beforeEach(() => {
   invoke.mockReset();
   invoke.mockImplementation((command: string) => {
     if (command === "hiveai_projects_list") return Promise.resolve([project]);
+    if (command === "hiveai_audit_provider_readiness") return Promise.resolve({ provider: "Codex CLI", status: "READY", configured: true, executableAvailable: true, version: "codex-cli 0.154.0", loginState: "ChatGPT authenticated", model: "CLI_DEFAULT", credentialSource: "Codex-managed login state", errorCategory: null });
     if (command === "hiveai_audits_list") return Promise.resolve([audit]);
     if (command === "hiveai_audit_get") return Promise.resolve(audit);
     if (command === "hiveai_audit_run") return Promise.resolve({ ...audit, id: "audit-2", priorAuditId: "audit-1", findings: [] });

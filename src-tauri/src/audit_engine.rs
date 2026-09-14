@@ -574,6 +574,14 @@ impl AuditProviderReadinessState {
     }
 }
 
+fn readiness_for_identity(
+    state: &AuditProviderReadinessState,
+    identity: &AuditProviderIdentity,
+    baseline: AuditProviderReadiness,
+) -> AuditProviderReadiness {
+    state.get(identity).unwrap_or(baseline)
+}
+
 fn audit_result_schema(input: &AuditInput) -> Value {
     let canonical_refs = input
         .requirements
@@ -5645,6 +5653,35 @@ mod tests {
                 "bounded failure"
             },
         )
+    }
+
+    #[test]
+    fn readiness_getter_uses_truthful_baseline_without_explicit_cache() {
+        let state = AuditProviderReadinessState::default();
+        let identity = AuditProviderIdentity {
+            executable: None,
+            version: None,
+        };
+
+        assert_eq!(
+            readiness_for_identity(&state, &identity, cached_readiness("AUTH_UNVERIFIED")).status,
+            "AUTH_UNVERIFIED"
+        );
+    }
+
+    #[test]
+    fn readiness_getter_returns_explicit_ready_result_after_check() {
+        let state = AuditProviderReadinessState::default();
+        let identity = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex.exe")),
+            version: Some("codex-cli 0.154.0".into()),
+        };
+        state.cache_for_test(identity.clone(), cached_readiness("READY"));
+
+        assert_eq!(
+            readiness_for_identity(&state, &identity, cached_readiness("AUTH_UNVERIFIED")).status,
+            "READY"
+        );
     }
 
     #[test]
