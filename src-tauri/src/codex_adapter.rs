@@ -1177,7 +1177,7 @@ fn load_session(database: &DatabaseState, session_id: &str) -> Result<CodexSessi
             "FREEFORM_PROJECT_OPERATION".into()
         },
         state: row.3,
-        cwd: row.6.unwrap_or_default(),
+        cwd: row.6.clone().unwrap_or_default(),
         started_at: row.4,
         ended_at: row.5,
         exit_code,
@@ -1192,6 +1192,9 @@ fn load_session(database: &DatabaseState, session_id: &str) -> Result<CodexSessi
         diagnostic_code,
         diagnostic_message,
         prompt_body: row.7,
+        provider_session_id: None,
+        provider_session_provenance: None,
+        provider_cwd_identity: row.6.clone().unwrap_or_default(),
     })
 }
 

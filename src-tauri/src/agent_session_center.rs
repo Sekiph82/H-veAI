@@ -4,7 +4,7 @@ use crate::process_policy::background_command;
 use crate::projects::{fetch_project, ProjectRecord};
 use crate::stream_sanitizer::StreamRedactor;
 use crate::time::utc_timestamp;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -22,6 +22,8 @@ const MAX_PROMPT_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_OUTPUT_EVENTS: usize = 128;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const STOP_GRACE: Duration = Duration::from_millis(750);
+const STOP_ESCALATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -209,6 +211,80 @@ struct OwnedClaudeProcess {
     escalation_requested: Arc<AtomicBool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminationResult {
+    exited: bool,
+    escalated: bool,
+}
+
+/// Polling is deliberately used instead of `Child::wait()` under the shared
+/// mutex. `stop()` must be able to acquire the mutex and terminate the owned
+/// process while this monitor is running.
+fn monitor_owned_child(child: Arc<Mutex<Child>>) -> Option<ExitStatus> {
+    loop {
+        let status = child.lock().ok()?.try_wait().ok().flatten();
+        if status.is_some() {
+            return status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn poll_owned_child(child: &Arc<Mutex<Child>>, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let exited = child
+            .lock()
+            .ok()
+            .and_then(|mut child| child.try_wait().ok())
+            .is_some_and(|status| status.is_some());
+        if exited {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn terminate_owned_child_bounded(child: &Arc<Mutex<Child>>, pid: u32) -> TerminationResult {
+    let _ = child
+        .lock()
+        .ok()
+        .and_then(|mut child| child.kill().ok());
+    if poll_owned_child(child, STOP_GRACE) {
+        return TerminationResult {
+            exited: true,
+            escalated: false,
+        };
+    }
+
+    #[cfg(windows)]
+    {
+        let _ = background_command("taskkill.exe")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .status();
+        return TerminationResult {
+            exited: poll_owned_child(child, STOP_ESCALATION_TIMEOUT),
+            escalated: true,
+        };
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        TerminationResult {
+            exited: false,
+            escalated: false,
+        }
+    }
+}
+
+fn cleanup_resume_child(child: &Arc<Mutex<Child>>, pid: u32) {
+    let _ = terminate_owned_child_bounded(child, pid);
+}
+
 #[derive(Default)]
 struct Capture {
     text: String,
@@ -329,7 +405,7 @@ fn validate_task(
     let Some(task_id) = task_id else {
         return Ok(());
     };
-    let mut connection = database.open_connection()?;
+    let connection = database.open_connection()?;
     let belongs: bool = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND project_id=?2)",
@@ -408,7 +484,7 @@ fn claude_readiness() -> ProviderReadiness {
         };
     }
     match probe_claude_auth(&executable) {
-        Ok(true) => ProviderReadiness {
+        ClaudeAuthProbe::Authenticated => ProviderReadiness {
             provider: "CLAUDE".into(),
             available: true,
             version: Some(version),
@@ -420,7 +496,7 @@ fn claude_readiness() -> ProviderReadiness {
             supports_resume: true,
             checked_at,
         },
-        Ok(false) => ProviderReadiness {
+        ClaudeAuthProbe::AuthRequired => ProviderReadiness {
             provider: "CLAUDE".into(),
             available: false,
             version: Some(version),
@@ -432,18 +508,68 @@ fn claude_readiness() -> ProviderReadiness {
             supports_resume: true,
             checked_at,
         },
-        Err(code) => ProviderReadiness {
+        ClaudeAuthProbe::UsageLimited => claude_auth_unready(
+            "USAGE_LIMITED",
+            "CLAUDE_USAGE_LIMITED",
+            "Claude Code reported an explicit usage or rate limit during the bounded auth probe",
+            version,
+            capabilities,
+            checked_at,
+        ),
+        ClaudeAuthProbe::NetworkError => claude_auth_unready(
+            "NETWORK_ERROR",
+            "CLAUDE_NETWORK_ERROR",
+            "Claude Code reported an explicit network failure during the bounded auth probe",
+            version,
+            capabilities,
+            checked_at,
+        ),
+        ClaudeAuthProbe::Timeout => claude_auth_unready(
+            "TIMEOUT",
+            "CLAUDE_AUTH_PROBE_TIMEOUT",
+            "Claude authentication could not be verified before the bounded timeout",
+            version,
+            capabilities,
+            checked_at,
+        ),
+        ClaudeAuthProbe::ProcessError => claude_auth_unready(
+            "PROCESS_ERROR",
+            "CLAUDE_AUTH_PROBE_PROCESS_ERROR",
+            "Claude authentication probe exited unsuccessfully without an explicit provider classification",
+            version,
+            capabilities,
+            checked_at,
+        ),
+        ClaudeAuthProbe::AuthUnverified => claude_auth_unready(
+            "AUTH_UNVERIFIED",
+            "CLAUDE_AUTH_UNVERIFIED",
+            "Claude authentication could not be verified by the bounded auth-status command",
+            version,
+            capabilities,
+            checked_at,
+        ),
+    }
+}
+
+fn claude_auth_unready(
+    readiness_state: &str,
+    diagnostic_code: &str,
+    diagnostic_message: &str,
+    version: String,
+    capabilities: ClaudeCapabilities,
+    checked_at: String,
+) -> ProviderReadiness {
+    ProviderReadiness {
             provider: "CLAUDE".into(),
             available: false,
             version: Some(version),
-            readiness_state: if code.contains("TIMEOUT") { "TIMEOUT" } else { "AUTH_UNVERIFIED" }.into(),
-            diagnostic_code: Some(format!("CLAUDE_{code}")),
-            diagnostic_message: Some("Claude authentication could not be verified by the bounded auth-status command".into()),
+            readiness_state: readiness_state.into(),
+            diagnostic_code: Some(diagnostic_code.into()),
+            diagnostic_message: Some(diagnostic_message.into()),
             capabilities: capabilities.names(),
             supports_pty: false,
             supports_resume: true,
             checked_at,
-        },
     }
 }
 
@@ -567,6 +693,17 @@ struct ClaudeProbeOutput {
     timed_out: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeAuthProbe {
+    Authenticated,
+    AuthRequired,
+    AuthUnverified,
+    UsageLimited,
+    NetworkError,
+    Timeout,
+    ProcessError,
+}
+
 fn read_probe_stream(mut reader: impl Read + Send + 'static) -> thread::JoinHandle<String> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
@@ -577,9 +714,6 @@ fn read_probe_stream(mut reader: impl Read + Send + 'static) -> thread::JoinHand
             }
             let remaining = 64 * 1024usize - bytes.len();
             bytes.extend_from_slice(&buffer[..size.min(remaining)]);
-            if bytes.len() >= 64 * 1024 {
-                break;
-            }
         }
         String::from_utf8_lossy(&bytes).into_owned()
     })
@@ -655,18 +789,69 @@ fn probe_claude_help(path: &Path) -> Result<ClaudeCapabilities, String> {
     Ok(ClaudeCapabilities::from_help(&format!("{}\n{}", output.stdout, output.stderr)))
 }
 
-fn probe_claude_auth(path: &Path) -> Result<bool, String> {
-    let output = run_claude_probe(path, &["auth", "status", "--json"], None, PROBE_TIMEOUT)
-        .map_err(|error| format!("CLAUDE_{error}"))?;
-    if output.timed_out {
-        return Err("AUTH_PROBE_TIMEOUT".into());
+fn probe_claude_auth(path: &Path) -> ClaudeAuthProbe {
+    let output = match run_claude_probe(path, &["auth", "status", "--json"], None, PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(_) => return ClaudeAuthProbe::ProcessError,
+    };
+    classify_claude_auth_probe(
+        output.timed_out,
+        output.status.success(),
+        &output.stdout,
+        &output.stderr,
+    )
+}
+
+fn classify_claude_auth_probe(
+    timed_out: bool,
+    process_succeeded: bool,
+    stdout: &str,
+    stderr: &str,
+) -> ClaudeAuthProbe {
+    if timed_out {
+        return ClaudeAuthProbe::Timeout;
     }
-    let value: Value = serde_json::from_str(&output.stdout)
-        .map_err(|_| "AUTH_UNVERIFIED".to_string())?;
-    value
-        .get("loggedIn")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "AUTH_UNVERIFIED".to_string())
+    let evidence = format!(
+        "{}\n{}",
+        crate::stream_sanitizer::sanitize_record(stdout.as_bytes()),
+        crate::stream_sanitizer::sanitize_record(stderr.as_bytes())
+    )
+    .to_ascii_lowercase();
+    if evidence.contains("rate limit")
+        || evidence.contains("usage limit")
+        || evidence.contains("quota exceeded")
+        || evidence.contains("too many requests")
+        || evidence.contains("http 429")
+        || evidence.contains("status 429")
+    {
+        return ClaudeAuthProbe::UsageLimited;
+    }
+    if evidence.contains("network")
+        || evidence.contains("connection refused")
+        || evidence.contains("connection reset")
+        || evidence.contains("unable to connect")
+        || evidence.contains("dns")
+    {
+        return ClaudeAuthProbe::NetworkError;
+    }
+    if !process_succeeded {
+        if evidence.contains("not logged in")
+            || evidence.contains("authentication required")
+            || evidence.contains("please log in")
+            || evidence.contains("login required")
+        {
+            return ClaudeAuthProbe::AuthRequired;
+        }
+        return ClaudeAuthProbe::ProcessError;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(stdout) else {
+        return ClaudeAuthProbe::AuthUnverified;
+    };
+    match value.get("loggedIn").and_then(Value::as_bool) {
+        Some(true) => ClaudeAuthProbe::Authenticated,
+        Some(false) => ClaudeAuthProbe::AuthRequired,
+        None => ClaudeAuthProbe::AuthUnverified,
+    }
 }
 
 pub fn start(
@@ -718,7 +903,7 @@ fn start_claude(
     } else {
         "FREEFORM_PROJECT_OPERATION"
     };
-    let mut connection = database.open_connection()?;
+    let connection = database.open_connection()?;
     let tx = connection
         .unchecked_transaction()
         .map_err(|error| format!("begin Claude session transaction: {error}"))?;
@@ -787,31 +972,52 @@ fn start_claude(
     let pid = child.id();
     let child = Arc::new(Mutex::new(child));
     let stop_requested = Arc::new(AtomicBool::new(false));
-    center
+    if let Err(error) = center
         .claude_processes
         .lock()
-        .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED")?
-        .insert(
-            session_id.clone(),
-            OwnedClaudeProcess {
-                child: child.clone(),
-                pid,
-                stop_requested: stop_requested.clone(),
-                escalation_requested: Arc::new(AtomicBool::new(false)),
-            },
-        );
-    let mut connection = database.open_connection()?;
-    let tx = connection
-        .transaction()
-        .map_err(|error| format!("begin Claude running transaction: {error}"))?;
-    tx.execute(
-        "UPDATE agent_sessions SET state='RUNNING' WHERE id=?1",
-        [&session_id],
-    )
-    .map_err(|error| format!("mark Claude session running: {error}"))?;
-    crate::control_plane::mark_truth_dirty_tx(&tx, &request.project_id, "AGENT_SESSION_RUNNING")?;
-    tx.commit()
-        .map_err(|error| format!("commit Claude running: {error}"))?;
+        .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED".to_string())
+        .map(|mut processes| {
+            processes.insert(
+                session_id.clone(),
+                OwnedClaudeProcess {
+                    child: child.clone(),
+                    pid,
+                    stop_requested: stop_requested.clone(),
+                    escalation_requested: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        })
+    {
+        let _ = terminate_owned_child_bounded(&child, pid);
+        let _ = finish_failed(database, &session_id, "CLAUDE_PROCESS_OWNERSHIP_FAILED", &error);
+        return Err(error);
+    }
+    let running_result = (|| -> Result<(), String> {
+        let mut connection = database.open_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|error| format!("begin Claude running transaction: {error}"))?;
+        let changed = tx
+            .execute(
+                "UPDATE agent_sessions SET state='RUNNING' WHERE id=?1 AND state='STARTING'",
+                [&session_id],
+            )
+            .map_err(|error| format!("mark Claude session running: {error}"))?;
+        if changed != 1 {
+            return Err("CLAUDE_RUNNING_STATE_TRANSITION_FAILED".into());
+        }
+        crate::control_plane::mark_truth_dirty_tx(&tx, &request.project_id, "AGENT_SESSION_RUNNING")?;
+        tx.commit()
+            .map_err(|error| format!("commit Claude running: {error}"))
+    })();
+    if let Err(error) = running_result {
+        if let Ok(mut processes) = center.claude_processes.lock() {
+            processes.remove(&session_id);
+        }
+        let _ = terminate_owned_child_bounded(&child, pid);
+        let _ = finish_failed(database, &session_id, "CLAUDE_RUNNING_PERSISTENCE_FAILED", &error);
+        return Err(error);
+    }
     let database = database.clone();
     let database_for_thread = database.clone();
     let processes = center.claude_processes.clone();
@@ -844,6 +1050,13 @@ fn fixed_claude_args() -> Vec<String> {
     ]
 }
 
+fn exact_claude_resume_args(provider_session_id: &str) -> Vec<String> {
+    let mut args = fixed_claude_args();
+    args.push("--resume".into());
+    args.push(provider_session_id.into());
+    args
+}
+
 fn validate_pty_dimensions(rows: u16, columns: u16) -> Result<(), String> {
     if rows == 0 || columns == 0 || rows > 500 || columns > 500 {
         return Err("AGENT_PTY_RESIZE_INVALID".into());
@@ -864,8 +1077,8 @@ fn run_claude_session(
     let out_sender = sender.clone();
     let out_thread = thread::spawn(move || read_stream(stdout, true, out_sender));
     let err_thread = thread::spawn(move || read_stream(stderr, false, sender));
-    let wait_thread =
-        thread::spawn(move || child.lock().ok().and_then(|mut value| value.wait().ok()));
+    let monitor_child = child.clone();
+    let wait_thread = thread::spawn(move || monitor_owned_child(monitor_child));
     let mut stdout_capture = Capture::default();
     let mut stderr_capture = Capture::default();
     let mut stdout_redactor = StreamRedactor::default();
@@ -873,9 +1086,10 @@ fn run_claude_session(
     let mut final_response = FinalResponseCapture::default();
     let mut provider_session_id = None;
     let mut terminal_state = None;
+    let mut identity_conflict = false;
     let mut malformed_records = 0usize;
     let mut persisted_event_count = 0usize;
-    let Ok(connection) = database.open_connection() else {
+    let Ok(mut connection) = database.open_connection() else {
         let _ = out_thread.join();
         let _ = err_thread.join();
         let _ = wait_thread.join();
@@ -902,21 +1116,64 @@ fn run_claude_session(
                     match parse_claude_record(line) {
                         Ok(parsed) => {
                             if let Some(id) = parsed.provider_session_id.clone() {
-                                provider_session_id = Some(id.clone());
-                                let _ = connection.execute(
-                                    "UPDATE agent_sessions SET provider_session_id=?2 WHERE id=?1 AND (provider_session_id IS NULL OR provider_session_id=?2)",
-                                    params![session_id, id],
-                                );
-                                let _ = insert_bounded_event(
-                                    &connection,
-                                    &session_id,
-                                    "PROVIDER_SESSION_ID",
-                                    json!({"provider":"CLAUDE","providerSessionId":id}),
-                                    &mut persisted_event_count,
-                                );
+                                match accept_claude_provider_session_id(&mut connection, &session_id, &id) {
+                                    Ok(ProviderSessionIdentity::Accepted(canonical)) => {
+                                        provider_session_id = Some(canonical.clone());
+                                        let _ = insert_bounded_event(
+                                            &connection,
+                                            &session_id,
+                                            "PROVIDER_SESSION_ID",
+                                            json!({"provider":"CLAUDE","providerSessionId":canonical}),
+                                            &mut persisted_event_count,
+                                        );
+                                    }
+                                    Ok(ProviderSessionIdentity::Conflict { canonical, candidate }) => {
+                                        identity_conflict = true;
+                                        provider_session_id = canonical;
+                                        terminal_state = Some("FAILED");
+                                        let _ = insert_event(
+                                            &connection,
+                                            &session_id,
+                                            "CLAUDE_PROVIDER_SESSION_ID_MISMATCH",
+                                            json!({"diagnosticCode":"CLAUDE_PROVIDER_SESSION_ID_MISMATCH","conflictingProviderSessionId":candidate}),
+                                        );
+                                        let pid = child.lock().ok().map(|value| value.id()).unwrap_or_default();
+                                        let termination = terminate_owned_child_bounded(&child, pid);
+                                        if termination.escalated {
+                                            let _ = insert_event(
+                                                &connection,
+                                                &session_id,
+                                                "STOP_ESCALATED",
+                                                json!({"method":"TASKKILL_OWNED_TREE_FORCE","reason":"CLAUDE_PROVIDER_SESSION_ID_MISMATCH","bounded":true}),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        identity_conflict = true;
+                                        terminal_state = Some("FAILED");
+                                        let _ = insert_event(
+                                            &connection,
+                                            &session_id,
+                                            "CLAUDE_PROVIDER_SESSION_ID_MISMATCH",
+                                            json!({"diagnosticCode":"CLAUDE_PROVIDER_SESSION_ID_INVALID","diagnosticMessage":error}),
+                                        );
+                                    }
+                                }
                             }
-                            if parsed.state.is_some_and(|state| state != "RUNNING") {
-                                terminal_state = parsed.state;
+                            if let Some(state) = parsed.state {
+                                if state == "RUNNING" {
+                                    if !matches!(terminal_state, Some("COMPLETED")) {
+                                        terminal_state = None;
+                                    }
+                                } else {
+                                    terminal_state = Some(state);
+                                }
+                                let _ = persist_live_claude_state(
+                                    &database,
+                                    &mut connection,
+                                    &session_id,
+                                    state,
+                                );
                             }
                             let _ = insert_bounded_event(
                                 &connection,
@@ -968,14 +1225,39 @@ fn run_claude_session(
                     match parse_claude_record(line) {
                         Ok(parsed) => {
                             if let Some(id) = parsed.provider_session_id.clone() {
-                                provider_session_id = Some(id.clone());
-                                let _ = connection.execute(
-                                    "UPDATE agent_sessions SET provider_session_id=?2 WHERE id=?1 AND (provider_session_id IS NULL OR provider_session_id=?2)",
-                                    params![session_id, id],
-                                );
+                                match accept_claude_provider_session_id(&mut connection, &session_id, &id) {
+                                    Ok(ProviderSessionIdentity::Accepted(canonical)) => provider_session_id = Some(canonical),
+                                    Ok(ProviderSessionIdentity::Conflict { canonical, candidate }) => {
+                                        identity_conflict = true;
+                                        provider_session_id = canonical;
+                                        terminal_state = Some("FAILED");
+                                        let _ = insert_event(
+                                            &connection,
+                                            &session_id,
+                                            "CLAUDE_PROVIDER_SESSION_ID_MISMATCH",
+                                            json!({"diagnosticCode":"CLAUDE_PROVIDER_SESSION_ID_MISMATCH","conflictingProviderSessionId":candidate}),
+                                        );
+                                    }
+                                    Err(_) => {
+                                        identity_conflict = true;
+                                        terminal_state = Some("FAILED");
+                                    }
+                                }
                             }
-                            if parsed.state.is_some_and(|state| state != "RUNNING") {
-                                terminal_state = parsed.state;
+                            if let Some(state) = parsed.state {
+                                if state == "RUNNING" {
+                                    if !matches!(terminal_state, Some("COMPLETED")) {
+                                        terminal_state = None;
+                                    }
+                                } else {
+                                    terminal_state = Some(state);
+                                }
+                                let _ = persist_live_claude_state(
+                                    &database,
+                                    &mut connection,
+                                    &session_id,
+                                    state,
+                                );
                             }
                             let _ = insert_bounded_event(
                                 &connection,
@@ -1006,7 +1288,9 @@ fn run_claude_session(
         }
     }
     let status = wait_thread.join().ok().flatten();
-    let state = if stop_requested.load(Ordering::Acquire) {
+    let state = if identity_conflict {
+        "FAILED"
+    } else if stop_requested.load(Ordering::Acquire) {
         "STOPPED"
     } else if matches!(terminal_state, Some("WAITING_PERMISSION" | "WAITING_USER" | "AUTH_REQUIRED" | "USAGE_LIMITED" | "NETWORK_ERROR")) {
         terminal_state.unwrap_or("FAILED")
@@ -1017,7 +1301,12 @@ fn run_claude_session(
     } else {
         "FAILED"
     };
-    let (code, message) = if malformed_records > 0 {
+    let (code, message) = if identity_conflict {
+        (
+            Some("CLAUDE_PROVIDER_SESSION_ID_MISMATCH"),
+            Some("Claude emitted more than one provider session identity for one H!veAI session"),
+        )
+    } else if malformed_records > 0 {
         (Some("CLAUDE_STREAM_MALFORMED"), Some("Claude emitted a malformed structured stream record"))
     } else if state == "WAITING_PERMISSION" {
         (Some("CLAUDE_PERMISSION_REQUIRED"), Some("Claude could not continue without an explicit permission decision"))
@@ -1066,6 +1355,189 @@ struct ParsedClaudeRecord {
     state: Option<&'static str>,
     provider_session_id: Option<String>,
     payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderSessionIdentity {
+    Accepted(String),
+    Conflict {
+        canonical: Option<String>,
+        candidate: String,
+    },
+}
+
+/// The first provider identity is a compare-and-set value. Every later
+/// record must match it; finalization calls this same helper before writing.
+fn accept_claude_provider_session_id(
+    connection: &mut Connection,
+    session_id: &str,
+    candidate: &str,
+) -> Result<ProviderSessionIdentity, String> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() || candidate.len() > 256 {
+        return Err("CLAUDE_PROVIDER_SESSION_ID_INVALID".into());
+    }
+    let tx = connection
+        .transaction()
+        .map_err(|error| format!("begin provider identity transaction: {error}"))?;
+    let current: Option<String> = tx
+        .query_row(
+            "SELECT provider_session_id FROM agent_sessions WHERE id=?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| format!("read provider identity: {error}"))?
+        .flatten();
+    if let Some(current) = current {
+        tx.commit()
+            .map_err(|error| format!("commit provider identity read: {error}"))?;
+        return if current == candidate {
+            Ok(ProviderSessionIdentity::Accepted(current))
+        } else {
+            Ok(ProviderSessionIdentity::Conflict {
+                canonical: Some(current),
+                candidate: candidate.into(),
+            })
+        };
+    }
+
+    let changed = tx
+        .execute(
+            "UPDATE agent_sessions SET provider_session_id=?2 WHERE id=?1 AND provider_session_id IS NULL",
+            params![session_id, candidate],
+        )
+        .map_err(|error| format!("accept provider identity: {error}"))?;
+    if changed == 1 {
+        let provenance: Option<String> = tx
+            .query_row(
+                "SELECT provider_session_provenance_json FROM agent_sessions WHERE id=?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("read provider provenance: {error}"))?
+            .flatten();
+        let mut value = provenance
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+            .unwrap_or_else(|| json!({}));
+        if let Some(object) = value.as_object_mut() {
+            object.insert("providerSessionId".into(), Value::String(candidate.into()));
+        }
+        tx.execute(
+            "UPDATE agent_sessions SET provider_session_provenance_json=?2 WHERE id=?1",
+            params![session_id, value.to_string()],
+        )
+        .map_err(|error| format!("persist provider provenance: {error}"))?;
+        tx.commit()
+            .map_err(|error| format!("commit provider identity: {error}"))?;
+        return Ok(ProviderSessionIdentity::Accepted(candidate.into()));
+    }
+
+    let raced: Option<String> = tx
+        .query_row(
+            "SELECT provider_session_id FROM agent_sessions WHERE id=?1",
+            [session_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|error| format!("re-read provider identity: {error}"))?
+        .flatten();
+    tx.commit()
+        .map_err(|error| format!("commit provider identity race: {error}"))?;
+    match raced {
+        Some(canonical) if canonical == candidate => {
+            Ok(ProviderSessionIdentity::Accepted(canonical))
+        }
+        other => Ok(ProviderSessionIdentity::Conflict {
+            canonical: other,
+            candidate: candidate.into(),
+        }),
+    }
+}
+
+fn persist_live_claude_state(
+    database: &crate::db::DatabaseState,
+    connection: &mut Connection,
+    session_id: &str,
+    state: &str,
+) -> Result<(), String> {
+    if !matches!(
+        state,
+        "RUNNING"
+            | "WAITING_PERMISSION"
+            | "WAITING_USER"
+            | "AUTH_REQUIRED"
+            | "USAGE_LIMITED"
+            | "NETWORK_ERROR"
+    ) {
+        return Ok(());
+    }
+    let (code, message) = match state {
+        "WAITING_PERMISSION" => (
+            "CLAUDE_PERMISSION_REQUIRED",
+            "Claude is waiting for an explicit permission decision",
+        ),
+        "WAITING_USER" => (
+            "CLAUDE_USER_INPUT_REQUIRED",
+            "Claude is waiting for owner input",
+        ),
+        "AUTH_REQUIRED" => (
+            "CLAUDE_AUTH_REQUIRED",
+            "Claude reported that authentication is required",
+        ),
+        "USAGE_LIMITED" => (
+            "CLAUDE_USAGE_LIMITED",
+            "Claude reported a usage or rate limit",
+        ),
+        "NETWORK_ERROR" => (
+            "CLAUDE_NETWORK_ERROR",
+            "Claude reported a network or connection error",
+        ),
+        _ => ("CLAUDE_SESSION_RUNNING", "Claude resumed active processing"),
+    };
+    let tx = connection
+        .transaction()
+        .map_err(|error| format!("begin live Claude state transaction: {error}"))?;
+    let project_id: Option<String> = tx
+        .query_row(
+            "SELECT project_id FROM agent_sessions WHERE id=?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("read live Claude project: {error}"))?
+        .flatten();
+    let changed = tx
+        .execute(
+            "UPDATE agent_sessions SET state=?2,ended_at=NULL WHERE id=?1 AND state IN ('STARTING','RUNNING','WAITING_PERMISSION','WAITING_USER','AUTH_REQUIRED','USAGE_LIMITED','NETWORK_ERROR')",
+            params![session_id, state],
+        )
+        .map_err(|error| format!("persist live Claude state: {error}"))?;
+    if changed > 0 {
+        if let Some(project_id) = project_id.as_deref() {
+            crate::control_plane::mark_truth_dirty_tx(&tx, project_id, "AGENT_SESSION_STATE")?;
+        }
+    }
+    tx.commit()
+        .map_err(|error| format!("commit live Claude state: {error}"))?;
+    if changed > 0 {
+        insert_event(
+            connection,
+            session_id,
+            if state == "RUNNING" { "SESSION_STATE" } else { "ATTENTION_STATE" },
+            json!({"state":state,"diagnosticCode":code,"diagnosticMessage":message}),
+        )?;
+        if let Some(project_id) = project_id {
+            crate::control_plane::materialize_best_effort(
+                database,
+                &project_id,
+                "AGENT_SESSION_STATE",
+            );
+        }
+    }
+    Ok(())
 }
 
 fn claude_session_id(value: &Value) -> Option<String> {
@@ -1162,7 +1634,14 @@ fn parse_claude_record(record: &str) -> Result<ParsedClaudeRecord, String> {
             ("PROVIDER_ERROR", Some(state))
         }
         "result" => {
-            if subtype == "success" || value.get("result").and_then(Value::as_str).is_some() {
+            let provider_error = value
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                || value.get("error").is_some();
+            if !provider_error
+                && (subtype == "success" || value.get("result").and_then(Value::as_str).is_some())
+            {
                 ("CLAUDE_FINAL_RESPONSE", Some("COMPLETED"))
             } else {
                 let text = value
@@ -1221,6 +1700,23 @@ fn finalize_claude(
     let final_state = final_response.state().as_str();
     let mut effective_code = diagnostic_code;
     let mut effective_message = diagnostic_message;
+    let mut persisted_state = state;
+    let mut validated_provider_session_id = None;
+    if let Some(candidate) = provider_session_id {
+        match accept_claude_provider_session_id(&mut connection, session_id, candidate)? {
+            ProviderSessionIdentity::Accepted(canonical) => {
+                validated_provider_session_id = Some(canonical);
+            }
+            ProviderSessionIdentity::Conflict { canonical, .. } => {
+                persisted_state = "FAILED";
+                effective_code = Some("CLAUDE_PROVIDER_SESSION_ID_MISMATCH");
+                effective_message = Some(
+                    "Claude provider session identity conflicted during finalization; the canonical identity was preserved",
+                );
+                validated_provider_session_id = canonical;
+            }
+        }
+    }
     let project_id = connection
         .query_row(
             "SELECT project_id FROM agent_sessions WHERE id=?1",
@@ -1236,7 +1732,7 @@ fn finalize_claude(
             .map_err(|error| format!("begin Claude finalization transaction: {error}"))?;
         tx.execute(
             "UPDATE agent_sessions SET state=?2,ended_at=?3,final_response=?4,final_response_truncated=?5,final_response_state=?6,final_response_role=CASE WHEN ?4 IS NULL THEN NULL ELSE 'assistant' END,provider_session_id=COALESCE(?7,provider_session_id) WHERE id=?1",
-            params![session_id, state, utc_timestamp(), final_text, final_response.truncated(), final_state, provider_session_id],
+            params![session_id, persisted_state, utc_timestamp(), final_text, final_response.truncated(), final_state, validated_provider_session_id],
         )
         .map_err(|error| error.to_string())?;
         if let Some(project_id) = project_id.as_deref() {
@@ -1255,7 +1751,7 @@ fn finalize_claude(
         &connection,
         session_id,
         "SESSION_FINISHED",
-        json!({"state":state,"exitCode":exit_code,"stdoutTruncated":stdout.truncated,"stderrTruncated":stderr.truncated,"finalResponseState":final_state,"finalResponseTruncated":final_response.truncated(),"malformedRecords":malformed_records,"providerSessionId":provider_session_id,"diagnosticCode":effective_code,"diagnosticMessage":effective_message}),
+        json!({"state":persisted_state,"exitCode":exit_code,"stdoutTruncated":stdout.truncated,"stderrTruncated":stderr.truncated,"finalResponseState":final_state,"finalResponseTruncated":final_response.truncated(),"malformedRecords":malformed_records,"providerSessionId":validated_provider_session_id,"diagnosticCode":effective_code,"diagnosticMessage":effective_message}),
     )?;
     if let Some(project_id) = project_id {
         crate::control_plane::materialize_best_effort(
@@ -1388,7 +1884,7 @@ pub fn stop(
             stop_requested.store(true, Ordering::Release);
             let mut connection = database.open_connection()?;
             let tx = connection.transaction().map_err(|error| error.to_string())?;
-            tx.execute("UPDATE agent_sessions SET state='STOPPING' WHERE id=?1 AND state IN ('STARTING','RUNNING','WAITING_PERMISSION','WAITING_USER')", [session_id])
+            tx.execute("UPDATE agent_sessions SET state='STOPPING' WHERE id=?1 AND state IN ('STARTING','RUNNING','WAITING_PERMISSION','WAITING_USER','AUTH_REQUIRED','USAGE_LIMITED','NETWORK_ERROR')", [session_id])
                 .map_err(|error| error.to_string())?;
             crate::control_plane::mark_truth_dirty_tx(&tx, project_id, "AGENT_SESSION_STOP_REQUESTED")?;
             tx.commit().map_err(|error| error.to_string())?;
@@ -1396,28 +1892,16 @@ pub fn stop(
                 &connection,
                 session_id,
                 "STOP_REQUESTED",
-                json!({"gracefulAttempted":true,"gracefulResult":"DIRECT_OWNED_PROCESS_TERMINATION","ownedPid":pid}),
+                json!({"gracefulAttempted":false,"terminationMethod":"OWNED_CHILD_KILL","ownedPid":pid,"gracePeriodMs":STOP_GRACE.as_millis()}),
             )?;
-            let _ = child.lock().ok().and_then(|mut child| child.kill().ok());
-            let deadline = Instant::now() + Duration::from_millis(750);
-            let mut exited = false;
-            while Instant::now() < deadline {
-                if child.lock().ok().and_then(|mut value| value.try_wait().ok()).flatten().is_some() {
-                    exited = true;
-                    break;
-                }
-                thread::sleep(Duration::from_millis(25));
-            }
-            if !exited {
+            let termination = terminate_owned_child_bounded(&child, pid);
+            if termination.escalated {
                 escalation_requested.store(true, Ordering::Release);
-                let _ = background_command("taskkill.exe")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .status();
                 insert_event(
                     &connection,
                     session_id,
                     "STOP_ESCALATED",
-                    json!({"ownedPid":pid,"method":"TASKKILL_OWNED_TREE","bounded":true}),
+                    json!({"ownedPid":pid,"method":"TASKKILL_OWNED_TREE_FORCE","bounded":true,"exited":termination.exited}),
                 )?;
             }
             Ok(load_session(database, session_id)?)
@@ -1457,6 +1941,44 @@ pub fn retry(
         json!({"sourceSessionId":source.id,"sourceProvider":source.provider,"sourceProjectId":source.project_id,"sourceTaskId":source.task_id,"retryTimestamp":utc_timestamp()}),
     )?;
     load_session(database, &session.id)
+}
+
+fn resume_setup_diagnostic(stage: &str, error: &str) -> (&'static str, String) {
+    let code = match stage {
+        "SPAWN" => "CLAUDE_RESUME_PROCESS_SPAWN_FAILED",
+        "STDIN" => "CLAUDE_RESUME_STDIN_UNAVAILABLE",
+        "PROMPT_WRITE" => "CLAUDE_RESUME_PROMPT_WRITE_FAILED",
+        "STDOUT" => "CLAUDE_RESUME_STDOUT_UNAVAILABLE",
+        "STDERR" => "CLAUDE_RESUME_STDERR_UNAVAILABLE",
+        "OWNERSHIP" => "CLAUDE_RESUME_OWNERSHIP_REGISTRATION_FAILED",
+        "RUNNING" => "CLAUDE_RESUME_RUNNING_PERSISTENCE_FAILED",
+        _ => "CLAUDE_RESUME_SETUP_FAILED",
+    };
+    let sanitized = crate::stream_sanitizer::sanitize_record(error.as_bytes());
+    let bounded = sanitized.chars().take(512).collect::<String>();
+    (code, format!("{stage} setup failed: {bounded}"))
+}
+
+fn fail_resume_setup(
+    center: &AgentSessionCenter,
+    database: &crate::db::DatabaseState,
+    session_id: &str,
+    child: Option<Arc<Mutex<Child>>>,
+    registered: bool,
+    stage: &str,
+    error: &str,
+) {
+    if let Some(child) = child {
+        let pid = child.lock().ok().map(|child| child.id()).unwrap_or_default();
+        cleanup_resume_child(&child, pid);
+    }
+    if registered {
+        if let Ok(mut processes) = center.claude_processes.lock() {
+            processes.remove(session_id);
+        }
+    }
+    let (code, message) = resume_setup_diagnostic(stage, error);
+    let _ = finish_failed(database, session_id, code, &message);
 }
 
 pub fn resume(
@@ -1508,59 +2030,121 @@ pub fn resume(
         "operation":"RESUME"
     });
     let mut connection = database.open_connection()?;
-    let tx = connection
-        .transaction()
-        .map_err(|error| format!("begin Claude resume transaction: {error}"))?;
-    tx.execute(
-        "UPDATE agent_sessions SET state='STARTING',ended_at=NULL,provider_session_provenance_json=?2,provider_cwd_identity=?3 WHERE id=?1 AND project_id=?4 AND provider='CLAUDE'",
-        params![session_id, provenance.to_string(), cwd.to_string_lossy().to_string(), project_id],
-    )
-    .map_err(|error| format!("persist Claude resume: {error}"))?;
-    crate::control_plane::mark_truth_dirty_tx(&tx, project_id, "AGENT_SESSION_RESUME_REQUESTED")?;
-    tx.commit().map_err(|error| error.to_string())?;
-    insert_event(
-        &connection,
-        session_id,
-        "RESUME_REQUESTED",
-        json!({"provider":"CLAUDE","providerSessionId":provider_session_id,"projectId":project_id,"taskId":session.task_id,"cwd":cwd.to_string_lossy()}),
-    )?;
-    let mut command = background_command(&executable);
-    command
-        .args(fixed_claude_args())
-        .arg("--resume")
-        .arg(provider_session_id)
-        .current_dir(&cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("CLAUDE_PROCESS_SPAWN_FAILED: {error}"))?;
-    let mut stdin = child.stdin.take().ok_or("CLAUDE_STDIN_UNAVAILABLE")?;
-    stdin
-        .write_all(prompt.as_bytes())
-        .map_err(|error| format!("CLAUDE_PROMPT_WRITE_FAILED: {error}"))?;
-    let stdout = child.stdout.take().ok_or("CLAUDE_STDOUT_UNAVAILABLE")?;
-    let stderr = child.stderr.take().ok_or("CLAUDE_STDERR_UNAVAILABLE")?;
-    let pid = child.id();
-    let child = Arc::new(Mutex::new(child));
-    let stop_requested = Arc::new(AtomicBool::new(false));
-    let escalation_requested = Arc::new(AtomicBool::new(false));
-    center
-        .claude_processes
-        .lock()
-        .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED")?
-        .insert(session_id.to_string(), OwnedClaudeProcess { child: child.clone(), pid, stop_requested: stop_requested.clone(), escalation_requested });
-    let tx = connection.transaction().map_err(|error| error.to_string())?;
-    tx.execute("UPDATE agent_sessions SET state='RUNNING' WHERE id=?1", [session_id])
-        .map_err(|error| error.to_string())?;
-    crate::control_plane::mark_truth_dirty_tx(&tx, project_id, "AGENT_SESSION_RESUMED")?;
-    tx.commit().map_err(|error| error.to_string())?;
-    let processes = center.claude_processes.clone();
-    let database_for_thread = database.clone();
-    let session_for_thread = session_id.to_string();
-    thread::spawn(move || run_claude_session(database_for_thread, processes, session_for_thread, child, stop_requested, stdout, stderr));
-    load_session(database, session_id)
+    let transition_result = (|| -> Result<(), String> {
+        let tx = connection
+            .transaction()
+            .map_err(|error| format!("begin Claude resume transaction: {error}"))?;
+        let changed = tx.execute(
+            "UPDATE agent_sessions SET state='STARTING',ended_at=NULL,provider_session_provenance_json=?2,provider_cwd_identity=?3 WHERE id=?1 AND project_id=?4 AND provider='CLAUDE'",
+            params![session_id, provenance.to_string(), cwd.to_string_lossy().to_string(), project_id],
+        )
+        .map_err(|error| format!("persist Claude resume: {error}"))?;
+        if changed != 1 {
+            return Err("CLAUDE_RESUME_STATE_TRANSITION_FAILED".into());
+        }
+        crate::control_plane::mark_truth_dirty_tx(&tx, project_id, "AGENT_SESSION_RESUME_REQUESTED")?;
+        tx.commit().map_err(|error| error.to_string())
+    })();
+    if let Err(error) = transition_result {
+        fail_resume_setup(center, database, session_id, None, false, "CONTROL_PLANE", &error);
+        return Err(error);
+    }
+    let mut setup_child: Option<Arc<Mutex<Child>>> = None;
+    let mut setup_registered = false;
+    let mut setup_stage = "CONTROL_PLANE";
+    let setup_result = (|| -> Result<AgentSession, String> {
+        insert_event(
+            &connection,
+            session_id,
+            "RESUME_REQUESTED",
+            json!({"provider":"CLAUDE","providerSessionId":provider_session_id,"projectId":project_id,"taskId":session.task_id,"cwd":cwd.to_string_lossy()}),
+        )?;
+        setup_stage = "SPAWN";
+        let mut command = background_command(&executable);
+        command
+            .args(exact_claude_resume_args(provider_session_id))
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = Arc::new(Mutex::new(
+            command
+                .spawn()
+                .map_err(|error| format!("{error}"))?,
+        ));
+        let pid = child
+            .lock()
+            .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED".to_string())?
+            .id();
+        setup_child = Some(child.clone());
+
+        setup_stage = "STDIN";
+        let mut stdin = child
+            .lock()
+            .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED".to_string())?
+            .stdin
+            .take()
+            .ok_or_else(|| "Claude did not expose stdin".to_string())?;
+        setup_stage = "PROMPT_WRITE";
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|error| format!("{error}"))?;
+        setup_stage = "STDOUT";
+        let stdout = child
+            .lock()
+            .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED".to_string())?
+            .stdout
+            .take()
+            .ok_or_else(|| "Claude did not expose stdout".to_string())?;
+        setup_stage = "STDERR";
+        let stderr = child
+            .lock()
+            .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED".to_string())?
+            .stderr
+            .take()
+            .ok_or_else(|| "Claude did not expose stderr".to_string())?;
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let escalation_requested = Arc::new(AtomicBool::new(false));
+        setup_stage = "OWNERSHIP";
+        center
+            .claude_processes
+            .lock()
+            .map_err(|_| "CLAUDE_PROCESS_LOCK_POISONED".to_string())?
+            .insert(session_id.to_string(), OwnedClaudeProcess { child: child.clone(), pid, stop_requested: stop_requested.clone(), escalation_requested });
+        setup_registered = true;
+        setup_stage = "RUNNING";
+        let running_result = (|| -> Result<(), String> {
+            let tx = connection
+                .transaction()
+                .map_err(|error| error.to_string())?;
+            let changed = tx.execute(
+                "UPDATE agent_sessions SET state='RUNNING' WHERE id=?1 AND state='STARTING'",
+                [session_id],
+            )
+            .map_err(|error| format!("persist Claude running state: {error}"))?;
+            if changed != 1 {
+                return Err("resume state was not STARTING".into());
+            }
+            crate::control_plane::mark_truth_dirty_tx(&tx, project_id, "AGENT_SESSION_RESUMED")?;
+            tx.commit().map_err(|error| error.to_string())
+        })();
+        if let Err(error) = running_result {
+            return Err(format!("{setup_stage}: {error}"));
+        }
+        let session = load_session(database, session_id)?;
+        let processes = center.claude_processes.clone();
+        let database_for_thread = database.clone();
+        let session_for_thread = session_id.to_string();
+        thread::spawn(move || run_claude_session(database_for_thread, processes, session_for_thread, child, stop_requested, stdout, stderr));
+        Ok(session)
+    })();
+    match setup_result {
+        Ok(session) => Ok(session),
+        Err(error) => {
+            fail_resume_setup(center, database, session_id, setup_child, setup_registered, setup_stage, &error);
+            Err(error)
+        }
+    }
 }
 
 pub fn resize(
@@ -1673,6 +2257,22 @@ fn load_session(
                     .and_then(Value::as_str)
                     .unwrap_or_default(),
             ),
+            "ATTENTION_STATE" => {
+                diagnostic_code = event
+                    .payload
+                    .get("diagnosticCode")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                diagnostic_message = event
+                    .payload
+                    .get("diagnosticMessage")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            "SESSION_STATE" => {
+                diagnostic_code = None;
+                diagnostic_message = None;
+            }
             "SESSION_FINISHED" => {
                 exit_code = event
                     .payload
@@ -1904,6 +2504,9 @@ fn adapter_session_from_center(session: AgentSession) -> crate::codex_adapter::A
         diagnostic_code: session.diagnostic_code,
         diagnostic_message: session.diagnostic_message,
         prompt_body: session.prompt_body,
+        provider_session_id: session.provider_session_id,
+        provider_session_provenance: session.provider_session_provenance,
+        provider_cwd_identity: session.provider_cwd_identity,
     }
 }
 
@@ -1912,7 +2515,30 @@ mod tests {
     use super::*;
     use crate::stream_sanitizer::sanitize_record;
     use std::fs;
+    use std::process::{Command, Stdio};
     use tempfile::tempdir;
+
+    #[cfg(windows)]
+    fn long_running_fixture() -> Child {
+        Command::new("ping.exe")
+            .args(["127.0.0.1", "-n", "30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(not(windows))]
+    fn long_running_fixture() -> Child {
+        Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    }
 
     #[test]
     fn provider_parser_rejects_unallowlisted_values() {
@@ -2195,6 +2821,9 @@ mod tests {
                 "--restricted",
             ]
         );
+        let resume_args = exact_claude_resume_args("canonical-session");
+        assert_eq!(resume_args[resume_args.len() - 2], "--resume");
+        assert_eq!(resume_args.last().unwrap(), "canonical-session");
     }
 
     #[test]
@@ -2247,6 +2876,11 @@ mod tests {
         .unwrap();
         assert_eq!(final_record.event_type, "CLAUDE_FINAL_RESPONSE");
         assert_eq!(final_record.state, Some("COMPLETED"));
+        let failed_result = parse_claude_record(
+            r#"{"type":"result","subtype":"success","session_id":"claude-session-1","error":"network failure"}"#,
+        )
+        .unwrap();
+        assert_eq!(failed_result.state, Some("NETWORK_ERROR"));
         assert_eq!(parse_claude_record("not-json").unwrap_err(), "CLAUDE_STREAM_MALFORMED_JSON");
     }
 
@@ -2268,6 +2902,205 @@ mod tests {
             classify_claude_error("provider returned an unknown failure"),
             ("FAILED", "CLAUDE_PROVIDER_ERROR")
         );
+    }
+
+    #[test]
+    fn auth_probe_is_fail_closed_and_preserves_explicit_evidence() {
+        assert_eq!(
+            classify_claude_auth_probe(false, true, r#"{"loggedIn":true}"#, ""),
+            ClaudeAuthProbe::Authenticated
+        );
+        assert_eq!(
+            classify_claude_auth_probe(false, true, r#"{"loggedIn":false}"#, ""),
+            ClaudeAuthProbe::AuthRequired
+        );
+        assert_eq!(
+            classify_claude_auth_probe(false, false, r#"{"loggedIn":true}"#, ""),
+            ClaudeAuthProbe::ProcessError
+        );
+        assert_eq!(
+            classify_claude_auth_probe(false, false, "", "network connection reset"),
+            ClaudeAuthProbe::NetworkError
+        );
+        assert_eq!(
+            classify_claude_auth_probe(false, false, "", "explicit rate limit exceeded"),
+            ClaudeAuthProbe::UsageLimited
+        );
+        assert_eq!(
+            classify_claude_auth_probe(true, false, "", ""),
+            ClaudeAuthProbe::Timeout
+        );
+        assert_eq!(
+            classify_claude_auth_probe(false, true, "not-json", ""),
+            ClaudeAuthProbe::AuthUnverified
+        );
+        assert_eq!(
+            classify_claude_auth_probe(false, true, "usage information", ""),
+            ClaudeAuthProbe::AuthUnverified
+        );
+    }
+
+    #[test]
+    fn owned_stop_reaches_process_without_wait_lock_and_preserves_unrelated_process() {
+        let owned = Arc::new(Mutex::new(long_running_fixture()));
+        let unrelated = Arc::new(Mutex::new(long_running_fixture()));
+        let monitor = {
+            let child = owned.clone();
+            thread::spawn(move || monitor_owned_child(child))
+        };
+        let pid = owned.lock().unwrap().id();
+        let started = Instant::now();
+        let termination = terminate_owned_child_bounded(&owned, pid);
+        assert!(termination.exited);
+        assert!(started.elapsed() < Duration::from_secs(4));
+        assert!(unrelated
+            .lock()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+        let _ = unrelated.lock().unwrap().kill();
+        let _ = unrelated.lock().unwrap().wait();
+        assert!(monitor.join().unwrap().is_some());
+    }
+
+    #[test]
+    fn resume_setup_cleanup_kills_child_removes_ownership_and_marks_failed() {
+        let database_directory = tempdir().unwrap();
+        let project_directory = tempdir().unwrap();
+        let database = crate::db::DatabaseState::initialize(database_directory.path().to_path_buf()).unwrap();
+        let project = crate::projects::register_project(
+            &database,
+            crate::projects::RegisterProjectRequest {
+                path: project_directory.path().to_string_lossy().into(),
+                name: Some("Resume cleanup fixture".into()),
+            },
+        )
+        .unwrap();
+        let session_id = "resume-cleanup-fixture";
+        database
+            .open_connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_sessions (id,project_id,provider,state,created_at) VALUES (?1,?2,'CLAUDE','STARTING',?3)",
+                params![session_id, project.id, utc_timestamp()],
+            )
+            .unwrap();
+        let child = Arc::new(Mutex::new(long_running_fixture()));
+        let pid = child.lock().unwrap().id();
+        let center = AgentSessionCenter::default();
+        center.claude_processes.lock().unwrap().insert(
+            session_id.into(),
+            OwnedClaudeProcess {
+                child: child.clone(),
+                pid,
+                stop_requested: Arc::new(AtomicBool::new(false)),
+                escalation_requested: Arc::new(AtomicBool::new(false)),
+            },
+        );
+        fail_resume_setup(
+            &center,
+            &database,
+            session_id,
+            Some(child.clone()),
+            true,
+            "PROMPT_WRITE",
+            "fixture prompt write failed",
+        );
+        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+        assert!(!center.claude_processes.lock().unwrap().contains_key(session_id));
+        let session = load_session(&database, session_id).unwrap();
+        assert_eq!(session.state, "FAILED");
+        assert!(session
+            .events
+            .iter()
+            .any(|event| event.event_type == "SESSION_FINISHED"
+                && event.payload["diagnosticCode"] == "CLAUDE_RESUME_PROMPT_WRITE_FAILED"));
+    }
+
+    #[test]
+    fn provider_session_identity_is_compare_and_set_and_provenance_is_updated() {
+        let database_directory = tempdir().unwrap();
+        let project_directory = tempdir().unwrap();
+        let database = crate::db::DatabaseState::initialize(database_directory.path().to_path_buf()).unwrap();
+        let project = crate::projects::register_project(
+            &database,
+            crate::projects::RegisterProjectRequest {
+                path: project_directory.path().to_string_lossy().into(),
+                name: Some("Identity fixture".into()),
+            },
+        )
+        .unwrap();
+        let session_id = "identity-cas-fixture";
+        let mut connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_sessions (id,project_id,provider,state,created_at,provider_session_provenance_json) VALUES (?1,?2,'CLAUDE','RUNNING',?3,?4)",
+                params![session_id, project.id, utc_timestamp(), json!({"provider":"CLAUDE"}).to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            accept_claude_provider_session_id(&mut connection, session_id, "canonical-1").unwrap(),
+            ProviderSessionIdentity::Accepted("canonical-1".into())
+        );
+        assert_eq!(
+            accept_claude_provider_session_id(&mut connection, session_id, "canonical-1").unwrap(),
+            ProviderSessionIdentity::Accepted("canonical-1".into())
+        );
+        assert!(matches!(
+            accept_claude_provider_session_id(&mut connection, session_id, "conflict-2").unwrap(),
+            ProviderSessionIdentity::Conflict { canonical: Some(ref value), .. } if value == "canonical-1"
+        ));
+        let canonical: String = connection
+            .query_row(
+                "SELECT provider_session_id FROM agent_sessions WHERE id=?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let provenance: String = connection
+            .query_row(
+                "SELECT provider_session_provenance_json FROM agent_sessions WHERE id=?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(canonical, "canonical-1");
+        assert_eq!(serde_json::from_str::<Value>(&provenance).unwrap()["providerSessionId"], "canonical-1");
+    }
+
+    #[test]
+    fn live_attention_state_is_durable_and_can_return_to_running() {
+        let database_directory = tempdir().unwrap();
+        let project_directory = tempdir().unwrap();
+        let database = crate::db::DatabaseState::initialize(database_directory.path().to_path_buf()).unwrap();
+        let project = crate::projects::register_project(
+            &database,
+            crate::projects::RegisterProjectRequest {
+                path: project_directory.path().to_string_lossy().into(),
+                name: Some("Attention fixture".into()),
+            },
+        )
+        .unwrap();
+        let session_id = "attention-fixture";
+        database
+            .open_connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO agent_sessions (id,project_id,provider,state,created_at) VALUES (?1,?2,'CLAUDE','RUNNING',?3)",
+                params![session_id, project.id, utc_timestamp()],
+            )
+            .unwrap();
+        let mut connection = database.open_connection().unwrap();
+        persist_live_claude_state(&database, &mut connection, session_id, "WAITING_PERMISSION").unwrap();
+        assert_eq!(load_session(&database, session_id).unwrap().state, "WAITING_PERMISSION");
+        persist_live_claude_state(&database, &mut connection, session_id, "WAITING_USER").unwrap();
+        assert_eq!(load_session(&database, session_id).unwrap().state, "WAITING_USER");
+        persist_live_claude_state(&database, &mut connection, session_id, "RUNNING").unwrap();
+        assert_eq!(load_session(&database, session_id).unwrap().state, "RUNNING");
+        let events = load_session(&database, session_id).unwrap().events;
+        assert!(events.iter().any(|event| event.event_type == "ATTENTION_STATE" && event.payload["state"] == "WAITING_PERMISSION"));
+        assert!(events.iter().any(|event| event.event_type == "ATTENTION_STATE" && event.payload["state"] == "WAITING_USER"));
     }
 
     #[test]
@@ -2304,6 +3137,46 @@ mod tests {
         assert_eq!(session.provider_cwd_identity, project_directory.path().canonicalize().unwrap().to_string_lossy());
         assert_eq!(session.provider_session_provenance.unwrap()["provider"], "CLAUDE");
         assert!(session.supports_resume);
+    }
+
+    #[test]
+    fn exact_resume_requires_provider_identity_and_canonical_cwd() {
+        let db_directory = tempdir().unwrap();
+        let project_directory = tempdir().unwrap();
+        let database = crate::db::DatabaseState::initialize(db_directory.path().to_path_buf()).unwrap();
+        let project = crate::projects::register_project(
+            &database,
+            crate::projects::RegisterProjectRequest {
+                path: project_directory.path().to_string_lossy().into(),
+                name: Some("Resume boundary fixture".into()),
+            },
+        )
+        .unwrap();
+        let missing = "resume-missing-id";
+        let mismatch = "resume-cwd-mismatch";
+        let canonical_cwd = project_directory.path().canonicalize().unwrap().to_string_lossy().to_string();
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_sessions (id,project_id,provider,state,created_at,prompt_body,provider_cwd_identity) VALUES (?1,?2,'CLAUDE','ORPHANED',?3,?4,?5)",
+                params![missing, project.id, utc_timestamp(), "resume", canonical_cwd],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO agent_sessions (id,project_id,provider,state,created_at,prompt_body,provider_session_id,provider_cwd_identity) VALUES (?1,?2,'CLAUDE','ORPHANED',?3,?4,?5,?6)",
+                params![mismatch, project.id, utc_timestamp(), "resume", "canonical", "wrong-cwd"],
+            )
+            .unwrap();
+        let center = AgentSessionCenter::default();
+        assert_eq!(
+            resume(&center, &database, &project.id, missing).unwrap_err(),
+            "CLAUDE_RESUME_PROVIDER_SESSION_ID_MISSING"
+        );
+        assert_eq!(
+            resume(&center, &database, &project.id, mismatch).unwrap_err(),
+            "CLAUDE_RESUME_CWD_MISMATCH"
+        );
     }
 
     #[cfg(all(windows, feature = "pty-support"))]

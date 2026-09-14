@@ -1,5 +1,6 @@
 use crate::db::DatabaseState;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -63,6 +64,10 @@ pub struct AdapterSession {
     pub diagnostic_code: Option<String>,
     pub diagnostic_message: Option<String>,
     pub prompt_body: Option<String>,
+    /// Provider-native identity is durable lifecycle provenance, not a credential.
+    pub provider_session_id: Option<String>,
+    pub provider_session_provenance: Option<Value>,
+    pub provider_cwd_identity: String,
 }
 
 /// Common provider lifecycle owned by H!veAI. Implementations must keep all
