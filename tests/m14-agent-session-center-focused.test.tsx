@@ -8,7 +8,7 @@ const readiness = [
   { provider: "CODEX", available: true, version: "codex-cli 0.149.1", readinessState: "VERSION_VERIFIED_AUTH_UNKNOWN", diagnosticCode: "AUTH_UNKNOWN", diagnosticMessage: "Codex authentication is determined by operation", capabilities: ["START", "LIST", "STOP"], supportsPty: false, supportsResume: false, checkedAt: "2026-09-02T10:00:00Z" },
   { provider: "CLAUDE", available: true, version: "2.1.248 (Claude Code)", readinessState: "VERSION_VERIFIED_AUTH_UNKNOWN", diagnosticCode: "AUTH_UNKNOWN", diagnosticMessage: "Claude authentication is determined by operation", capabilities: ["START", "LIST", "STOP", "BOUNDED_STREAM_JSON"], supportsPty: false, supportsResume: false, checkedAt: "2026-09-02T10:00:00Z" },
 ];
-const session = { id: "claude-session", provider: "CLAUDE", projectId: "scrubbots", taskId: null, operationKind: "FREEFORM_PROJECT_OPERATION", state: "COMPLETED", cwd: "C:\\Projects\\ScrubBots", startedAt: "2026-09-02T10:01:00Z", endedAt: "2026-09-02T10:01:04Z", exitCode: 0, stdout: "read-only repository summary", stderr: "", stdoutTruncated: false, stderrTruncated: false, diagnosticCode: null, diagnosticMessage: null, promptReference: "sha256:fixture", promptBody: "Summarize the repository safely.", providerVersion: "2.1.248 (Claude Code)", elapsedMs: 4000, supportsResume: false, supportsPty: false, events: [{ sequence: 1, id: "event-1", eventType: "SESSION_STARTED", payload: { providerVersion: "2.1.248 (Claude Code)" }, occurredAt: "2026-09-02T10:01:00Z" }] };
+const session = { id: "claude-session", provider: "CLAUDE", projectId: "scrubbots", taskId: null, operationKind: "FREEFORM_PROJECT_OPERATION", state: "COMPLETED", cwd: "C:\\Projects\\ScrubBots", startedAt: "2026-09-02T10:01:00Z", endedAt: "2026-09-02T10:01:04Z", exitCode: 0, stdout: "read-only repository summary", stderr: "", stdoutTruncated: false, stderrTruncated: false, diagnosticCode: null, diagnosticMessage: null, promptReference: "sha256:fixture", promptBody: "Summarize the repository safely.", providerVersion: "2.1.248 (Claude Code)", elapsedMs: 4000, supportsResume: false, canStop: false, supportsPty: false, events: [{ sequence: 1, id: "event-1", eventType: "SESSION_STARTED", payload: { providerVersion: "2.1.248 (Claude Code)" }, occurredAt: "2026-09-02T10:01:00Z" }] };
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 
@@ -163,7 +163,7 @@ describe("M14 Agent Session Center", () => {
   });
 
   it("keeps the required start order and gives a running session a live current conversation", async () => {
-    const running = { ...session, id: "running-session", state: "RUNNING", endedAt: null, stdout: JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Reading the project now." }] } }) };
+    const running = { ...session, id: "running-session", state: "RUNNING", canStop: true, endedAt: null, stdout: JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Reading the project now." }] } }) };
     invoke.mockImplementation((command: string) => {
       if (command === "hiveai_projects_list") return Promise.resolve(records);
       if (command === "hiveai_agent_readiness") return Promise.resolve(readiness);
