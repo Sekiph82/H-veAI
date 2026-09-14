@@ -4,7 +4,7 @@ import type { ProjectRecord } from "./projectRegistry";
 import type { ControlPlaneSummary } from "./controlPlane";
 
 export type ManifestStatus = "VALID" | "PARTIAL" | "ABSENT" | "MALFORMED" | "STALE" | "UNAVAILABLE";
-export type TaskAuthority = "CANONICAL" | "GITHUB_TASKS_ONLY" | "NOT_CANONICALIZED" | "FALLBACK_M08_M09";
+export type TaskAuthority = "CANONICAL" | "GITHUB_TASKS_ONLY" | "ROOT_TASKS_UNAVAILABLE" | "NOT_CANONICALIZED" | "FALLBACK_M08_M09";
 
 export type CommandCenterTask = {
   taskId: string;
@@ -88,13 +88,20 @@ export type CommandCenterProject = {
   canonicalTaskSource: string | null;
   currentTask: CommandCenterTask | null;
   currentState: string | null;
+  currentMilestone: string | null;
   lastAction: CommandCenterAction | null;
   nextAction: string | null;
+  requiredActor: string | null;
+  blockers: string[];
   allowedActors: string[];
   totalTasks: number | null;
   activeTasks: number | null;
   completedTasks: number | null;
   progressPercent: number | null;
+  progressScope: string | null;
+  authoritySource: string;
+  provenance: string[];
+  reconciliationState: string;
   warnings: string[];
   refreshStatus: string | null;
   refreshAt: string | null;
@@ -134,8 +141,8 @@ export function registryFallback(records: ProjectRecord[]): CommandCenterSnapsho
     projectId: record.id, name: record.name, registryStatus: record.status, health: "UNKNOWN" as const,
     manifestStatus: "UNAVAILABLE" as const, trackingMode: null, taskAuthority: "FALLBACK_M08_M09" as const, provenanceMode: "REGISTRY_ONLY",
     materialized: { projectStatus: null, health: null, currentMilestone: null, currentTaskTitle: null, currentTaskId: null, declaredWorkflowState: null, progressRaw: null, progressPercent: null, requiredActor: null, nextAction: null, waitingOn: null, lastMeaningfulUpdate: null, currentWork: [], blockersWaiting: [], milestoneSummary: [], qualityVerification: [], recentMeaningfulActivity: [], provenance: [] },
-    canonicalTaskSource: null, currentTask: null, currentState: null, lastAction: null, nextAction: null, allowedActors: [],
-    totalTasks: null, activeTasks: null, completedTasks: null, progressPercent: null, warnings: ["Live Command Center snapshot is unavailable; showing Registry identity only."], refreshStatus: "UNAVAILABLE", refreshAt: null, refreshError: null,
+    canonicalTaskSource: null, currentTask: null, currentState: null, currentMilestone: null, lastAction: null, nextAction: null, requiredActor: null, blockers: [], allowedActors: [],
+    totalTasks: null, activeTasks: null, completedTasks: null, progressPercent: null, progressScope: null, authoritySource: "UNAVAILABLE", provenance: [], reconciliationState: "NEEDS_RECONCILIATION", warnings: ["Live Command Center snapshot is unavailable; showing Registry identity only."], refreshStatus: "UNAVAILABLE", refreshAt: null, refreshError: null,
   }));
   return { generatedAt: new Date().toISOString(), projects, kpis: { projects: records.length, activeTasks: null, needsAttention: null, running: null, completedTasks: null, healthy: 0, healthDetail: `${records.length} registered`, authorityDetail: "Task evidence unavailable" }, attention: [], workQueue: [], recentActivity: [], engineeringBrief: { facts: [], recommendation: null }, warnings: ["Live Command Center snapshot is unavailable; showing Registry identity only."] };
 }

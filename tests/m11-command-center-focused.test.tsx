@@ -22,8 +22,8 @@ const records = [
 const snapshot = {
   generatedAt: "2026-08-26T12:00:00Z",
   projects: [
-    { projectId: "project-1", name: "Alpha", registryStatus: "ACTIVE", health: "ATTENTION", manifestStatus: "VALID", taskAuthority: "CANONICAL", provenanceMode: "PROJECT_DASHBOARD", canonicalTaskSource: "TASKS.md", currentTask: { taskId: "task-1", title: "Canonical task", sourcePath: "TASKS.md", parsedStatus: "IN_PROGRESS", workflowState: "IMPLEMENTATION", requiredActor: "Codex" }, currentState: "IMPLEMENTATION", lastAction: null, nextAction: "Run focused tests", allowedActors: ["Codex"], totalTasks: 2, activeTasks: 1, completedTasks: 1, progressPercent: 50, warnings: [], refreshStatus: "SUCCESS", refreshAt: "2026-08-26T12:00:00Z", refreshError: null },
-    { projectId: "project-2", name: "Beta", registryStatus: "ACTIVE", health: "UNKNOWN", manifestStatus: "ABSENT", taskAuthority: "NOT_CANONICALIZED", provenanceMode: "PROJECT_DASHBOARD", canonicalTaskSource: null, currentTask: null, currentState: null, lastAction: null, nextAction: null, allowedActors: [], totalTasks: null, activeTasks: null, completedTasks: null, progressPercent: null, warnings: ["No verified task source"], refreshStatus: "DEGRADED", refreshAt: "2026-08-26T12:00:00Z", refreshError: "M09 refresh unavailable" },
+    { projectId: "project-1", name: "Alpha", registryStatus: "ACTIVE", health: "ATTENTION", manifestStatus: "VALID", taskAuthority: "CANONICAL", provenanceMode: "PROJECT_DASHBOARD", canonicalTaskSource: "TASKS.md", currentTask: { taskId: "task-1", title: "Canonical task", sourcePath: "TASKS.md", parsedStatus: "IN_PROGRESS", workflowState: "IMPLEMENTATION", requiredActor: "Codex" }, currentState: "IMPLEMENTATION", currentMilestone: "M11", lastAction: null, nextAction: "Run focused tests", requiredActor: "Codex", blockers: ["Canonical blocker"], allowedActors: ["Codex"], totalTasks: 2, activeTasks: 1, completedTasks: 1, progressPercent: 50, progressScope: "MILESTONE:M11", authoritySource: "TASKS.md", provenance: ["TASKS.md"], reconciliationState: "RESOLVED", warnings: [], refreshStatus: "SUCCESS", refreshAt: "2026-08-26T12:00:00Z", refreshError: null },
+    { projectId: "project-2", name: "Beta", registryStatus: "ACTIVE", health: "UNKNOWN", manifestStatus: "ABSENT", taskAuthority: "ROOT_TASKS_UNAVAILABLE", provenanceMode: "ROOT_TASKS_UNAVAILABLE", canonicalTaskSource: "TASKS.md", currentTask: null, currentState: null, currentMilestone: null, lastAction: null, nextAction: null, requiredActor: null, blockers: [], allowedActors: [], totalTasks: null, activeTasks: null, completedTasks: null, progressPercent: null, progressScope: null, authoritySource: "ROOT_TASKS_UNAVAILABLE", provenance: ["TASKS.md"], reconciliationState: "NEEDS_RECONCILIATION", warnings: ["Restore a readable repository-root TASKS.md"], refreshStatus: "DEGRADED", refreshAt: "2026-08-26T12:00:00Z", refreshError: "M09 refresh unavailable", githubTracking: { currentMilestone: "POISON MILESTONE", workflowState: "POISON WORKFLOW", requiredActor: "POISON ACTOR", blockers: ["POISON BLOCKER"], repository: "Sekiph82/H-veAI", branch: "main", remoteHead: null } },
   ],
   kpis: { projects: 2, activeTasks: 1, needsAttention: 1, running: 0, completedTasks: 1, healthy: 0, healthDetail: "1 attention", authorityDetail: "1 canonical, 1 not canonicalized" },
   attention: [{ id: "attention-1", projectId: "project-1", projectName: "Alpha", taskId: "task-1", title: "Canonical task", state: "AUDIT_REQUIRED", detail: "Review evidence", category: "TASK" }],
@@ -59,9 +59,20 @@ describe("M11 Command Center evidence surface", () => {
     expect(await screen.findByText("Canonical task")).toBeInTheDocument();
     expect(screen.getByText("1 canonical, 1 not canonicalized")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Beta" }));
-    await waitFor(() => expect(screen.getByText("TASK AUTHORITY NOT YET CANONICALIZED")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Current task unavailable")).toBeInTheDocument());
+    expect(screen.getByText("Current task unavailable")).toBeInTheDocument();
+    expect(screen.queryByText(/POISON/)).not.toBeInTheDocument();
     expect(screen.queryByText(/GPT-4o/)).not.toBeInTheDocument();
     expect(screen.queryByText(/recommendation/i)).not.toBeInTheDocument();
+  });
+
+  it("renders current milestone and actor from normalized root TASKS fields", async () => {
+    renderCommandCenter();
+    expect(await screen.findByText("Canonical task")).toBeInTheDocument();
+    expect(screen.getByText("Milestone: M11")).toBeInTheDocument();
+    expect(screen.getByText("Required actor: Codex")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Workflow" }));
+    expect(screen.getByText("Blocker: Canonical blocker")).toBeInTheDocument();
   });
 
   it("keeps rail selection in place and opens the selected cockpit explicitly", async () => {

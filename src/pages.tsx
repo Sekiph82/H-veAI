@@ -3525,11 +3525,11 @@ export function Tasks() {
         <SectionHeader title="Live task status" detail={githubRemote ? "GitHub-authoritative" : "Native project evidence"} />
         <div className="task-status-grid">
           <div className="task-status-primary"><span className="eyebrow">Current task</span><h2>{commandProject?.currentTask?.title ?? "Unavailable"}</h2><p>{commandProject?.currentTask?.taskId ?? "No current task identifier"}</p><span className="status-badge">{commandProject?.currentState ?? "State unavailable"}</span></div>
-          <div className="task-status-next"><span className="eyebrow">Next action</span><strong>{commandProject?.nextAction ?? "Unavailable"}</strong><small>Required actor: {commandProject?.githubTracking?.requiredActor ?? "Unavailable"}</small></div>
+          <div className="task-status-next"><span className="eyebrow">Next action</span><strong>{commandProject?.nextAction ?? "Unavailable"}</strong><small>Required actor: {commandProject?.requiredActor ?? "Unavailable"}</small></div>
           <div className="task-status-counts"><span><b>{commandProject?.activeTasks == null ? "Unavailable" : commandProject.activeTasks}</b>Active/open</span><span><b>{running ? "1" : commandProject?.currentState ? "0" : "Unavailable"}</b>Running</span><span><b>{commandProject?.completedTasks == null ? "Unavailable" : commandProject.completedTasks}</b>Completed</span><span><b>{commandProject?.totalTasks == null ? "Unavailable" : commandProject.totalTasks}</b>Total</span></div>
         </div>
-          <div className="task-status-footer"><span>Completion: {commandProject?.progressPercent == null ? "Unavailable" : formatPercent(commandProject.progressPercent)}</span><span>Milestone: {commandProject?.githubTracking?.currentMilestone ?? "Unavailable"}</span><span>Execution: {commandProject?.githubTracking?.workflowState ?? "Unavailable"}</span><span>Last completed: {commandProject?.githubTracking?.lastCompletedTaskTitle ?? "Unavailable"}</span></div>
-        {commandProject?.githubTracking?.blockers.length ? <div className="project-intelligence-warning">{commandProject.githubTracking.blockers.join(" | ")}</div> : null}
+          <div className="task-status-footer"><span>Completion: {commandProject?.progressPercent == null ? "Unavailable" : formatPercent(commandProject.progressPercent)}</span><span>Milestone: {commandProject?.currentMilestone ?? "Unavailable"}</span><span>Execution: {commandProject?.currentState ?? "Unavailable"}</span><span>Last completed: {commandProject?.githubTracking?.lastCompletedTaskTitle ?? "Unavailable"}</span></div>
+        {commandProject?.blockers.length ? <div className="project-intelligence-warning">{commandProject.blockers.join(" | ")}</div> : null}
       </section>
       <section className="panel task-sources-workspace">
         <div className="task-sources-toolbar">

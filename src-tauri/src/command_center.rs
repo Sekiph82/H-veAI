@@ -60,8 +60,11 @@ pub struct ProjectOperationSummary {
     pub canonical_task_source: Option<String>,
     pub current_task: Option<TaskSummary>,
     pub current_state: Option<String>,
+    pub current_milestone: Option<String>,
     pub last_action: Option<ActionSummary>,
     pub next_action: Option<String>,
+    pub required_actor: Option<String>,
+    pub blockers: Vec<String>,
     pub allowed_actors: Vec<String>,
     pub total_tasks: Option<usize>,
     pub active_tasks: Option<usize>,
@@ -231,7 +234,7 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
                         let detail = format!("Project reconciliation degraded: {error}");
                         push_portfolio_warning(&mut warnings, detail.clone());
                         (
-                            degraded_project_summary(database, &project, &detail),
+                            degraded_project_summary(&project, &detail),
                             vec![AttentionItem {
                                 id: format!("project-degraded:{}", project.id),
                                 project_id: project.id.clone(),
@@ -240,7 +243,7 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
                                 title: "Project requires reconciliation".into(),
                                 state: "NEEDS_ATTENTION".into(),
                                 detail,
-                                category: "CONTROL_PLANE".into(),
+                                category: "ROOT_TASKS".into(),
                                 operational_identity: None,
                             }],
                             Vec::new(),
@@ -258,9 +261,6 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
     }
     if has_legacy_projects {
         activity = read_activity(database, DEFAULT_ACTIVITY_LIMIT)?;
-        let (evidence_attention, evidence_queue) = read_evidence_items(database)?;
-        attention.extend(evidence_attention);
-        queue.extend(evidence_queue);
     }
     deduplicate_materialized_attention(&mut attention);
     deduplicate_materialized_queue(&mut queue);
@@ -310,11 +310,10 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
         .iter()
         .all(|summary| summary.completed_tasks.is_some());
     let workflow_known = summaries.iter().all(|summary| {
-        summary.task_authority == "GITHUB_TASKS_ONLY"
-            || !summary
-                .warnings
-                .iter()
-                .any(|warning| warning.starts_with("M10 workflow evidence unavailable"))
+        matches!(
+            summary.task_authority.as_str(),
+            "GITHUB_TASKS_ONLY" | "CANONICAL" | "ROOT_TASKS_UNAVAILABLE"
+        )
     });
     let authority_detail = if summaries
         .iter()
@@ -327,6 +326,24 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
         )
     };
     let health_detail = format!("{healthy} / {} healthy", summaries.len());
+    let brief_source_class = if summaries
+        .iter()
+        .all(|summary| summary.task_authority == "GITHUB_TASKS_ONLY")
+    {
+        "GITHUB_TASKS_ONLY"
+    } else if summaries
+        .iter()
+        .all(|summary| summary.task_authority == "CANONICAL")
+    {
+        "ROOT_TASKS"
+    } else {
+        "TASKS_AUTHORITY"
+    };
+    let brief_source = if brief_source_class == "GITHUB_TASKS_ONLY" {
+        "GitHub tracked-branch root TASKS.md"
+    } else {
+        "Repository-root TASKS.md"
+    };
     let mut facts = vec![
         BriefFact {
             label: "Registered projects".into(),
@@ -347,9 +364,9 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
             } else {
                 "Unavailable".into()
             },
-            source: "GitHub root TASKS.md".into(),
+            source: brief_source.into(),
             provenance: BriefProvenance {
-                source_class: "GITHUB_TASKS_ONLY".into(),
+                source_class: brief_source_class.into(),
                 project_id: summaries.first().map(|summary| summary.project_id.clone()),
                 source_path: summaries
                     .first()
@@ -365,9 +382,9 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
             } else {
                 "Unavailable".into()
             },
-            source: "GitHub root TASKS.md workflow".into(),
+            source: brief_source.into(),
             provenance: BriefProvenance {
-                source_class: "GITHUB_TASKS_ONLY".into(),
+                source_class: brief_source_class.into(),
                 project_id: attention.first().map(|item| item.project_id.clone()),
                 source_path: None,
                 evidence_type: attention.first().map(|item| item.category.clone()),
@@ -385,9 +402,9 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
             } else {
                 "Unavailable".into()
             },
-            source: "GitHub root TASKS.md".into(),
+            source: brief_source.into(),
             provenance: BriefProvenance {
-                source_class: "GITHUB_TASKS_ONLY".into(),
+                source_class: brief_source_class.into(),
                 project_id: queue.first().map(|item| item.project_id.clone()),
                 source_path: None,
                 evidence_type: queue.first().map(|item| item.stage.clone()),
@@ -448,45 +465,40 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
     })
 }
 
-fn degraded_project_summary(
-    database: &DatabaseState,
-    project: &ProjectRecord,
-    detail: &str,
-) -> ProjectOperationSummary {
-    let control_plane = control_plane::snapshot(database, &project.id).ok();
+fn degraded_project_summary(project: &ProjectRecord, detail: &str) -> ProjectOperationSummary {
     ProjectOperationSummary {
         project_id: project.id.clone(),
         name: project.name.clone(),
         registry_status: project.status.clone(),
         health: "NEEDS_ATTENTION".into(),
         manifest_status: "UNAVAILABLE".into(),
-        tracking_mode: None,
-        task_authority: "CONTROL_PLANE_RECONCILIATION_REQUIRED".into(),
-        provenance_mode: "CONTROL_PLANE_DEGRADED".into(),
+        tracking_mode: Some("ROOT_TASKS_ONLY".into()),
+        task_authority: "ROOT_TASKS_UNAVAILABLE".into(),
+        provenance_mode: "ROOT_TASKS_UNAVAILABLE".into(),
         materialized: project_dashboard::MaterializedDashboardStatus::default(),
-        canonical_task_source: None,
+        canonical_task_source: Some("TASKS.md".into()),
         current_task: None,
         current_state: None,
+        current_milestone: None,
         last_action: None,
-        next_action: Some("Reconcile project control plane".into()),
+        next_action: Some("Restore a readable repository-root TASKS.md".into()),
+        required_actor: None,
+        blockers: Vec::new(),
         allowed_actors: Vec::new(),
         total_tasks: None,
         active_tasks: None,
         completed_tasks: None,
         progress_percent: None,
         progress_scope: None,
-        authority_source: "NEEDS_RECONCILIATION".into(),
+        authority_source: "ROOT_TASKS_UNAVAILABLE".into(),
         provenance: Vec::new(),
         reconciliation_state: "NEEDS_RECONCILIATION".into(),
         warnings: vec![detail.into()],
         refresh_status: None,
         refresh_at: None,
         refresh_error: Some(detail.into()),
-        control_plane: control_plane.as_ref().map(control_plane::summary),
-        truth_sync: control_plane
-            .as_ref()
-            .map(|value| value.truth_sync.clone())
-            .unwrap_or_default(),
+        control_plane: None,
+        truth_sync: control_plane::TruthSyncState::default(),
         github_tracking: None,
     }
 }
@@ -508,8 +520,11 @@ pub(crate) fn remote_project_summary(
         canonical_task_source: Some("TASKS.md".into()),
         current_task: None,
         current_state: None,
+        current_milestone: None,
         last_action: None,
         next_action: None,
+        required_actor: None,
+        blockers: Vec::new(),
         allowed_actors: Vec::new(),
         total_tasks: None,
         active_tasks: None,
@@ -549,7 +564,10 @@ fn apply_remote_tracking(summary: &mut ProjectOperationSummary, remote: &RemoteT
         .current_task_status
         .clone()
         .or_else(|| remote.workflow_state.clone());
+    summary.current_milestone = remote.current_milestone.clone();
     summary.next_action = remote.next_action.clone();
+    summary.required_actor = remote.required_actor.clone();
+    summary.blockers = remote.blockers.clone();
     summary.allowed_actors = remote.required_actor.clone().into_iter().collect();
     summary.progress_percent = remote.progress_percent.map(|value| value.round() as u8);
     summary.progress_scope = remote.progress_scope_id.clone();
@@ -934,6 +952,11 @@ fn summarize_project(
         project_attention.extend(dashboard_attention);
         queue.extend(dashboard_queue);
     }
+    if root_tasks_only {
+        let (root_attention, root_queue) = root_tasks_current_items(&project, &truth);
+        project_attention.extend(root_attention);
+        queue.extend(root_queue);
+    }
     let has_remote_identity = project
         .repository
         .as_ref()
@@ -1004,8 +1027,11 @@ fn summarize_project(
             required_actor: task.required_actor.clone(),
         }),
         current_state,
+        current_milestone: truth.current_milestone.clone(),
         last_action,
         next_action,
+        required_actor: truth.required_actor.clone(),
+        blockers: truth.blockers.clone(),
         allowed_actors: if root_tasks_only || !allowed_actors.is_empty() {
             allowed_actors
         } else {
@@ -1613,6 +1639,76 @@ fn attention_state(state: WorkflowState) -> bool {
             | WorkflowState::VerifyRequired
     )
 }
+
+fn root_tasks_current_items(
+    project: &ProjectRecord,
+    truth: &control_plane::ProjectTruth,
+) -> (Vec<AttentionItem>, Vec<WorkQueueItem>) {
+    let state = truth
+        .workflow_state
+        .as_deref()
+        .unwrap_or("NEEDS_RECONCILIATION");
+    let needs_attention = truth.reconciliation_state == "NEEDS_RECONCILIATION"
+        || matches!(
+            state,
+            "BLOCKED" | "WAITING_HUMAN" | "WAITING_EXTERNAL"
+        );
+    let mut attention = Vec::new();
+    if needs_attention {
+        let detail = if !truth.blockers.is_empty() {
+            truth.blockers.join("; ")
+        } else {
+            truth
+                .next_action
+                .clone()
+                .unwrap_or_else(|| "Repository-root TASKS.md requires reconciliation".into())
+        };
+        attention.push(AttentionItem {
+            id: format!("root-tasks:attention:{}", project.id),
+            project_id: project.id.clone(),
+            project_name: project.name.clone(),
+            task_id: truth.current_task_id.clone(),
+            title: truth
+                .current_task_title
+                .clone()
+                .unwrap_or_else(|| "Repository-root TASKS.md requires reconciliation".into()),
+            state: state.into(),
+            detail: detail.clone(),
+            category: "ROOT_TASKS".into(),
+            operational_identity: Some(structured_attention_identity(
+                "ROOT_TASKS",
+                truth.current_task_id.clone(),
+                &detail,
+            )),
+        });
+    }
+    let running = matches!(state, "RUNNING" | "IN_PROGRESS");
+    let queue = if running {
+        truth
+            .current_task_id
+            .clone()
+            .zip(truth.current_task_title.clone())
+            .map(|(task_id, task)| {
+                vec![WorkQueueItem {
+                    id: format!("root-tasks:queue:{}", project.id),
+                    project_id: project.id.clone(),
+                    project_name: project.name.clone(),
+                    task_id,
+                    task,
+                    stage: state.into(),
+                    state: state.into(),
+                    actor: truth.required_actor.clone(),
+                    updated_at: None,
+                    attention: false,
+                }]
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    (attention, queue)
+}
+
 fn is_running_state(state: &str) -> bool {
     let normalized = state.trim().to_ascii_uppercase();
     matches!(
@@ -2303,13 +2399,36 @@ mod tests {
         let prefix = "x".repeat(256);
         let blocker_a = format!("{prefix} suffix-alpha");
         let blocker_b = format!("{prefix} suffix-beta");
-        let activity_a = format!("{prefix} activity-alpha");
-        let activity_b = format!("{prefix} activity-beta");
-        let manifest = format!(
-            "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\n## Source authorities\nCanonical task source: `TASKS.md`\n## Blockers and waiting\n- {blocker_a}\n- {blocker_a}\n- {blocker_b}\n## Recent meaningful activity\n- {activity_a}\n- {activity_b}\n"
+        let first_id = stable_materialized_id(
+            "project",
+            "BLOCKER",
+            &normalize_operational_identity(&blocker_a),
+            0,
         );
-        let (_db_dir, project_dir, database, _project_id, _tasks) =
-            fixture("# Work\n- [ ] internal task\n", Some(&manifest));
+        let second_id = stable_materialized_id(
+            "project",
+            "BLOCKER",
+            &normalize_operational_identity(&blocker_b),
+            0,
+        );
+        assert_ne!(first_id, second_id);
+        assert_eq!(
+            first_id,
+            stable_materialized_id(
+                "project",
+                "BLOCKER",
+                &normalize_operational_identity(&blocker_a),
+                0,
+            )
+        );
+        assert!(first_id.len() <= "PROJECT_DASHBOARD:BLOCKER:".len() + 16);
+    }
+
+    #[test]
+    fn m11a_r23_root_tasks_materialized_identity_is_not_current_evidence() {
+        let manifest = "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\n## Source authorities\nCanonical task source: `TASKS.md`\n## Blockers and waiting\n- poisoned dashboard blocker\n";
+        let (_db_dir, _project_dir, database, _project_id, _tasks) =
+            fixture("# Work\n- [ ] internal task\n", Some(manifest));
         let first = snapshot(&database).unwrap();
         assert!(first
             .attention
@@ -2319,120 +2438,10 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        let first_blockers = first
-            .attention
-            .iter()
-            .filter(|item| item.category == "PROJECT_DASHBOARD")
-            .filter(|item| item.detail == blocker_a || item.detail == blocker_b)
-            .collect::<Vec<_>>();
-        assert_eq!(first_blockers.len(), 2);
-        assert_ne!(first_blockers[0].id, first_blockers[1].id);
-        assert!(first_blockers
-            .iter()
-            .all(|item| item.id.len() == "PROJECT_DASHBOARD:BLOCKER:".len() + 16));
-        assert!(first_blockers
-            .iter()
-            .all(|item| !item.id.contains("suffix-alpha") && !item.id.contains("suffix-beta")));
-
-        let first_activity = first
-            .recent_activity
-            .iter()
-            .filter(|item| item.kind == "PROJECT_DASHBOARD")
-            .filter(|item| item.event == activity_a || item.event == activity_b)
-            .collect::<Vec<_>>();
-        assert_eq!(first_activity.len(), 2);
-        assert_ne!(first_activity[0].id, first_activity[1].id);
-        assert!(first_activity
-            .iter()
-            .all(|item| item.id.len() == "PROJECT_DASHBOARD:ACTIVITY:".len() + 16));
-        assert_eq!(first.kpis.needs_attention, Some(first.attention.len()));
-
-        let blocker_a_id = first_blockers
-            .iter()
-            .find(|item| item.detail == blocker_a)
-            .unwrap()
-            .id
-            .clone();
-        let blocker_b_id = first_blockers
-            .iter()
-            .find(|item| item.detail == blocker_b)
-            .unwrap()
-            .id
-            .clone();
-        let activity_a_id = first_activity
-            .iter()
-            .find(|item| item.event == activity_a)
-            .unwrap()
-            .id
-            .clone();
-        let activity_b_id = first_activity
-            .iter()
-            .find(|item| item.event == activity_b)
-            .unwrap()
-            .id
-            .clone();
-        let second = snapshot(&database).unwrap();
-        for (detail, id) in [(&blocker_a, &blocker_a_id), (&blocker_b, &blocker_b_id)] {
-            assert_eq!(
-                second
-                    .attention
-                    .iter()
-                    .find(|item| item.detail == *detail)
-                    .unwrap()
-                    .id,
-                *id
-            );
-        }
-        for (event, id) in [(&activity_a, &activity_a_id), (&activity_b, &activity_b_id)] {
-            assert_eq!(
-                second
-                    .recent_activity
-                    .iter()
-                    .find(|item| item.event == *event)
-                    .unwrap()
-                    .id,
-                *id
-            );
-        }
-
-        let with_unrelated_prefix = format!(
-            "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\n## Source authorities\nCanonical task source: `TASKS.md`\n## Blockers and waiting\n- unrelated preceding blocker\n- {blocker_a}\n- {blocker_a}\n- {blocker_b}\n## Recent meaningful activity\n- unrelated preceding activity\n- {activity_a}\n- {activity_b}\n"
-        );
-        fs::write(
-            project_dir
-                .path()
-                .join(project_dashboard::MANIFEST_RELATIVE_PATH),
-            with_unrelated_prefix,
-        )
-        .unwrap();
-        let third = snapshot(&database).unwrap();
-        for (detail, id) in [(&blocker_a, &blocker_a_id), (&blocker_b, &blocker_b_id)] {
-            assert_eq!(
-                third
-                    .attention
-                    .iter()
-                    .find(|item| item.detail == *detail)
-                    .unwrap()
-                    .id,
-                *id
-            );
-        }
-        for (event, id) in [(&activity_a, &activity_a_id), (&activity_b, &activity_b_id)] {
-            assert_eq!(
-                third
-                    .recent_activity
-                    .iter()
-                    .find(|item| item.event == *event)
-                    .unwrap()
-                    .id,
-                *id
-            );
-        }
     }
 
     #[test]
-    fn m11a_r23_long_quality_identity_requires_full_match_for_deduplication() {
+    fn m11a_r23_long_quality_identity_is_historical_for_root_tasks() {
         let prefix = "quality".repeat(37);
         let dashboard_check = format!("{prefix} dashboard-suffix");
         let prefix_only_test = format!("{prefix} persisted-test-suffix");
@@ -2473,62 +2482,11 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        assert_eq!(
-            prefix_only
-                .attention
-                .iter()
-                .filter(|item| item.category == "PROJECT_DASHBOARD")
-                .count(),
-            1
-        );
         assert!(prefix_only
             .attention
             .iter()
-            .any(|item| item.category == "TEST_RUN"));
-        assert!(prefix_only
-            .attention
-            .iter()
-            .any(|item| item.category == "AUDIT"));
-        assert_eq!(
-            prefix_only.kpis.needs_attention,
-            Some(prefix_only.attention.len())
-        );
-        let quality_id = prefix_only
-            .attention
-            .iter()
-            .find(|item| item.category == "PROJECT_DASHBOARD")
-            .unwrap()
-            .id
-            .clone();
-        assert_eq!(quality_id.len(), "PROJECT_DASHBOARD:QUALITY:".len() + 16);
-        assert!(!quality_id.contains("dashboard-suffix"));
-
-        connection
-            .execute(
-                "UPDATE test_runs SET command=?1 WHERE id='long-prefix-test'",
-                [&dashboard_check],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE audits SET summary=?1 WHERE id='long-prefix-audit'",
-                [&dashboard_check],
-            )
-            .unwrap();
-        let exact_match = snapshot(&database).unwrap();
-        assert_eq!(
-            exact_match
-                .attention
-                .iter()
-                .filter(|item| item.category == "PROJECT_DASHBOARD")
-                .count(),
-            0
-        );
-        assert_eq!(
-            exact_match.kpis.needs_attention,
-            Some(exact_match.attention.len())
-        );
+            .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT")));
+        assert_eq!(prefix_only.kpis.needs_attention, Some(prefix_only.attention.len()));
     }
 
     #[test]
@@ -2552,161 +2510,20 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        let blockers = first
-            .attention
-            .iter()
-            .filter(|item| item.category == "PROJECT_DASHBOARD")
-            .filter(|item| item.detail == blocker_a || item.detail == blocker_b)
-            .collect::<Vec<_>>();
-        assert_eq!(blockers.len(), 2);
-        assert_ne!(blockers[0].id, blockers[1].id);
-        assert!(blockers
-            .iter()
-            .all(|item| item.id.len() == "PROJECT_DASHBOARD:BLOCKER:".len() + 16));
-        assert!(blockers
-            .iter()
-            .all(|item| !item.id.contains("blocker") && !item.id.contains("ğ")));
+        assert_eq!(
+            normalize_operational_identity(blocker_a),
+            "build ğ blocker"
+        );
+        assert_ne!(
+            structured_attention_identity("PROJECT_DASHBOARD_BLOCKER", None, blocker_a),
+            structured_attention_identity("PROJECT_DASHBOARD_BLOCKER", None, blocker_b)
+        );
+        assert_ne!(activity_a, activity_b);
+        assert!(long_unicode.len() > 900);
         assert!(first
-            .attention
-            .iter()
-            .any(|item| item.detail.starts_with("bounded λ")));
-        let waiting_id = first
-            .attention
-            .iter()
-            .find(|item| item.detail == "Waiting on: owner ğ")
-            .unwrap()
-            .id
-            .clone();
-        let work_rows = first
-            .work_queue
-            .iter()
-            .filter(|item| item.id.starts_with("PROJECT_DASHBOARD:WORK:"))
-            .filter(|item| item.task == "work ğ" || item.task == "work ü")
-            .collect::<Vec<_>>();
-        assert_eq!(work_rows.len(), 2);
-        assert_ne!(work_rows[0].id, work_rows[1].id);
-        assert!(work_rows
-            .iter()
-            .all(|item| item.task_id.len() == "PROJECT_DASHBOARD:TASK:".len() + 16));
-
-        let activities = first
             .recent_activity
             .iter()
-            .filter(|item| item.kind == "PROJECT_DASHBOARD")
-            .filter(|item| item.event == activity_a || item.event == activity_b)
-            .collect::<Vec<_>>();
-        assert_eq!(activities.len(), 2);
-        assert_ne!(activities[0].id, activities[1].id);
-        assert!(activities
-            .iter()
-            .all(|item| item.id.len() == "PROJECT_DASHBOARD:ACTIVITY:".len() + 16));
-        assert_eq!(first.kpis.needs_attention, Some(first.attention.len()));
-
-        let blocker_a_id = blockers
-            .iter()
-            .find(|item| item.detail == blocker_a)
-            .unwrap()
-            .id
-            .clone();
-        let blocker_b_id = blockers
-            .iter()
-            .find(|item| item.detail == blocker_b)
-            .unwrap()
-            .id
-            .clone();
-        let activity_a_id = activities
-            .iter()
-            .find(|item| item.event == activity_a)
-            .unwrap()
-            .id
-            .clone();
-        let activity_b_id = activities
-            .iter()
-            .find(|item| item.event == activity_b)
-            .unwrap()
-            .id
-            .clone();
-        let repeated = snapshot(&database).unwrap();
-        assert_eq!(
-            repeated
-                .attention
-                .iter()
-                .find(|item| item.detail == blocker_a)
-                .unwrap()
-                .id,
-            blocker_a_id
-        );
-        assert_eq!(
-            repeated
-                .recent_activity
-                .iter()
-                .find(|item| item.event == activity_b)
-                .unwrap()
-                .id,
-            activity_b_id
-        );
-        assert_eq!(
-            repeated
-                .attention
-                .iter()
-                .find(|item| item.detail == "Waiting on: owner ğ")
-                .unwrap()
-                .id,
-            waiting_id
-        );
-
-        let with_unrelated_prefix = format!(
-            "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\n## Source authorities\nCanonical task source: `TASKS.md`\n## Blockers and waiting\n- unrelated blocker\n- {blocker_a}\n- {blocker_a}\n- {blocker_b}\n- {long_unicode}\n## Recent meaningful activity\n- unrelated activity\n- {activity_a}\n- {activity_b}\n"
-        );
-        fs::write(
-            project_dir
-                .path()
-                .join(project_dashboard::MANIFEST_RELATIVE_PATH),
-            with_unrelated_prefix,
-        )
-        .unwrap();
-        let inserted = snapshot(&database).unwrap();
-        assert_eq!(
-            inserted
-                .attention
-                .iter()
-                .find(|item| item.detail == blocker_a)
-                .unwrap()
-                .id,
-            blocker_a_id
-        );
-        assert_eq!(
-            inserted
-                .attention
-                .iter()
-                .find(|item| item.detail == blocker_b)
-                .unwrap()
-                .id,
-            blocker_b_id
-        );
-        assert_eq!(
-            inserted
-                .recent_activity
-                .iter()
-                .find(|item| item.event == activity_a)
-                .unwrap()
-                .id,
-            activity_a_id
-        );
-        assert_eq!(
-            inserted
-                .recent_activity
-                .iter()
-                .find(|item| item.event == activity_b)
-                .unwrap()
-                .id,
-            activity_b_id
-        );
-        assert_eq!(
-            inserted.kpis.needs_attention,
-            Some(inserted.attention.len())
-        );
+            .all(|item| item.kind != "PROJECT_DASHBOARD"));
     }
 
     #[test]
@@ -2748,41 +2565,11 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        assert!(distinct.attention.iter().any(|item| {
-            item.category == "PROJECT_DASHBOARD"
-                && item.detail == format!("{dashboard_label}: FAIL")
-        }));
         assert!(distinct
             .attention
             .iter()
-            .any(|item| item.category == "TEST_RUN"));
-        assert!(distinct
-            .attention
-            .iter()
-            .any(|item| item.category == "AUDIT"));
-        assert_eq!(
-            distinct.kpis.needs_attention,
-            Some(distinct.attention.len())
-        );
-
-        connection
-            .execute(
-                "UPDATE test_runs SET command=?1 WHERE id='colon-test'",
-                [dashboard_label],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE audits SET summary=?1 WHERE id='colon-audit'",
-                [dashboard_label],
-            )
-            .unwrap();
-        let exact = snapshot(&database).unwrap();
-        assert!(!exact
-            .attention
-            .iter()
-            .any(|item| item.category == "PROJECT_DASHBOARD"));
+            .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT")));
+        assert_eq!(distinct.kpis.needs_attention, Some(distinct.attention.len()));
 
         let mut dashboard = AttentionItem {
             id: "PROJECT_DASHBOARD:QUALITY:display-independent".into(),
@@ -2858,34 +2645,11 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        assert!(distinct.attention.iter().any(|item| {
-            item.category == "PROJECT_DASHBOARD"
-                && item.detail == format!("{dashboard_label}: FAIL")
-        }));
-        assert_eq!(
-            distinct.kpis.needs_attention,
-            Some(distinct.attention.len())
-        );
-
-        connection
-            .execute(
-                "UPDATE test_runs SET command=?1 WHERE id='unicode-test'",
-                [dashboard_label],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE audits SET summary=?1 WHERE id='unicode-audit'",
-                [dashboard_label],
-            )
-            .unwrap();
-        let exact = snapshot(&database).unwrap();
-        assert!(!exact
+        assert!(distinct
             .attention
             .iter()
-            .any(|item| item.category == "PROJECT_DASHBOARD"));
-        assert_eq!(exact.kpis.needs_attention, Some(exact.attention.len()));
+            .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT")));
+        assert_eq!(distinct.kpis.needs_attention, Some(distinct.attention.len()));
     }
 
     #[test]
@@ -2996,7 +2760,7 @@ mod tests {
                 .iter()
                 .filter(|item| item.category == "TEST_RUN")
                 .count(),
-            1
+            0
         );
         assert_eq!(
             snapshot
@@ -3004,7 +2768,7 @@ mod tests {
                 .iter()
                 .filter(|item| item.category == "AUDIT")
                 .count(),
-            1
+            0
         );
         assert_eq!(
             snapshot.kpis.needs_attention,
@@ -3044,26 +2808,15 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        assert!(first
-            .attention
-            .iter()
-            .all(|item| item.category != "PROJECT_DASHBOARD"));
-        assert!(first
-            .work_queue
-            .iter()
-            .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
         let second = snapshot(&database).unwrap();
-        assert!(first
+        assert!(second
             .attention
             .iter()
             .all(|item| item.category != "PROJECT_DASHBOARD"));
-        assert!(first
+        assert!(second
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
         assert_eq!(
             first
                 .attention
@@ -3083,7 +2836,7 @@ mod tests {
                 .iter()
                 .filter(|item| item.category == "PROJECT_DASHBOARD")
                 .count(),
-            1
+            0
         );
         assert_eq!(
             first
@@ -3091,7 +2844,7 @@ mod tests {
                 .iter()
                 .filter(|item| item.category == "TEST_RUN")
                 .count(),
-            1
+            0
         );
     }
 
@@ -3131,12 +2884,12 @@ mod tests {
                 .iter()
                 .filter(|item| item.category == "PERMISSION")
                 .count(),
-            1
+            0
         );
     }
 
     #[test]
-    fn m11a_r22_materialized_ids_survive_unrelated_preceding_rows_and_duplicate_facts() {
+    fn m11a_r22_root_tasks_ignores_materialized_ids_and_duplicate_facts() {
         let (_db_dir, project_dir, database, _project_id, _tasks) =
             fixture("# Work\n- [ ] internal task\n", Some(canonical_manifest()));
         let first_manifest = "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\n## Source authorities\nCanonical task source: `TASKS.md`\n## Blockers and waiting\n- Later blocker\n## Quality and verification\n| Check | Result | Evidence |\n| --- | --- | --- |\n| Same check | FAIL | one |\n| Same check | FAIL | two |\n## Recent meaningful activity\n- Later activity\n";
@@ -3156,57 +2909,15 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        return;
-        let first_blocker = first
+        let second = snapshot(&database).unwrap();
+        assert!(second
             .attention
             .iter()
-            .find(|item| item.detail == "Later blocker")
-            .unwrap()
-            .id
-            .clone();
-        let first_activity = first
+            .all(|item| item.category != "PROJECT_DASHBOARD"));
+        assert!(second
             .recent_activity
             .iter()
-            .find(|item| item.event == "Later activity")
-            .unwrap()
-            .id
-            .clone();
-        let quality_ids = first
-            .attention
-            .iter()
-            .filter(|item| item.category == "PROJECT_DASHBOARD")
-            .map(|item| item.id.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(quality_ids.len(), 3);
-        assert_ne!(quality_ids[1], quality_ids[2]);
-
-        let second_manifest = "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\n## Source authorities\nCanonical task source: `TASKS.md`\n## Blockers and waiting\n- Unrelated blocker\n- Later blocker\n## Quality and verification\n| Check | Result | Evidence |\n| --- | --- | --- |\n| Same check | FAIL | one |\n| Same check | FAIL | two |\n## Recent meaningful activity\n- Unrelated activity\n- Later activity\n";
-        fs::write(
-            project_dir
-                .path()
-                .join(project_dashboard::MANIFEST_RELATIVE_PATH),
-            second_manifest,
-        )
-        .unwrap();
-        let second = snapshot(&database).unwrap();
-        assert_eq!(
-            second
-                .attention
-                .iter()
-                .find(|item| item.detail == "Later blocker")
-                .unwrap()
-                .id,
-            first_blocker
-        );
-        assert_eq!(
-            second
-                .recent_activity
-                .iter()
-                .find(|item| item.event == "Later activity")
-                .unwrap()
-                .id,
-            first_activity
-        );
+            .all(|item| item.kind != "PROJECT_DASHBOARD"));
     }
 
     #[test]
@@ -3240,20 +2951,28 @@ mod tests {
         assert!(first
             .attention
             .iter()
-            .any(|item| item.category == "TEST_RUN"));
-        assert!(first.attention.iter().any(|item| item.category == "AUDIT"));
+            .all(|item| item.category == "ROOT_TASKS"));
         assert!(first
             .attention
             .iter()
-            .any(|item| item.category == "PERMISSION"));
-        assert!(!first
-            .work_queue
-            .iter()
-            .any(|item| item.state == "WAITING_HUMAN"));
+            .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT" | "PERMISSION")));
         assert!(first
             .work_queue
             .iter()
-            .any(|item| item.id == "agent:session-1"));
+            .all(|item| !item.id.starts_with("agent:")));
+        assert_eq!(first.kpis.needs_attention, Some(first.attention.len()));
+        assert_eq!(
+            first.kpis.running,
+            Some(first
+                .work_queue
+                .iter()
+                .filter(|item| is_running_state(&item.state))
+                .count())
+        );
+        assert!(first.engineering_brief.facts.iter().all(|fact| {
+            fact.label != "Needs attention"
+                || fact.provenance.source_class != "GITHUB_TASKS_ONLY"
+        }));
         assert!(first
             .recent_activity
             .iter()
@@ -3291,6 +3010,61 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(first.recent_activity.len() <= MAX_ACTIVITY_LIMIT);
+    }
+
+    #[test]
+    fn x04_v05_root_tasks_normalizes_current_fields_and_authoritative_items() {
+        let contents = "# X05-MILESTONE\n- [~] Canonical running task\n  Required actor: Codex\n  Next: Run the canonical action\n  Blocker: Canonical blocker\n- [x] Completed task\n";
+        let (_db_dir, _project_dir, database, _project_id, _tasks) =
+            fixture(contents, Some(canonical_manifest()));
+        let current = snapshot(&database).unwrap();
+        let project = &current.projects[0];
+        assert_eq!(project.current_milestone.as_deref(), Some("X05-MILESTONE"));
+        assert_eq!(project.required_actor.as_deref(), Some("Codex"));
+        assert_eq!(project.blockers, vec!["Canonical blocker"]);
+        assert_eq!(project.next_action.as_deref(), Some("Run the canonical action"));
+        assert_eq!(project.authority_source, "TASKS.md");
+        assert_eq!(project.reconciliation_state, "RESOLVED");
+        assert!(current
+            .attention
+            .iter()
+            .all(|item| item.category != "TEST_RUN" && item.category != "AUDIT"));
+        assert_eq!(current.work_queue.len(), 1);
+        assert_eq!(current.work_queue[0].task, "Canonical running task");
+        assert_eq!(current.work_queue[0].actor.as_deref(), Some("Codex"));
+        assert_eq!(current.work_queue[0].id, format!("root-tasks:queue:{}", project.project_id));
+    }
+
+    #[test]
+    fn x04_v05_root_tasks_blocked_truth_is_the_only_current_attention() {
+        let contents = "# X05-MILESTONE\n- [!] Canonical blocked task\n  Required actor: Human\n  Next: Review the blocker\n  Blocker: Owner decision required\n";
+        let (_db_dir, _project_dir, database, _project_id, _tasks) =
+            fixture(contents, Some(canonical_manifest()));
+        let current = snapshot(&database).unwrap();
+        assert_eq!(current.attention.len(), 1);
+        assert_eq!(current.attention[0].category, "ROOT_TASKS");
+        assert_eq!(current.attention[0].state, "BLOCKED");
+        assert_eq!(current.attention[0].detail, "Owner decision required");
+        assert!(current.work_queue.is_empty());
+        assert_eq!(current.kpis.needs_attention, Some(1));
+    }
+
+    #[test]
+    fn x04_v05_degraded_summary_never_revives_control_plane() {
+        let (_db_dir, _project_dir, database, project_id, _tasks) =
+            fixture("# Work\n- [ ] task\n", Some(canonical_manifest()));
+        let project = crate::projects::fetch_project(&database, &project_id).unwrap();
+        let summary = degraded_project_summary(&project, "forced TASKS read failure");
+        assert_eq!(summary.task_authority, "ROOT_TASKS_UNAVAILABLE");
+        assert_eq!(summary.provenance_mode, "ROOT_TASKS_UNAVAILABLE");
+        assert_eq!(summary.authority_source, "ROOT_TASKS_UNAVAILABLE");
+        assert_eq!(summary.reconciliation_state, "NEEDS_RECONCILIATION");
+        assert_eq!(summary.next_action.as_deref(), Some("Restore a readable repository-root TASKS.md"));
+        assert!(summary.control_plane.is_none());
+        assert!(!summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("CONTROL_PLANE")));
     }
 
     #[test]
