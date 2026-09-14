@@ -146,6 +146,24 @@ export type ProjectCockpitSnapshot = {
   };
   dashboard: ProjectDashboardResolution;
   controlPlane?: ControlPlaneSnapshot;
+  truth: {
+    projectId: string;
+    currentTaskId: string | null;
+    currentTaskTitle: string | null;
+    currentTaskStatus: string | null;
+    currentMilestone: string | null;
+    currentCycle: string | null;
+    workflowState: string | null;
+    requiredActor: string | null;
+    nextAction: string | null;
+    blockers: string[];
+    progressPercent: number | null;
+    progressScope: string | null;
+    authoritySource: string;
+    provenance: string[];
+    reconciliationState: string;
+    warnings: string[];
+  };
   taskIntelligence: TaskIntelligenceSnapshot | null;
   taskIntelligenceError: string | null;
   workflow: { projectId: string; tasks: WorkflowTask[] };

@@ -1175,7 +1175,6 @@ function LiveProjectCockpit({
     "Settings",
   ];
   const summary = snapshot.projectSummary;
-  const materialized = snapshot.dashboard.materialized;
   const savePriority = async () => {
     const nextPriority = Number(priority);
     if (
@@ -1425,14 +1424,13 @@ function CockpitLiveOverview({
   message: string | null;
 }) {
   const remote = snapshot.remotePrimary;
-  const legacyTask = snapshot.projectSummary.currentTask;
-  const legacyMaterialized = snapshot.dashboard.materialized;
+  const canonicalTask = snapshot.projectSummary.currentTask;
   const taskTitle =
     remote?.currentTaskTitle ??
-    legacyTask?.title ??
-    legacyMaterialized.currentTaskTitle;
+    snapshot.truth.currentTaskTitle ??
+    canonicalTask?.title;
   const progress =
-    remote?.progressPercent ?? snapshot.projectSummary.progressPercent;
+    remote?.progressPercent ?? snapshot.truth.progressPercent;
   return (
     <>
       <section className="cockpit-live-hero">
@@ -1448,19 +1446,19 @@ function CockpitLiveOverview({
                 ". Remote HEAD " +
                 (remote.remoteHead?.slice(0, 12) ?? "unavailable") +
                 "."
-              : legacyTask
+            : canonicalTask
                 ? "Where we are: " +
-                  legacyTask.parsedStatus +
+                  (snapshot.truth.currentTaskStatus ?? canonicalTask.parsedStatus) +
                   ". Source: " +
-                  legacyTask.sourcePath +
+                  canonicalTask.sourcePath +
                   "."
                 : "GitHub remote tracking is unavailable; no local tracker fallback is used."}
           </p>
-          {(remote?.workflowState ?? snapshot.projectSummary.currentState) ? (
+          {(remote?.workflowState ?? snapshot.truth.workflowState) ? (
             <span className="cockpit-state-chip">
               {formatCockpitState(
                 remote?.workflowState ??
-                  snapshot.projectSummary.currentState ??
+                  snapshot.truth.workflowState ??
                   "UNKNOWN",
               )}
             </span>
@@ -1547,7 +1545,22 @@ function CockpitLiveOverview({
             ]}
           />
         ) : (
-          <div className="safe-notice">No remote snapshot is available.</div>
+          <CockpitFacts
+            facts={[
+              ["Authority", snapshot.truth.authoritySource],
+              ["Milestone", snapshot.truth.currentMilestone ?? "Unknown"],
+              ["Workflow", snapshot.truth.workflowState ?? "Unknown"],
+              ["Required actor", snapshot.truth.requiredActor ?? "Unknown"],
+              ["Next action", snapshot.truth.nextAction ?? "Unknown"],
+              [
+                "Progress",
+                snapshot.truth.progressPercent == null
+                  ? "Unknown"
+                  : formatPercent(snapshot.truth.progressPercent),
+              ],
+              ["Reconciliation", snapshot.truth.reconciliationState],
+            ]}
+          />
         )}
         {remote?.blockers.length ? (
           <CockpitList
@@ -1565,15 +1578,18 @@ function CockpitLiveOverview({
           <div className="cockpit-callout">
             <strong>
               {remote?.nextAction ??
-                snapshot.projectSummary.nextAction ??
+              snapshot.truth.nextAction ??
+              snapshot.projectSummary.nextAction ??
                 "Next action unavailable"}
             </strong>
             <span>
               {remote?.requiredActor
                 ? "Required actor: " + remote.requiredActor
-                : snapshot.projectSummary.allowedActors?.length
-                  ? "Allowed actors: " +
-                    snapshot.projectSummary.allowedActors.join(", ")
+                : snapshot.truth.requiredActor
+                  ? "Required actor: " + snapshot.truth.requiredActor
+                  : snapshot.projectSummary.allowedActors?.length
+                    ? "Allowed actors: " +
+                      snapshot.projectSummary.allowedActors.join(", ")
                   : "Required actor unavailable"}
             </span>
           </div>
@@ -1738,7 +1754,7 @@ function CockpitLegacyOverview({
           <span className="eyebrow">Current task</span>
           <h2>
             {task?.title ??
-              materialized.currentTaskTitle ??
+              snapshot.truth.currentTaskTitle ??
               "Current task unavailable"}
           </h2>
           <p>
@@ -1835,16 +1851,14 @@ function CockpitLegacyOverview({
               ["Branch", snapshot.controlPlane?.git.branch ?? "Unknown"],
               [
                 "Current milestone",
-                snapshot.controlPlane?.currentMilestone ??
-                  materialized.currentMilestone ??
+                (remote?.currentMilestone ?? snapshot.truth.currentMilestone) ??
                   "Unknown",
               ],
               [
                 "Required actor",
-                snapshot.controlPlane?.requiredActor ??
-                  (summary.allowedActors.join(", ") ||
-                    materialized.requiredActor ||
-                    "Unknown"),
+                (remote?.requiredActor ??
+                  snapshot.truth.requiredActor ??
+                  summary.allowedActors.join(", ")) || "Unknown",
               ],
             ]}
           />
@@ -1860,12 +1874,12 @@ function CockpitLegacyOverview({
           <div className="cockpit-callout">
             <strong>
               {summary.nextAction ??
-                materialized.nextAction ??
+                snapshot.truth.nextAction ??
                 "Next action unavailable"}
             </strong>
             <span>
-              {materialized.waitingOn
-                ? `Waiting on: ${materialized.waitingOn}`
+              {snapshot.truth.blockers.length
+                ? `Blockers / waiting: ${snapshot.truth.blockers.join(", ")}`
                 : "No verified waiting fact"}
             </span>
           </div>
@@ -1986,54 +2000,61 @@ function CockpitLegacyOverview({
         ) : null}
       </div>
       <CockpitPanel
-        title={remote ? "GitHub task status" : "Project Dashboard status"}
+        title={remote ? "GitHub task status" : "Canonical TASKS status"}
         detail={
           remote
             ? "Current values from GitHub + root TASKS.md"
-            : "Materialized values are evidence, not stronger than M10"
+            : "Current values from repository-root TASKS.md"
         }
       >
         <CockpitFacts
           facts={[
-            ["Project status", materialized.projectStatus ?? "Unknown"],
+            ["Project status", snapshot.project.status],
             [
               "Declared workflow",
-              materialized.declaredWorkflowState ?? "Unknown",
+              (remote?.workflowState ?? snapshot.truth.workflowState) ??
+                "Unknown",
             ],
-            ["Health", materialized.health ?? "Unknown"],
+            ["Health", remote?.remoteHealth ?? summary.health],
             [
               "Last meaningful update",
-              materialized.lastMeaningfulUpdate ?? "Unknown",
+              summary.lastAction?.occurredAt ?? "Unknown",
             ],
           ]}
         />
       </CockpitPanel>
       <CockpitPanel
-        title={remote ? "Remote task evidence" : "Dashboard operational evidence"}
+        title={remote ? "Remote task evidence" : "Canonical task evidence"}
         detail={
           remote
             ? "Current work, waits, blockers, and quality remain remote-bound"
-            : "Current work, waits, blockers, and quality remain provenance-bound"
+            : "Current work and blockers come only from repository-root TASKS.md"
         }
       >
         <CockpitList
           title="Current work"
-          values={materialized.currentWork.map(
-            (item) => `${item.item} / ${item.status} / ${item.ownerActor}`,
-          )}
-          empty="No materialized current-work fact"
+          values={
+            remote
+              ? materialized.currentWork.map(
+                  (item) => `${item.item} / ${item.status} / ${item.ownerActor}`,
+                )
+              : snapshot.truth.currentTaskTitle
+                ? [snapshot.truth.currentTaskTitle]
+                : []
+          }
+          empty="No canonical current-work fact"
         />
         <CockpitList
           title="Blockers and waiting"
-          values={materialized.blockersWaiting}
-          empty="No verified blocker or waiting fact"
+          values={remote ? materialized.blockersWaiting : snapshot.truth.blockers}
+          empty="No canonical blocker or waiting fact"
         />
         <CockpitList
-          title="Quality verification"
-          values={materialized.qualityVerification.map(
+          title="Historical quality verification"
+          values={remote ? materialized.qualityVerification.map(
             (item) => `${item.label}: ${item.value}`,
-          )}
-          empty="No materialized quality fact"
+          ) : []}
+          empty="No historical quality fact"
         />
       </CockpitPanel>
     </>
@@ -2094,17 +2115,16 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
               <details className="cockpit-record" key={task.id}>
                 <summary>
                   <strong>{task.title}</strong>
-                  <span>
-                    {formatCockpitState(
-                      workflow?.currentState ?? task.parsedStatus,
-                    )}
-                  </span>
+                  <span>{formatCockpitState(task.parsedStatus)}</span>
                 </summary>
                 <CockpitFacts
                   facts={[
                     ["Task ID", task.id],
                     ["Status", task.parsedStatus],
-                    ["Workflow", workflow?.currentState ?? "Unknown"],
+                    [
+                      "Historical workflow evidence",
+                      workflow?.currentState ?? "No recorded workflow row",
+                    ],
                     ["Source", task.sourcePath],
                     ["Required actor", task.requiredActor ?? "Unknown"],
                     [
@@ -2213,9 +2233,7 @@ function CockpitLiveWorkflow({
   snapshot: ProjectCockpitSnapshot;
   onRefresh: () => void;
 }) {
-  const current =
-    snapshot.projectSummary.currentState ??
-    snapshot.dashboard.materialized.declaredWorkflowState;
+  const current = snapshot.truth.workflowState;
   const [selectedTaskId, setSelectedTaskId] = React.useState(
     snapshot.workflow.tasks[0]?.taskId ?? "",
   );
@@ -2271,19 +2289,21 @@ function CockpitLiveWorkflow({
   return (
     <>
       <CockpitPanel
-        title="Workflow pipeline"
-        detail="M10 canonical state and transition evidence"
+        title="Workflow evidence"
+        detail="Historical M10 records; current state remains repository-root TASKS.md"
       >
         <div className="cockpit-pipeline">
           <span className="cockpit-pipeline-current">
-            {current ? formatCockpitState(current) : "Workflow state unknown"}
+            {current
+              ? `TASKS.md: ${formatCockpitState(current)}`
+              : "TASKS.md workflow state unknown"}
           </span>
-          {snapshot.projectSummary.allowedActors.length ? (
+          {snapshot.truth.requiredActor ? (
             <span>
-              Allowed actors: {snapshot.projectSummary.allowedActors.join(", ")}
+              Required actor: {snapshot.truth.requiredActor}
             </span>
           ) : (
-            <span>Allowed actors unknown</span>
+            <span>Required actor unknown</span>
           )}
         </div>
         <div className="cockpit-record-list">
@@ -2291,7 +2311,9 @@ function CockpitLiveWorkflow({
             <div className="cockpit-record" key={task.taskId}>
               <div className="cockpit-record-heading">
                 <strong>{task.title}</strong>
-                <span>{formatCockpitState(task.currentState)}</span>
+                <span>
+                  Recorded {formatCockpitState(task.currentState)}
+                </span>
               </div>
               <CockpitFacts
                 facts={[

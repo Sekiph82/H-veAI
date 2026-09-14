@@ -93,6 +93,24 @@ function snapshotFor(id: string): ProjectCockpitSnapshot {
       },
       warnings: status === "ACTIVE" ? [] : ["Project Dashboard is absent or unavailable"],
     },
+    truth: {
+      projectId: id,
+      currentTaskId: status === "ACTIVE" ? `${id}-task-1` : null,
+      currentTaskTitle: status === "ACTIVE" ? `${selected.name} verified task` : null,
+      currentTaskStatus: status === "ACTIVE" ? "IN_PROGRESS" : null,
+      currentMilestone: status === "ACTIVE" ? "TASKS-MILESTONE" : null,
+      currentCycle: null,
+      workflowState: status === "ACTIVE" ? "IN_PROGRESS" : null,
+      requiredActor: status === "ACTIVE" ? "Codex" : null,
+      nextAction: status === "ACTIVE" ? `Canonical next action for ${selected.name}` : null,
+      blockers: [],
+      progressPercent: status === "ACTIVE" ? 25 : null,
+      progressScope: status === "ACTIVE" ? "TASKS" : null,
+      authoritySource: status === "ACTIVE" ? "ROOT_TASKS" : "ROOT_TASKS_UNAVAILABLE",
+      provenance: ["TASKS.md"],
+      reconciliationState: status === "ACTIVE" ? "CURRENT" : "NEEDS_RECONCILIATION",
+      warnings: [],
+    },
     taskIntelligence: null,
     taskIntelligenceError: status === "ACTIVE" ? "No persisted M09 task intelligence" : "M09 unavailable",
     workflow: {
@@ -238,6 +256,40 @@ describe("M12 project cockpit", () => {
     expect(screen.getByText("UNDATED")).toBeInTheDocument();
   });
 
+  it("renders ROOT_TASKS current state without dashboard or control-plane fallbacks", async () => {
+    const poisoned = snapshotFor("alpha");
+    poisoned.projectSummary.currentTask = null;
+    poisoned.projectSummary.currentState = null;
+    poisoned.projectSummary.nextAction = null;
+    poisoned.projectSummary.allowedActors = [];
+    poisoned.projectSummary.progressPercent = null;
+    poisoned.workflow.tasks[0].currentState = "POISON WORKFLOW STATE";
+    poisoned.dashboard.materialized.currentTaskTitle = "POISON DASHBOARD TASK";
+    poisoned.dashboard.materialized.currentMilestone = "POISON DASHBOARD MILESTONE";
+    poisoned.dashboard.materialized.declaredWorkflowState = "POISON DASHBOARD STATE";
+    poisoned.dashboard.materialized.requiredActor = "POISON DASHBOARD ACTOR";
+    poisoned.dashboard.materialized.nextAction = "POISON DASHBOARD ACTION";
+    poisoned.dashboard.materialized.progressPercent = 99;
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
+      if (command === "hiveai_project_cockpit_snapshot") return Promise.resolve(poisoned);
+      return defaultInvoke(command, args);
+    });
+
+    renderLive("/projects/alpha");
+    expect(await screen.findByText("Project Alpha verified task")).toBeInTheDocument();
+    expect(screen.getByText("TASKS-MILESTONE")).toBeInTheDocument();
+    expect(screen.getAllByText("Canonical next action for Project Alpha")[0]).toBeInTheDocument();
+    expect(screen.queryByText("POISON DASHBOARD TASK")).not.toBeInTheDocument();
+    expect(screen.queryByText("POISON DASHBOARD MILESTONE")).not.toBeInTheDocument();
+    expect(screen.queryByText("POISON DASHBOARD STATE")).not.toBeInTheDocument();
+    expect(screen.queryByText("POISON WORKFLOW STATE")).not.toBeInTheDocument();
+    expect(screen.queryByText("POISON DASHBOARD ACTOR")).not.toBeInTheDocument();
+    expect(screen.queryByText("POISON DASHBOARD ACTION")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks", exact: true }));
+    expect(await screen.findByRole("heading", { name: "Canonical tasks" })).toBeInTheDocument();
+    expect(screen.queryByText("POISON WORKFLOW STATE")).not.toBeInTheDocument();
+  });
+
   it("ignores a stale earlier project snapshot after route changes", async () => {
     let resolveAlpha: ((value: ProjectCockpitSnapshot) => void) | undefined;
     invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
@@ -301,7 +353,7 @@ describe("M12 project cockpit", () => {
     await screen.findByRole("heading", { name: "Project Alpha" });
     const tabs = new Map([
       ["Tasks", "Canonical tasks"],
-      ["Workflow", "Workflow pipeline"],
+      ["Workflow", "Workflow evidence"],
       ["Agents", "Agent sessions"],
       ["Audit", "Audit history"],
       ["Git", "Git visibility"],

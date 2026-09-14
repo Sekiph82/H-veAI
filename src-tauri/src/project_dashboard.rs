@@ -397,8 +397,6 @@ fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDas
         }],
     );
     let mut manifest_status = ManifestStatus::Absent;
-    let mut contextual_tracking_mode = "ROOT_TASKS_ONLY".to_string();
-    let mut contextual_materialized = MaterializedDashboardStatus::default();
     let mut warnings = vec![
         "Hidden/local/generated control-plane projections are excluded from current state; repository-root TASKS.md is authoritative.".into(),
     ];
@@ -407,10 +405,6 @@ fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDas
         match read_manifest(&manifest_path).and_then(|text| parse_manifest(&text)) {
             Ok(parsed) => {
                 manifest_status = ManifestStatus::Valid;
-                contextual_tracking_mode = parsed
-                    .tracking_mode
-                    .unwrap_or_else(|| "ROOT_TASKS_ONLY".into());
-                contextual_materialized = parsed.materialized;
                 warnings.extend(parsed.warnings);
                 warnings.extend(parsed.materialized_warnings);
                 for (role, sources) in parsed.roles {
@@ -455,13 +449,13 @@ fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDas
             .as_ref()
             .and_then(|repository| repository.current_branch.clone()),
         dashboard_mode: Some("ROOT_TASKS_ONLY".into()),
-        tracking_mode: Some(contextual_tracking_mode),
+        tracking_mode: Some("ROOT_TASKS_ONLY".into()),
         refresh_policy: Some("ROOT_TASKS".into()),
         task_authority: TaskAuthorityState::Canonical,
         canonical_task_source: Some("TASKS.md".into()),
         roles,
         provenance_mode: "ROOT_TASKS".into(),
-        materialized: contextual_materialized,
+        materialized: MaterializedDashboardStatus::default(),
         warnings,
     }
 }
@@ -1341,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_keeps_dashboard_materialization_contextual_to_root_tasks_authority() {
+    fn resolver_removes_dashboard_current_materialization_from_root_tasks_contract() {
         let (_db_dir, project_dir, db, project_id) = fixture();
         fs::write(
             project_dir.path().join(MANIFEST_RELATIVE_PATH),
@@ -1349,16 +1343,9 @@ mod tests {
         )
         .unwrap();
         let resolution = resolve(&db, &project_id).unwrap();
-        assert_eq!(
-            resolution.tracking_mode.as_deref(),
-            Some("single-dashboard-watch")
-        );
+        assert_eq!(resolution.tracking_mode.as_deref(), Some("ROOT_TASKS_ONLY"));
         assert_eq!(resolution.task_authority, TaskAuthorityState::Canonical);
-        assert_eq!(
-            resolution.materialized.project_status.as_deref(),
-            Some("ACTIVE")
-        );
-        assert_eq!(resolution.materialized.progress_percent, Some(55));
+        assert_eq!(resolution.materialized, MaterializedDashboardStatus::default());
     }
 
     #[test]
@@ -1371,15 +1358,9 @@ mod tests {
         .unwrap();
         let resolution = resolve(&db, &project_id).unwrap();
         assert_eq!(resolution.manifest_status, ManifestStatus::Valid);
-        assert_eq!(
-            resolution.tracking_mode.as_deref(),
-            Some("single-dashboard-watch")
-        );
+        assert_eq!(resolution.tracking_mode.as_deref(), Some("ROOT_TASKS_ONLY"));
         assert_eq!(resolution.provenance_mode, "ROOT_TASKS");
-        assert_eq!(
-            resolution.materialized.current_milestone.as_deref(),
-            Some("M14")
-        );
+        assert_eq!(resolution.materialized, MaterializedDashboardStatus::default());
     }
 
     #[test]

@@ -108,7 +108,7 @@ pub struct ProjectCockpitSnapshot {
     pub project: ProjectRecord,
     pub project_summary: ProjectOperationSummary,
     pub dashboard: ProjectDashboardResolution,
-    pub control_plane: ControlPlaneSnapshot,
+    pub control_plane: Option<ControlPlaneSnapshot>,
     pub truth: ProjectTruth,
     pub task_intelligence: Option<TaskIntelligenceSnapshot>,
     pub task_intelligence_error: Option<String>,
@@ -185,7 +185,9 @@ pub fn snapshot(
     let github_tracking = github_tracking::refresh_project(database, &project).ok();
     let dashboard = project_dashboard::resolve(database, project_id)?;
     let truth = control_plane::ProjectTruthResolver::resolve(database, project_id)?;
-    let control_plane = control_plane::snapshot(database, project_id)?;
+    let control_plane = (!dashboard.provenance_mode.starts_with("ROOT_TASKS"))
+        .then(|| control_plane::snapshot(database, project_id))
+        .transpose()?;
     let project_summary = match github_tracking.as_ref() {
         Some(remote) => command_center::remote_project_summary(&project, remote),
         None => command_center::summarize_project_for_cockpit(database, &project)?,
@@ -204,19 +206,21 @@ pub fn snapshot(
     )?;
     let workflow_history = workflow::project_history(database, project_id, MAX_COCKPIT_HISTORY)?;
     let mut warnings = dashboard.warnings.clone();
-    warnings.extend(control_plane.warnings.iter().cloned());
-    if matches!(
-        control_plane.git.last_remote_observation_status.as_str(),
-        "DEGRADED" | "FAILED"
-    ) {
-        push_warning(
-            &mut warnings,
-            control_plane
-                .git
-                .last_remote_observation_error
-                .as_deref()
-                .unwrap_or("remote observation is degraded"),
-        );
+    if let Some(control_plane) = control_plane.as_ref() {
+        warnings.extend(control_plane.warnings.iter().cloned());
+        if matches!(
+            control_plane.git.last_remote_observation_status.as_str(),
+            "DEGRADED" | "FAILED"
+        ) {
+            push_warning(
+                &mut warnings,
+                control_plane
+                    .git
+                    .last_remote_observation_error
+                    .as_deref()
+                    .unwrap_or("remote observation is degraded"),
+            );
+        }
     }
     let local_warnings = warnings.clone();
     if let Some(remote) = github_tracking.as_ref() {
@@ -445,7 +449,7 @@ fn snapshot_remote_primary(
         project,
         project_summary,
         dashboard,
-        control_plane,
+        control_plane: Some(control_plane),
         truth,
         task_intelligence,
         task_intelligence_error,
@@ -1137,7 +1141,10 @@ mod tests {
             .iter()
             .all(|warning| !warning.contains("PROJECT.json") && !warning.contains("PAG-M02")));
         assert_eq!(cockpit.dashboard.manifest_path, "TASKS.md");
-        assert_eq!(cockpit.control_plane.schema, "github-root-tasks-v1");
+        assert_eq!(
+            cockpit.control_plane.as_ref().unwrap().schema,
+            "github-root-tasks-v1"
+        );
     }
 
     #[test]
@@ -1275,6 +1282,58 @@ mod tests {
         assert_eq!(registered.status, "ACTIVE");
         assert_eq!(cockpit.project.id, registered.id);
         assert_eq!(cockpit.project_summary.project_id, registered.id);
+    }
+
+    #[test]
+    fn x04_v04_root_tasks_cockpit_omits_legacy_current_state_channels() {
+        let db_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let project_dir = tempdir().unwrap();
+        std::fs::write(
+            project_dir.path().join("TASKS.md"),
+            "# Work\n- [ ] canonical task\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(project_dir.path().join(".hiveai")).unwrap();
+        std::fs::write(
+            project_dir.path().join(project_dashboard::MANIFEST_RELATIVE_PATH),
+            "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ntrackingMode: single-dashboard-watch\n## H!veAI live status\nCurrent milestone: POISON-DASHBOARD\nCurrent task: POISON-DASHBOARD-TASK\nCurrent workflow state: BLOCKED\nRequired actor: POISON-ACTOR\nNext action: POISON-ACTION\nProgress: 99%\n## Blockers and waiting\n- POISON-BLOCKER\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project_dir.path().join(crate::control_plane::PROJECT_JSON),
+            r#"{"schema":"hiveai-project/v1","projectKey":"poison"}"#,
+        )
+        .unwrap();
+        let project = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into_owned(),
+                name: Some("V04 consumer boundary".into()),
+            },
+        )
+        .unwrap();
+        let cockpit = snapshot(&database, &project.id).unwrap();
+        assert!(cockpit.control_plane.is_none());
+        assert_eq!(cockpit.dashboard.tracking_mode.as_deref(), Some("ROOT_TASKS_ONLY"));
+        assert_eq!(
+            cockpit.dashboard.materialized,
+            project_dashboard::MaterializedDashboardStatus::default()
+        );
+        assert!(cockpit
+            .project_summary
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("POISON")));
+        let center = crate::command_center::snapshot(&database).unwrap();
+        assert!(center
+            .attention
+            .iter()
+            .all(|item| item.category != "PROJECT_DASHBOARD" && item.category != "WORKFLOW"));
+        assert!(center
+            .work_queue
+            .iter()
+            .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:") && !item.id.starts_with("queue:")));
     }
 
     #[test]

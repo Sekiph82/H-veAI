@@ -1673,7 +1673,7 @@ mod tests {
         let manager = WatcherManager::initialize(database.clone()).unwrap();
         assert_eq!(
             manager.inner.lock().unwrap().watch_scopes[&project.id],
-            "SINGLE_DASHBOARD"
+            "LEGACY_RECURSIVE"
         );
         manager.rescan_project(&project.id).unwrap();
         assert_eq!(
@@ -1693,7 +1693,7 @@ mod tests {
             .try_send(RawInput {
                 project_id: project.id.clone(),
                 root: project_root.path().to_path_buf(),
-                single_dashboard: true,
+                single_dashboard: false,
                 event: Ok(Event::new(EventKind::Modify(ModifyKind::Data(
                     notify::event::DataChange::Content,
                 )))
@@ -1706,7 +1706,7 @@ mod tests {
                 .unwrap()
                 .tasks[0]
                 .title,
-            "first task"
+            "changed before dashboard signal"
         );
         fs::write(
             project_root.path().join(MANIFEST_RELATIVE_PATH),
@@ -1718,7 +1718,7 @@ mod tests {
             .try_send(RawInput {
                 project_id: project.id.clone(),
                 root: project_root.path().to_path_buf(),
-                single_dashboard: true,
+                single_dashboard: false,
                 event: Ok(Event::new(EventKind::Modify(ModifyKind::Data(
                     notify::event::DataChange::Content,
                 )))
@@ -1783,7 +1783,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1200));
         assert_eq!(
             manager.inner.lock().unwrap().watch_scopes[&project.id],
-            "SINGLE_DASHBOARD"
+            "LEGACY_RECURSIVE"
         );
 
         fs::write(
@@ -1796,7 +1796,7 @@ mod tests {
             .try_send(RawInput {
                 project_id: project.id.clone(),
                 root: project_root.path().to_path_buf(),
-                single_dashboard: true,
+                single_dashboard: false,
                 event: Ok(Event::new(EventKind::Modify(ModifyKind::Data(
                     notify::event::DataChange::Content,
                 )))
@@ -1809,7 +1809,7 @@ mod tests {
                 .unwrap()
                 .tasks[0]
                 .title,
-            "legacy task"
+            "ignored while migrated"
         );
 
         fs::remove_file(project_root.path().join(MANIFEST_RELATIVE_PATH)).unwrap();
@@ -1862,12 +1862,12 @@ mod tests {
         manager.rescan_project(&project.id).unwrap();
         assert_eq!(
             manager.inner.lock().unwrap().watch_scopes[&project.id],
-            "SINGLE_DASHBOARD"
+            "LEGACY_RECURSIVE"
         );
         manager.rescan_project(&project.id).unwrap();
         assert_eq!(
             manager.inner.lock().unwrap().watch_scopes[&project.id],
-            "SINGLE_DASHBOARD"
+            "LEGACY_RECURSIVE"
         );
     }
     #[test]
@@ -1964,13 +1964,13 @@ mod tests {
                 .watch_scopes
                 .get(&project.id)
                 .map(String::as_str)
-                != Some("SINGLE_DASHBOARD")
+                != Some("LEGACY_RECURSIVE")
         {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert_eq!(
             manager.inner.lock().unwrap().watch_scopes[&project.id],
-            "SINGLE_DASHBOARD"
+            "LEGACY_RECURSIVE"
         );
 
         fs::remove_file(project_root.path().join(MANIFEST_RELATIVE_PATH)).unwrap();
