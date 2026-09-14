@@ -1986,22 +1986,17 @@ pub fn stop(
             let termination = terminate_owned_child_bounded(&child, pid);
             if termination.escalated {
                 escalation_requested.store(true, Ordering::Release);
-                insert_event(
-                    &connection,
-                    session_id,
-                    "STOP_ESCALATED",
-                    json!({"ownedPid":pid,"method":"TASKKILL_OWNED_TREE_FORCE","bounded":true,"exited":termination.exited}),
-                )?;
             }
+            persist_stop_termination_outcome(
+                &mut connection,
+                project_id,
+                session_id,
+                retry_state,
+                pid,
+                termination,
+            )?;
             if !termination.exited {
                 stop_requested.store(false, Ordering::Release);
-                persist_stop_failure(
-                    &mut connection,
-                    project_id,
-                    session_id,
-                    retry_state,
-                    pid,
-                )?;
             }
             Ok(load_session(database, session_id)?)
         }
@@ -2290,6 +2285,33 @@ fn persist_stop_failure(
             "state":retry_state,
         }),
     )
+}
+
+fn persist_stop_termination_outcome(
+    connection: &mut Connection,
+    project_id: &str,
+    session_id: &str,
+    retry_state: &str,
+    pid: u32,
+    termination: TerminationResult,
+) -> Result<(), String> {
+    if termination.escalated {
+        insert_event(
+            connection,
+            session_id,
+            "STOP_ESCALATED",
+            json!({
+                "ownedPid":pid,
+                "method":"TASKKILL_OWNED_TREE_FORCE",
+                "bounded":true,
+                "exited":termination.exited,
+            }),
+        )?;
+    }
+    if !termination.exited {
+        persist_stop_failure(connection, project_id, session_id, retry_state, pid)?;
+    }
+    Ok(())
 }
 
 pub fn resize(
@@ -3115,6 +3137,51 @@ mod tests {
     }
 
     #[test]
+    fn injected_stop_outcomes_record_escalation_and_failure_truthfully() {
+        let db_directory = tempdir().unwrap();
+        let project_directory = tempdir().unwrap();
+        let database = crate::db::DatabaseState::initialize(db_directory.path().to_path_buf()).unwrap();
+        let project = crate::projects::register_project(
+            &database,
+            crate::projects::RegisterProjectRequest {
+                path: project_directory.path().to_string_lossy().into(),
+                name: Some("Injected stop outcome fixture".into()),
+            },
+        )
+        .unwrap();
+        let cwd = project_directory.path().canonicalize().unwrap().to_string_lossy().to_string();
+        insert_claude_lifecycle_row(&database, &project.id, "stop-escalated", "STOPPING", &cwd);
+        insert_claude_lifecycle_row(&database, &project.id, "stop-unconfirmed", "STOPPING", &cwd);
+        let mut connection = database.open_connection().unwrap();
+        persist_stop_termination_outcome(
+            &mut connection,
+            &project.id,
+            "stop-escalated",
+            "RUNNING",
+            1001,
+            TerminationResult { exited: true, escalated: true },
+        )
+        .unwrap();
+        let escalated = load_session(&database, "stop-escalated").unwrap();
+        assert_eq!(escalated.state, "STOPPING");
+        assert!(escalated.events.iter().any(|event| event.event_type == "STOP_ESCALATED" && event.payload["exited"] == true));
+
+        persist_stop_termination_outcome(
+            &mut connection,
+            &project.id,
+            "stop-unconfirmed",
+            "RUNNING",
+            1002,
+            TerminationResult { exited: false, escalated: true },
+        )
+        .unwrap();
+        let unconfirmed = load_session(&database, "stop-unconfirmed").unwrap();
+        assert_eq!(unconfirmed.state, "RUNNING");
+        assert!(unconfirmed.events.iter().any(|event| event.event_type == "STOP_ESCALATED" && event.payload["exited"] == false));
+        assert!(unconfirmed.events.iter().any(|event| event.event_type == "STOP_FAILED"));
+    }
+
+    #[test]
     fn production_stop_persists_and_handles_every_live_attention_state() {
         let db_directory = tempdir().unwrap();
         let project_directory = tempdir().unwrap();
@@ -3168,6 +3235,56 @@ mod tests {
             assert!(code.starts_with("CLAUDE_RESUME_"), "{stage}");
             assert!(message.contains(stage), "{stage}");
             assert!(message.len() <= 600, "{stage}");
+        }
+    }
+
+    #[test]
+    fn resume_setup_failure_injection_cleans_every_boundary_without_identity_drift() {
+        let stages = ["SPAWN", "STDIN", "PROMPT_WRITE", "STDOUT", "STDERR", "OWNERSHIP", "RUNNING"];
+        for (index, stage) in stages.into_iter().enumerate() {
+            let db_directory = tempdir().unwrap();
+            let project_directory = tempdir().unwrap();
+            let database = crate::db::DatabaseState::initialize(db_directory.path().to_path_buf()).unwrap();
+            let project = crate::projects::register_project(
+                &database,
+                crate::projects::RegisterProjectRequest {
+                    path: project_directory.path().to_string_lossy().into(),
+                    name: Some(format!("Resume stage {stage}")),
+                },
+            )
+            .unwrap();
+            let session_id = format!("resume-stage-{index}");
+            let cwd = project_directory.path().canonicalize().unwrap().to_string_lossy().to_string();
+            insert_claude_lifecycle_row(&database, &project.id, &session_id, "STARTING", &cwd);
+            let center = AgentSessionCenter::default();
+            let child = Arc::new(Mutex::new(long_running_fixture()));
+            let pid = child.lock().unwrap().id();
+            let registered = stage == "RUNNING";
+            if registered {
+                center.claude_processes.lock().unwrap().insert(
+                    session_id.clone(),
+                    OwnedClaudeProcess {
+                        child: child.clone(),
+                        pid,
+                        stop_requested: Arc::new(AtomicBool::new(false)),
+                        escalation_requested: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+            fail_resume_setup(
+                &center,
+                &database,
+                &session_id,
+                Some(child.clone()),
+                registered,
+                stage,
+                "injected boundary failure",
+            );
+            assert!(child.lock().unwrap().try_wait().unwrap().is_some(), "{stage}");
+            assert!(!center.claude_processes.lock().unwrap().contains_key(&session_id), "{stage}");
+            let session = load_session(&database, &session_id).unwrap();
+            assert_eq!(session.state, "FAILED", "{stage}");
+            assert_eq!(session.provider_session_id.as_deref(), Some(format!("provider-{session_id}").as_str()), "{stage}");
         }
     }
 
