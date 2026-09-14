@@ -4079,24 +4079,9 @@ function renderMarkdown(text: string) {
   return blocks;
 }
 
-const CLAUDE_LIVE_SESSION_STATES = new Set([
-  "STARTING",
-  "RUNNING",
-  "WAITING_PERMISSION",
-  "WAITING_USER",
-  "AUTH_REQUIRED",
-  "USAGE_LIMITED",
-  "NETWORK_ERROR",
-  "STOPPING",
-]);
-
-function isClaudeLiveSessionState(state: string) {
-  return CLAUDE_LIVE_SESSION_STATES.has(state);
-}
-
 function isLiveAgentSession(session: AgentSession) {
   return session.provider === "CLAUDE"
-    ? isClaudeLiveSessionState(session.state)
+    ? session.canStop
     : ["STARTING", "RUNNING", "WAITING_PERMISSION", "WAITING_USER", "STOPPING"].includes(session.state);
 }
 

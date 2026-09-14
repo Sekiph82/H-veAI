@@ -550,6 +550,11 @@ ALTER TABLE agent_sessions ADD COLUMN provider_cwd_identity TEXT;
 CREATE INDEX idx_agent_sessions_provider_identity ON agent_sessions(provider, provider_session_id);
 "#;
 
+const CLAUDE_CONTROL_DIAGNOSTIC_FIELDS: &str = r#"
+ALTER TABLE agent_sessions ADD COLUMN current_diagnostic_code TEXT;
+ALTER TABLE agent_sessions ADD COLUMN current_diagnostic_message TEXT;
+"#;
+
 pub fn migrations() -> &'static [Migration] {
     &[
         Migration {
@@ -672,6 +677,11 @@ pub fn migrations() -> &'static [Migration] {
             name: "agent_provider_session_provenance",
             sql: AGENT_PROVIDER_PROVENANCE_FIELDS,
         },
+        Migration {
+            version: 25,
+            name: "claude_control_diagnostic_fields",
+            sql: CLAUDE_CONTROL_DIAGNOSTIC_FIELDS,
+        },
     ]
 }
 
@@ -770,8 +780,8 @@ mod tests {
     fn fresh_database_reaches_latest_version() {
         let (_directory, mut connection) = temp_connection();
         let report = apply_migrations(&mut connection, migrations()).expect("migrations apply");
-        assert_eq!(report.schema_version, 24);
-        assert_eq!(report.migration_count, 24);
+        assert_eq!(report.schema_version, 25);
+        assert_eq!(report.migration_count, 25);
         assert_eq!(report.last_migration_status, "APPLIED");
     }
 
@@ -781,7 +791,7 @@ mod tests {
         apply_migrations(&mut connection, migrations()).expect("first apply");
         let report = apply_migrations(&mut connection, migrations()).expect("second apply");
         assert_eq!(report.last_migration_status, "ALREADY_CURRENT");
-        assert_eq!(report.migration_count, 24);
+        assert_eq!(report.migration_count, 25);
     }
 
     #[test]
@@ -892,7 +902,7 @@ mod tests {
         let (_directory, mut connection) = temp_connection();
         let first = apply_migrations(&mut connection, migrations()).expect("first apply");
         let second = apply_migrations(&mut connection, migrations()).expect("rerun");
-        assert_eq!(first.schema_version, 24);
+        assert_eq!(first.schema_version, 25);
         assert_eq!(second.last_migration_status, "ALREADY_CURRENT");
         let mismatch = [Migration {
             version: 1,

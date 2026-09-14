@@ -56,6 +56,7 @@ export type AgentSession = {
   providerCwdIdentity: string;
   elapsedMs: number | null;
   supportsResume: boolean;
+  canStop: boolean;
   supportsPty: boolean;
   events: SessionEvent[];
 };
