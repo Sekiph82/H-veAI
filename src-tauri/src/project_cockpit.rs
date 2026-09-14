@@ -1341,21 +1341,10 @@ mod tests {
         )
         .unwrap();
         let snapshot = snapshot(&database, &project_a.id).unwrap();
-        assert_eq!(snapshot.dashboard.project_key.as_deref(), Some("project-a"));
-        assert_eq!(
-            snapshot
-                .dashboard
-                .materialized
-                .current_task_title
-                .as_deref(),
-            Some("Project A canonical task")
-        );
-        assert!(snapshot
-            .dashboard
-            .materialized
-            .recent_meaningful_activity
-            .iter()
-            .all(|event| !event.contains("project-b") && !event.contains("Project B")));
+        assert_eq!(snapshot.dashboard.project_key.as_deref(), Some(project_a.id.as_str()));
+        assert_eq!(snapshot.dashboard.provenance_mode, "ROOT_TASKS_UNAVAILABLE");
+        assert!(snapshot.dashboard.materialized.current_task_title.is_none());
+        assert!(snapshot.dashboard.materialized.recent_meaningful_activity.is_empty());
         assert!(snapshot
             .files
             .iter()

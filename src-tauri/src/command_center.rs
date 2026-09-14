@@ -725,7 +725,10 @@ fn summarize_project(
 > {
     let dashboard = project_dashboard::resolve(database, &project.id)?;
     let truth = control_plane::ProjectTruthResolver::resolve(database, &project.id)?;
-    let control_plane_snapshot = control_plane::snapshot(database, &project.id).ok();
+    let root_tasks_only = dashboard.provenance_mode.starts_with("ROOT_TASKS");
+    let control_plane_snapshot = (!root_tasks_only)
+        .then(|| control_plane::snapshot(database, &project.id).ok())
+        .flatten();
     let mut warnings = dashboard.warnings.clone();
     warnings.extend(truth.warnings.iter().cloned());
     if let Some(control_plane) = control_plane_snapshot.as_ref() {
@@ -781,9 +784,11 @@ fn summarize_project(
         .filter(|task| {
             task_is_complete(
                 task,
-                workflow_tasks
-                    .iter()
-                    .find(|workflow| workflow.task_id == task.id),
+                (!root_tasks_only).then(|| {
+                    workflow_tasks
+                        .iter()
+                        .find(|workflow| workflow.task_id == task.id)
+                }).flatten(),
             )
         })
         .count();
@@ -800,10 +805,14 @@ fn summarize_project(
         .current_task_id
         .as_deref()
         .and_then(|task_id| tasks.iter().find(|task| task.id == task_id));
-    let current_workflow = truth
-        .current_task_id
-        .as_deref()
-        .and_then(|task_id| workflow_tasks.iter().find(|task| task.task_id == task_id));
+    let current_workflow = (!root_tasks_only)
+        .then(|| {
+            truth
+                .current_task_id
+                .as_deref()
+                .and_then(|task_id| workflow_tasks.iter().find(|task| task.task_id == task_id))
+        })
+        .flatten();
     let current_state = truth.workflow_state.clone();
     let materialized_conflict = current_workflow.as_ref().and_then(|workflow| {
         dashboard
@@ -826,7 +835,10 @@ fn summarize_project(
             occurred_at: event.occurred_at.clone(),
             actor: event.actor_type.map(|actor| actor.to_string()),
         });
-    let allowed_actors: Vec<String> = current_workflow
+    let allowed_actors: Vec<String> = if root_tasks_only {
+        truth.required_actor.clone().into_iter().collect()
+    } else {
+        current_workflow
         .as_ref()
         .map(|task| {
             task.allowed_actors
@@ -834,7 +846,8 @@ fn summarize_project(
                 .map(ToString::to_string)
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
     let next_action = truth.next_action.clone();
     let refresh_health = read_task_refresh_health(database, &project.id)?;
     if let Some(refresh) = refresh_health.as_ref() {
@@ -975,24 +988,28 @@ fn summarize_project(
             title: task.title.clone(),
             source_path: task.source_path.clone(),
             parsed_status: task.parsed_status.clone(),
-            workflow_state: workflow_tasks
-                .iter()
-                .find(|workflow| workflow.task_id == task.id)
-                .map(|workflow| workflow.current_state.to_string()),
+            workflow_state: if root_tasks_only {
+                truth.workflow_state.clone()
+            } else {
+                workflow_tasks
+                    .iter()
+                    .find(|workflow| workflow.task_id == task.id)
+                    .map(|workflow| workflow.current_state.to_string())
+            },
             required_actor: task.required_actor.clone(),
         }),
         current_state,
         last_action,
         next_action,
-        allowed_actors: if allowed_actors.is_empty() {
+        allowed_actors: if root_tasks_only || !allowed_actors.is_empty() {
+            allowed_actors
+        } else {
             dashboard
                 .materialized
                 .required_actor
                 .clone()
                 .into_iter()
                 .collect()
-        } else {
-            allowed_actors
         },
         total_tasks,
         active_tasks,
@@ -1071,6 +1088,20 @@ fn project_health(
 ) -> String {
     if project.status == "MISSING" {
         return "MISSING".into();
+    }
+    if dashboard.provenance_mode.starts_with("ROOT_TASKS") {
+        if truth.reconciliation_state == "NEEDS_RECONCILIATION" {
+            return "NEEDS_RECONCILIATION".into();
+        }
+        return match truth.workflow_state.as_deref() {
+            Some("BLOCKED") => "BLOCKED".into(),
+            Some("WAITING_HUMAN") | Some("WAITING_EXTERNAL") => "ATTENTION".into(),
+            Some("IN_PROGRESS") | Some("RUNNING") => "RUNNING".into(),
+            Some("COMPLETE") | Some("COMPLETED") | Some("DONE") | Some("TASK_COMPLETE") => {
+                "HEALTHY".into()
+            }
+            _ => "UNKNOWN".into(),
+        };
     }
     if control_plane.is_some_and(|snapshot| snapshot.adopted)
         && truth.reconciliation_state == "NEEDS_RECONCILIATION"
@@ -2115,7 +2146,7 @@ mod tests {
             Some("NEEDS_RECONCILIATION")
         );
         assert!(project.last_action.is_none());
-        assert!(project
+        assert!(!project
             .warnings
             .iter()
             .any(|warning| warning.contains("multiple active canonical workflow tasks")));
@@ -2189,12 +2220,10 @@ mod tests {
             "started B",
         );
         let snapshot = snapshot(&database).unwrap();
+        assert!(snapshot.projects[0].current_task.is_none());
         assert_eq!(
-            snapshot.projects[0]
-                .current_task
-                .as_ref()
-                .map(|task| task.task_id.as_str()),
-            Some(tasks[1].id.as_str())
+            snapshot.projects[0].reconciliation_state,
+            "NEEDS_RECONCILIATION"
         );
     }
 
@@ -3128,7 +3157,7 @@ mod tests {
         let (_db_dir, _project_dir, database, _project_id, _tasks) =
             fixture("# Work\n- [ ] internal task\n", Some(manifest));
         let project = &snapshot(&database).unwrap().projects[0];
-        assert_eq!(project.health, "UNKNOWN");
+        assert_eq!(project.health, "NEEDS_RECONCILIATION");
         assert_eq!(
             project.materialized.project_status.as_deref(),
             Some("UNKNOWN")

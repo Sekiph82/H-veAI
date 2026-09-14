@@ -2089,6 +2089,17 @@ fn resolve_root_tasks_truth(
     database: &DatabaseState,
     project_id: &str,
 ) -> Result<ProjectTruth, String> {
+    let project = fetch_project(database, project_id)?;
+    let root = Path::new(&project.normalized_path);
+    let tasks_path = root.join("TASKS.md");
+    if !fs::metadata(&tasks_path).is_ok_and(|metadata| metadata.is_file())
+        || File::open(&tasks_path).is_err()
+    {
+        return Ok(root_tasks_unavailable_truth(
+            project_id,
+            "repository-root TASKS.md is absent, not a file, or unavailable",
+        ));
+    }
     let intelligence = task_intelligence::list(database, project_id).ok();
     let mut warnings = Vec::new();
     let mut provenance = vec!["TASKS.md".into()];
@@ -2107,56 +2118,18 @@ fn resolve_root_tasks_truth(
     } else {
         warnings.push("root TASKS.md task intelligence is unavailable".into());
     }
-    let workflows = workflow::project_list(
-        database,
-        workflow::WorkflowProjectListQuery {
-            project_id: project_id.to_string(),
-            limit: Some(workflow::MAX_HISTORY_LIMIT),
-        },
-    )
-    .map(|value| value.tasks)
-    .unwrap_or_default();
-    let task_by_id = canonical_tasks
-        .iter()
-        .map(|task| (task.id.as_str(), *task))
-        .collect::<std::collections::HashMap<_, _>>();
-    let workflow_candidates = workflows
-        .iter()
-        .filter(|candidate| {
-            candidate.source_active
-                && candidate.workflow_managed
-                && task_by_id.contains_key(candidate.task_id.as_str())
-                && !truth_task_complete(task_by_id[candidate.task_id.as_str()], Some(candidate))
-        })
-        .collect::<Vec<_>>();
     let active_tasks = canonical_tasks
         .iter()
         .filter(|task| !truth_task_complete(task, None))
         .copied()
         .collect::<Vec<_>>();
-    let selected_workflow = (workflow_candidates.len() == 1).then(|| workflow_candidates[0]);
-    let selected_task = selected_workflow
-        .and_then(|workflow| task_by_id.get(workflow.task_id.as_str()).copied())
-        .or_else(|| {
-            (selected_workflow.is_none()
-                && active_tasks.len() == 1
-                && matches!(
-                    active_tasks[0].parsed_status.to_ascii_uppercase().as_str(),
-                    "IN_PROGRESS" | "RUNNING" | "BLOCKED" | "WAITING_HUMAN" | "WAITING_EXTERNAL"
-                ))
-            .then(|| active_tasks[0])
-        });
-    if workflow_candidates.len() > 1 {
-        warnings.push(format!(
-            "multiple active canonical workflow tasks require reconciliation: {}",
-            workflow_candidates
-                .iter()
-                .map(|value| value.task_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    if active_tasks.len() > 1 && selected_workflow.is_none() {
+    let selected_task = (active_tasks.len() == 1
+        && matches!(
+            active_tasks[0].parsed_status.to_ascii_uppercase().as_str(),
+            "IN_PROGRESS" | "RUNNING" | "BLOCKED" | "WAITING_HUMAN" | "WAITING_EXTERNAL"
+        ))
+    .then(|| active_tasks[0]);
+    if active_tasks.len() > 1 {
         warnings.push("multiple active root TASKS.md tasks require reconciliation".into());
     }
     let current_milestone = selected_task.and_then(|task| task.milestone.clone());
@@ -2181,26 +2154,19 @@ fn resolve_root_tasks_truth(
         provenance.push(task.evidence.content_hash.clone());
     }
     let current_task_id = selected_task.map(|task| task.id.clone());
-    let selected_workflow_state = selected_workflow.map(|workflow| workflow.current_state.to_string());
     Ok(ProjectTruth {
         project_id: project_id.into(),
         current_task_id,
         current_task_title: selected_task.map(|task| task.title.clone()),
-        current_task_status: selected_workflow_state
-            .clone()
-            .or_else(|| selected_task.map(|task| task.parsed_status.clone())),
+        current_task_status: selected_task.map(|task| task.parsed_status.clone()),
         current_milestone,
         current_cycle: None,
-        workflow_state: selected_workflow_state
-            .or_else(|| selected_task.map(|task| task.parsed_status.clone()))
+        workflow_state: selected_task
+            .map(|task| task.parsed_status.clone())
             .or_else(|| (selected_task.is_none()).then_some("NEEDS_RECONCILIATION".into())),
-        required_actor: selected_workflow
-            .and_then(|workflow| workflow.required_actor.clone())
-            .or_else(|| selected_task.and_then(|task| task.required_actor.clone())),
-        next_action: selected_workflow
-            .and_then(|workflow| workflow.allowed_next_states.first())
-            .map(|state| format!("Advance to {state}"))
-            .or_else(|| selected_task.and_then(|task| task.next_step.clone()))
+        required_actor: selected_task.and_then(|task| task.required_actor.clone()),
+        next_action: selected_task
+            .and_then(|task| task.next_step.clone())
             .or_else(|| (selected_task.is_none()).then_some("Reconcile current task from TASKS.md".into())),
         blockers: selected_task.map(|task| task.blockers.clone()).unwrap_or_default(),
         progress_percent,
@@ -2211,16 +2177,34 @@ fn resolve_root_tasks_truth(
             "NEEDS_RECONCILIATION".into()
         },
         provenance,
-        reconciliation_state: if selected_task.is_some()
-            && workflow_candidates.len() <= 1
-            && (selected_workflow.is_some() || active_tasks.len() == 1)
-        {
+        reconciliation_state: if selected_task.is_some() && active_tasks.len() == 1 {
             "RESOLVED".into()
         } else {
             "NEEDS_RECONCILIATION".into()
         },
         warnings,
     })
+}
+
+fn root_tasks_unavailable_truth(project_id: &str, reason: &str) -> ProjectTruth {
+    ProjectTruth {
+        project_id: project_id.into(),
+        current_task_id: None,
+        current_task_title: None,
+        current_task_status: None,
+        current_milestone: None,
+        current_cycle: None,
+        workflow_state: Some("NEEDS_RECONCILIATION".into()),
+        required_actor: None,
+        next_action: Some("Restore a readable repository-root TASKS.md".into()),
+        blockers: Vec::new(),
+        progress_percent: None,
+        progress_scope: None,
+        authority_source: "ROOT_TASKS_UNAVAILABLE".into(),
+        provenance: vec!["TASKS.md".into()],
+        reconciliation_state: "NEEDS_RECONCILIATION".into(),
+        warnings: vec![reason.into()],
+    }
 }
 
 fn legacy_control_plane_truth_impl(database: &DatabaseState, project_id: &str) -> Result<ProjectTruth, String> {
@@ -3725,6 +3709,133 @@ mod tests {
     }
 
     #[test]
+    fn x04_v03_persisted_workflow_cannot_override_root_tasks_fields() {
+        let db_dir = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("TASKS.md"),
+            "# Current\n- [ ] TASK-1: Root task\n  Owner: CODEX\n  Next step: run root verification\n",
+        )
+        .unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let registered = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: root.path().to_string_lossy().into_owned(),
+                name: Some("Workflow conflict fixture".into()),
+            },
+        )
+        .unwrap();
+        let task = crate::task_intelligence::parse(&database, &registered.id)
+            .unwrap()
+            .tasks[0]
+            .id
+            .clone();
+        crate::workflow::transition(
+            &database,
+            crate::workflow::WorkflowTransitionRequest {
+                task_id: task.clone(),
+                expected_from_state: crate::workflow::WorkflowState::Backlog,
+                to_state: crate::workflow::WorkflowState::PlanningRequired,
+                actor_type: crate::workflow::ActorType::Human,
+                request_id: "workflow-conflict".into(),
+                summary: "historical workflow row must not select truth".into(),
+                evidence_refs: Vec::new(),
+            },
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("TASKS.md"),
+            "# Current\n- [~] TASK-1: Root task\n  Owner: CODEX\n  Next step: run root verification\n",
+        )
+        .unwrap();
+        crate::task_intelligence::parse(&database, &registered.id).unwrap();
+
+        let truth = ProjectTruthResolver::resolve(&database, &registered.id).unwrap();
+        assert_eq!(truth.current_task_id.as_deref(), Some(task.as_str()));
+        assert_eq!(truth.current_task_status.as_deref(), Some("IN_PROGRESS"));
+        assert_eq!(truth.workflow_state.as_deref(), Some("IN_PROGRESS"));
+        assert_eq!(truth.required_actor.as_deref(), Some("Codex"));
+        assert_eq!(truth.next_action.as_deref(), Some("run root verification"));
+    }
+
+    #[test]
+    fn x04_v03_ambiguous_root_tasks_fail_closed_even_with_workflow_history() {
+        let db_dir = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("TASKS.md"),
+            "# Current\n- [~] TASK-1: First root task\n- [~] TASK-2: Second root task\n",
+        )
+        .unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let registered = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: root.path().to_string_lossy().into_owned(),
+                name: Some("Ambiguous root fixture".into()),
+            },
+        )
+        .unwrap();
+        let parsed = crate::task_intelligence::parse(&database, &registered.id).unwrap();
+        crate::workflow::transition(
+            &database,
+            crate::workflow::WorkflowTransitionRequest {
+                task_id: parsed.tasks[0].id.clone(),
+                expected_from_state: crate::workflow::WorkflowState::Backlog,
+                to_state: crate::workflow::WorkflowState::PlanningRequired,
+                actor_type: crate::workflow::ActorType::Human,
+                request_id: "ambiguous-workflow".into(),
+                summary: "historical row cannot disambiguate root truth".into(),
+                evidence_refs: Vec::new(),
+            },
+        )
+        .unwrap();
+        crate::task_intelligence::parse(&database, &registered.id).unwrap();
+
+        let truth = ProjectTruthResolver::resolve(&database, &registered.id).unwrap();
+        assert_eq!(truth.current_task_id, None);
+        assert_eq!(truth.authority_source, "NEEDS_RECONCILIATION");
+        assert_eq!(truth.reconciliation_state, "NEEDS_RECONCILIATION");
+        assert!(truth
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("multiple active root TASKS.md")));
+    }
+
+    #[test]
+    fn x04_v03_missing_root_tasks_fails_closed_without_hidden_fallback() {
+        let db_dir = tempdir().unwrap();
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join(".hiveai")).unwrap();
+        fs::write(
+            root.path().join(PROJECT_JSON),
+            r#"{"schema":"hiveai-project/v1","projectKey":"hidden"}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.path().join(STATE_JSON),
+            r#"{"currentTaskId":"HIDDEN","workflowState":"BLOCKED"}"#,
+        )
+        .unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        let registered = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: root.path().to_string_lossy().into_owned(),
+                name: Some("Missing root fixture".into()),
+            },
+        )
+        .unwrap();
+
+        let truth = ProjectTruthResolver::resolve(&database, &registered.id).unwrap();
+        assert_eq!(truth.current_task_id, None);
+        assert_eq!(truth.authority_source, "ROOT_TASKS_UNAVAILABLE");
+        assert_eq!(truth.workflow_state.as_deref(), Some("NEEDS_RECONCILIATION"));
+        assert!(truth.provenance.iter().all(|path| path == "TASKS.md"));
+    }
+
+    #[test]
     fn parser_uses_explicit_json_and_does_not_promote_body_colons() {
         let root = tempdir().unwrap();
         fs::create_dir(root.path().join(".hiveai")).unwrap();
@@ -4211,7 +4322,7 @@ mod tests {
     }
 
     #[test]
-    fn project_truth_survives_materialization_and_database_restart() {
+    fn project_truth_ignores_persisted_workflow_after_database_restart() {
         let db_dir = tempdir().unwrap();
         let project_dir = tempdir().unwrap();
         fs::write(
@@ -4290,7 +4401,7 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(project_dir.path().join(STATE_JSON)).unwrap())
                 .unwrap();
-        assert_eq!(persisted["currentTaskId"], task_b);
+        assert!(persisted["currentTaskId"].is_null());
         assert_eq!(persisted["updatedBy"], "HIVEAI_SYSTEM");
         drop(database);
 
@@ -4301,12 +4412,10 @@ mod tests {
             .iter()
             .find(|value| value.project_id == project.id)
             .unwrap();
-        assert_eq!(summary.current_task.as_ref().unwrap().task_id, task_b);
+        assert!(summary.current_task.is_none());
         let cockpit = crate::project_cockpit::snapshot(&restarted, &project.id).unwrap();
-        assert_eq!(
-            cockpit.truth.current_task_id.as_deref(),
-            Some(task_b.as_str())
-        );
+        assert_eq!(cockpit.truth.current_task_id, None);
+        assert_eq!(cockpit.truth.reconciliation_state, "NEEDS_RECONCILIATION");
     }
 
     #[test]

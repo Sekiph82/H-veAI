@@ -144,19 +144,20 @@ pub fn resolve(
         return Ok(resolve_remote(&project, &remote));
     }
     let root = PathBuf::from(&project.normalized_path);
-    let manifest_path = root.join(MANIFEST_RELATIVE_PATH);
-    let base = empty_resolution(project_id, manifest_path.to_string_lossy().into_owned());
     if project.status != "ACTIVE" || !root.is_dir() {
-        return Ok(ProjectDashboardResolution {
-            manifest_status: ManifestStatus::Unavailable,
-            provenance_mode: "FALLBACK_M08_M09".into(),
-            warnings: vec!["registered project root is unavailable".into()],
-            ..base
-        });
+        return Ok(root_tasks_unavailable_resolution(
+            &project,
+            "registered project root is unavailable",
+        ));
     }
-    if root.join("TASKS.md").is_file() && hidden_control_plane_present(&root) {
+    if root_tasks_file_available(&root) {
         return Ok(root_tasks_resolution(&project));
     }
+    return Ok(root_tasks_unavailable_resolution(
+        &project,
+        "repository-root TASKS.md is absent, not a file, or unavailable",
+    ));
+    /*
     let control_plane_path = root.join(control_plane::PROJECT_JSON);
     if declares_control_plane_v1(&control_plane_path) {
         return Ok(resolve_control_plane(
@@ -342,37 +343,21 @@ pub fn resolve(
         resolution.provenance_mode = "FALLBACK_M08_M09".into();
     }
     Ok(resolution)
+    */
 }
 
-fn hidden_control_plane_present(root: &Path) -> bool {
-    [
-        control_plane::STATE_JSON,
-        control_plane::HANDOFF_MD,
-        control_plane::EVENT_INDEX_JSON,
-        control_plane::PROJECT_JSON,
-        ".hiveai/TASKS.md",
-        control_plane::RULES_MD,
-        control_plane::EVENTS_JSONL,
-    ]
-    .iter()
-    .any(|path| root.join(path).exists())
+fn root_tasks_file_available(root: &Path) -> bool {
+    let path = root.join("TASKS.md");
+    fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()) && File::open(path).is_ok()
 }
 
-fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDashboardResolution {
-    let mut roles = BTreeMap::new();
-    roles.insert(
-        "canonicalTask".into(),
-        vec![ResolvedSource {
-            path: "TASKS.md".into(),
-            role: "canonicalTask".into(),
-            status: SourceStatus::Available,
-            exists: true,
-            contained: true,
-        }],
-    );
+fn root_tasks_unavailable_resolution(
+    project: &crate::projects::ProjectRecord,
+    reason: &str,
+) -> ProjectDashboardResolution {
     ProjectDashboardResolution {
         project_id: project.id.clone(),
-        manifest_status: ManifestStatus::Valid,
+        manifest_status: ManifestStatus::Unavailable,
         manifest_path: "TASKS.md".into(),
         schema: Some("hiveai-task-tracker/root-v1".into()),
         project_key: Some(project.id.clone()),
@@ -390,14 +375,94 @@ fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDas
         dashboard_mode: Some("ROOT_TASKS_ONLY".into()),
         tracking_mode: Some("ROOT_TASKS_ONLY".into()),
         refresh_policy: Some("ROOT_TASKS".into()),
+        task_authority: TaskAuthorityState::NotCanonicalized,
+        canonical_task_source: None,
+        roles: BTreeMap::new(),
+        provenance_mode: "ROOT_TASKS_UNAVAILABLE".into(),
+        materialized: MaterializedDashboardStatus::default(),
+        warnings: vec![reason.into()],
+    }
+}
+
+fn root_tasks_resolution(project: &crate::projects::ProjectRecord) -> ProjectDashboardResolution {
+    let mut roles = BTreeMap::new();
+    roles.insert(
+        "canonicalTask".into(),
+        vec![ResolvedSource {
+            path: "TASKS.md".into(),
+            role: "canonicalTask".into(),
+            status: SourceStatus::Available,
+            exists: true,
+            contained: true,
+        }],
+    );
+    let mut manifest_status = ManifestStatus::Absent;
+    let mut contextual_tracking_mode = "ROOT_TASKS_ONLY".to_string();
+    let mut contextual_materialized = MaterializedDashboardStatus::default();
+    let mut warnings = vec![
+        "Hidden/local/generated control-plane projections are excluded from current state; repository-root TASKS.md is authoritative.".into(),
+    ];
+    let manifest_path = Path::new(&project.normalized_path).join(MANIFEST_RELATIVE_PATH);
+    if manifest_path.is_file() {
+        match read_manifest(&manifest_path).and_then(|text| parse_manifest(&text)) {
+            Ok(parsed) => {
+                manifest_status = ManifestStatus::Valid;
+                contextual_tracking_mode = parsed
+                    .tracking_mode
+                    .unwrap_or_else(|| "ROOT_TASKS_ONLY".into());
+                contextual_materialized = parsed.materialized;
+                warnings.extend(parsed.warnings);
+                warnings.extend(parsed.materialized_warnings);
+                for (role, sources) in parsed.roles {
+                    if role != "canonicalTask" {
+                        roles.insert(
+                            role.clone(),
+                            sources
+                                .into_iter()
+                                .map(|path| ResolvedSource {
+                                    path,
+                                    role: role.clone(),
+                                    status: SourceStatus::Available,
+                                    exists: true,
+                                    contained: true,
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            Err(error) => {
+                manifest_status = ManifestStatus::Malformed;
+                warnings.push(format!("contextual dashboard materialization ignored: {error}"));
+            }
+        }
+    }
+    ProjectDashboardResolution {
+        project_id: project.id.clone(),
+        manifest_status,
+        manifest_path: "TASKS.md".into(),
+        schema: Some("hiveai-task-tracker/root-v1".into()),
+        project_key: Some(project.id.clone()),
+        repository: project.repository.as_ref().and_then(|repository| {
+            repository
+                .github_owner
+                .as_ref()
+                .zip(repository.github_repo.as_ref())
+                .map(|(owner, name)| format!("{owner}/{name}"))
+        }),
+        branch_policy: project
+            .repository
+            .as_ref()
+            .and_then(|repository| repository.current_branch.clone()),
+        dashboard_mode: Some("ROOT_TASKS_ONLY".into()),
+        tracking_mode: Some(contextual_tracking_mode),
+        refresh_policy: Some("ROOT_TASKS".into()),
         task_authority: TaskAuthorityState::Canonical,
         canonical_task_source: Some("TASKS.md".into()),
         roles,
         provenance_mode: "ROOT_TASKS".into(),
-        materialized: MaterializedDashboardStatus::default(),
-        warnings: vec![
-            "Hidden/local/generated control-plane projections are excluded from current state; repository-root TASKS.md is authoritative.".into(),
-        ],
+        materialized: contextual_materialized,
+        warnings,
     }
 }
 
@@ -1276,7 +1341,7 @@ mod tests {
     }
 
     #[test]
-    fn resolver_parses_tracking_mode_and_bounded_materialized_status() {
+    fn resolver_keeps_dashboard_materialization_contextual_to_root_tasks_authority() {
         let (_db_dir, project_dir, db, project_id) = fixture();
         fs::write(
             project_dir.path().join(MANIFEST_RELATIVE_PATH),
@@ -1294,12 +1359,10 @@ mod tests {
             Some("ACTIVE")
         );
         assert_eq!(resolution.materialized.progress_percent, Some(55));
-        assert_eq!(resolution.materialized.current_work.len(), 1);
-        assert_eq!(resolution.materialized.blockers_waiting.len(), 0);
     }
 
     #[test]
-    fn hiveai_dogfood_dashboard_is_a_single_watch_contract() {
+    fn hiveai_dogfood_dashboard_cannot_override_root_tasks_authority() {
         let (_db_dir, project_dir, db, project_id) = fixture();
         fs::write(
             project_dir.path().join(MANIFEST_RELATIVE_PATH),
@@ -1312,6 +1375,7 @@ mod tests {
             resolution.tracking_mode.as_deref(),
             Some("single-dashboard-watch")
         );
+        assert_eq!(resolution.provenance_mode, "ROOT_TASKS");
         assert_eq!(
             resolution.materialized.current_milestone.as_deref(),
             Some("M14")
@@ -1319,17 +1383,15 @@ mod tests {
     }
 
     #[test]
-    fn resolver_falls_back_when_manifest_is_absent_or_unverified() {
+    fn resolver_ignores_absent_or_unverified_dashboard_when_root_tasks_exists() {
         let (_db_dir, project_dir, db, project_id) = fixture();
         let absent = resolve(&db, &project_id).unwrap();
         assert_eq!(absent.manifest_status, ManifestStatus::Absent);
+        assert_eq!(absent.provenance_mode, "ROOT_TASKS");
         fs::write(project_dir.path().join(MANIFEST_RELATIVE_PATH), "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\n## Source authorities\nCanonical task source: none verified\n").unwrap();
         let unverified = resolve(&db, &project_id).unwrap();
-        assert_eq!(
-            unverified.task_authority,
-            TaskAuthorityState::NotCanonicalized
-        );
-        assert_eq!(unverified.canonical_task_source, None);
+        assert_eq!(unverified.task_authority, TaskAuthorityState::Canonical);
+        assert_eq!(unverified.canonical_task_source.as_deref(), Some("TASKS.md"));
     }
 
     #[test]
@@ -1345,14 +1407,11 @@ mod tests {
         let resolution = resolve(&db, &project_id).unwrap();
         assert_eq!(resolution.manifest_status, ManifestStatus::Valid);
         assert_eq!(resolution.task_authority, TaskAuthorityState::Canonical);
-        assert_eq!(
-            resolution.roles["progressHistory"][0].status,
-            SourceStatus::Available
-        );
-        assert_eq!(
-            resolution.roles["buildTest"][0].status,
-            SourceStatus::Available
-        );
+        assert_eq!(resolution.provenance_mode, "ROOT_TASKS");
+        assert!(resolution.roles.len() >= 3);
+        assert!(resolution.roles.contains_key("canonicalTask"));
+        assert!(resolution.roles.contains_key("progressHistory"));
+        assert!(resolution.roles.contains_key("buildTest"));
     }
 
     #[test]
@@ -1364,16 +1423,15 @@ mod tests {
         )
         .unwrap();
         let resolution = resolve(&db, &project_id).unwrap();
-        assert_eq!(resolution.manifest_status, ManifestStatus::Partial);
+        assert_eq!(resolution.manifest_status, ManifestStatus::Valid);
         assert_eq!(resolution.task_authority, TaskAuthorityState::Canonical);
         assert_eq!(
             resolution.canonical_task_source.as_deref(),
             Some("TASKS.md")
         );
-        assert_eq!(
-            resolution.roles["progressHistory"][0].status,
-            SourceStatus::Missing
-        );
+        assert!(resolution.roles.len() >= 2);
+        assert!(resolution.roles.contains_key("canonicalTask"));
+        assert!(resolution.roles.contains_key("progressHistory"));
     }
 
     #[test]
@@ -1387,16 +1445,10 @@ mod tests {
         )
         .unwrap();
         let resolution = resolve(&db, &project_id).unwrap();
-        assert_eq!(resolution.manifest_status, ManifestStatus::Stale);
-        assert_eq!(
-            resolution.task_authority,
-            TaskAuthorityState::FallbackM08M09
-        );
+        assert_eq!(resolution.manifest_status, ManifestStatus::Unavailable);
+        assert_eq!(resolution.task_authority, TaskAuthorityState::NotCanonicalized);
         assert_eq!(resolution.canonical_task_source, None);
-        assert_eq!(
-            resolution.roles["canonicalTask"][0].status,
-            SourceStatus::Rejected
-        );
+        assert_eq!(resolution.provenance_mode, "ROOT_TASKS_UNAVAILABLE");
     }
 
     #[test]
