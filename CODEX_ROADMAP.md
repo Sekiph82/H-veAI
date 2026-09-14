@@ -508,7 +508,7 @@ Packages:
 
 Exit: Codex and Claude operate through one consistent H!veAI agent model.
 
-Status: ACTIVE / V03 IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_REAUDIT_AND_OWNER_NATIVE_ACCEPTANCE.
+Status: ACTIVE / V04 CHANGES_REQUIRED / REMEDIATION_IN_PROGRESS. The authoritative V03 strict re-audit requires closure of F-M17-V03-001 through F-M17-V03-005; after implementation, independent V04 strict re-audit and owner-native acceptance remain required.
 
 ---
 
