@@ -33,7 +33,9 @@ describe("M16 Audit Center", () => {
     render(<App />);
     expect(await screen.findByRole("heading", { name: "Audit Center" })).toBeInTheDocument();
     expect(await screen.findByText("Evidence collected; Codex CLI provider unavailable.")).toBeInTheDocument();
-    expect(screen.getByText(/Codex CLI audit provider is not configured/)).toBeInTheDocument();
+    expect(screen.getByText("Selected persisted verdict")).toBeInTheDocument();
+    expect(screen.getByText(/persisted audit run recorded the Codex CLI audit provider as unavailable at that time/)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).not.toHaveTextContent("is not configured");
     expect(screen.getAllByText("FAILED", { selector: ".audit-badge" }).length).toBeGreaterThan(0);
     expect(screen.getByText("Required source symbol exists")).toBeInTheDocument();
     expect(screen.getByText("MAJOR", { selector: ".audit-badge" })).toBeInTheDocument();
@@ -46,7 +48,9 @@ describe("M16 Audit Center", () => {
     render(<App />);
     await screen.findByText(/Known defect/);
     fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByRole("button", { name: /Create remediation prompt/ }));
+    const createButton = screen.getByRole("button", { name: /Create remediation prompt/ });
+    await waitFor(() => expect(createButton).not.toBeDisabled());
+    fireEvent.click(createButton);
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_audit_create_remediation_prompt", { projectId: project.id, auditId: audit.id, findingIds: [finding.id], title: expect.any(String), summary: expect.any(String) }));
     expect(window.location.pathname).toBe("/prompts");
     expect(new URLSearchParams(window.location.search).get("auditId")).toBe(audit.id);

@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
@@ -526,6 +526,54 @@ pub struct AuditProviderReadiness {
     pub error_category: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuditProviderIdentity {
+    executable: Option<PathBuf>,
+    version: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedAuditProviderReadiness {
+    identity: AuditProviderIdentity,
+    readiness: AuditProviderReadiness,
+}
+
+/// Process-scoped, non-sensitive cache for the last explicitly verified
+/// provider readiness result. It is intentionally not persisted to disk.
+#[derive(Debug, Clone, Default)]
+pub struct AuditProviderReadinessState {
+    cached: Arc<Mutex<Option<CachedAuditProviderReadiness>>>,
+}
+
+impl AuditProviderReadinessState {
+    fn get(&self, identity: &AuditProviderIdentity) -> Option<AuditProviderReadiness> {
+        let cached = self.cached.lock().ok()?;
+        cached
+            .as_ref()
+            .filter(|item| &item.identity == identity)
+            .map(|item| item.readiness.clone())
+    }
+
+    fn set(&self, identity: AuditProviderIdentity, readiness: AuditProviderReadiness) {
+        if let Ok(mut cached) = self.cached.lock() {
+            *cached = Some(CachedAuditProviderReadiness {
+                identity,
+                readiness,
+            });
+        }
+    }
+
+    #[cfg(test)]
+    fn cache_for_test(&self, identity: AuditProviderIdentity, readiness: AuditProviderReadiness) {
+        self.set(identity, readiness);
+    }
+
+    #[cfg(test)]
+    fn read_for_test(&self, identity: &AuditProviderIdentity) -> Option<AuditProviderReadiness> {
+        self.get(identity)
+    }
+}
+
 fn audit_result_schema(input: &AuditInput) -> Value {
     let canonical_refs = input
         .requirements
@@ -998,7 +1046,22 @@ fn provider_readiness(
     }
 }
 
-pub fn audit_provider_readiness(
+fn current_provider_identity() -> AuditProviderIdentity {
+    let resolution = resolve_codex_executable();
+    let Some(executable) = resolution.selected else {
+        return AuditProviderIdentity {
+            executable: None,
+            version: None,
+        };
+    };
+    let version = probe_version(&executable, READINESS_TIMEOUT).ok();
+    AuditProviderIdentity {
+        executable: Some(executable),
+        version,
+    }
+}
+
+fn uncached_audit_provider_readiness(
     _database: &DatabaseState,
 ) -> Result<AuditProviderReadiness, String> {
     let resolution = resolve_codex_executable();
@@ -1077,6 +1140,17 @@ pub fn audit_provider_readiness(
     }
 }
 
+pub fn audit_provider_readiness(
+    state: &AuditProviderReadinessState,
+    database: &DatabaseState,
+) -> Result<AuditProviderReadiness, String> {
+    let identity = current_provider_identity();
+    if let Some(cached) = state.get(&identity) {
+        return Ok(cached);
+    }
+    uncached_audit_provider_readiness(database)
+}
+
 fn check_codex_readiness_with_runner(
     version: String,
     runner: &dyn CodexProcessRunner,
@@ -1150,35 +1224,44 @@ fn check_codex_readiness_with_runner(
 }
 
 pub fn check_audit_provider_readiness(
+    state: &AuditProviderReadinessState,
     database: &DatabaseState,
 ) -> Result<AuditProviderReadiness, String> {
-    let local = audit_provider_readiness(database)?;
+    let local = uncached_audit_provider_readiness(database)?;
     if local.status != "AUTH_UNVERIFIED" || !local.configured {
+        state.set(current_provider_identity(), local.clone());
         return Ok(local);
     }
     let resolution = resolve_codex_executable();
     let Some(executable) = resolution.selected else {
-        return Ok(provider_readiness(
+        let readiness = provider_readiness(
             "CODEX_NOT_FOUND",
             false,
             None,
             "No native Codex executable was found.",
-        ));
+        );
+        state.set(current_provider_identity(), readiness.clone());
+        return Ok(readiness);
     };
     let version =
         probe_version(&executable, READINESS_TIMEOUT).unwrap_or_else(|_| "UNAVAILABLE".into());
-    Ok(check_codex_readiness_with_runner(
-        version,
-        &NativeCodexProcessRunner { executable },
-    ))
+    let readiness =
+        check_codex_readiness_with_runner(version, &NativeCodexProcessRunner { executable });
+    state.set(current_provider_identity(), readiness.clone());
+    Ok(readiness)
 }
 
-fn resolve_production_model(database: &DatabaseState) -> ProductionAuditModel {
-    let readiness = match audit_provider_readiness(database) {
+fn resolve_production_model(
+    state: &AuditProviderReadinessState,
+    database: &DatabaseState,
+) -> ProductionAuditModel {
+    let readiness = match audit_provider_readiness(state, database) {
         Ok(value) => value,
         Err(_) => return ProductionAuditModel::Unavailable(UnavailableAuditModel),
     };
-    if readiness.status != "AUTH_UNVERIFIED" || !readiness.configured {
+    if !readiness.configured
+        || !matches!(readiness.status.as_str(), "AUTH_UNVERIFIED" | "READY")
+    {
         return ProductionAuditModel::Unavailable(UnavailableAuditModel);
     }
     let resolution = resolve_codex_executable();
@@ -3157,8 +3240,12 @@ fn semantic_degraded_evaluation<M: AuditModel>(error: String, model: &M) -> Audi
     }
 }
 
-pub fn run(database: &DatabaseState, request: AuditInputRequest) -> Result<AuditRun, String> {
-    let model = resolve_production_model(database);
+pub fn run(
+    state: &AuditProviderReadinessState,
+    database: &DatabaseState,
+    request: AuditInputRequest,
+) -> Result<AuditRun, String> {
+    let model = resolve_production_model(state, database);
     run_with_model(database, request, &model)
 }
 
@@ -5545,6 +5632,80 @@ mod tests {
         mock_codex_result(Some(
             r#"{"verdict":"CONDITIONAL","confidence":"LOW","regressionRisk":"HIGH","summary":"readiness probe","findings":[],"requirementCoverage":[{"requirementRef":"project-audit","requirementText":"No task-scoped criteria apply","status":"NOT_APPLICABLE","evidenceRefs":[],"rationale":"Representative structured-output compatibility probe."}],"priorFindingDispositions":[]}"#,
         ))
+    }
+
+    fn cached_readiness(status: &str) -> AuditProviderReadiness {
+        provider_readiness(
+            status,
+            status == "READY",
+            Some("codex-cli 0.154.0".into()),
+            if status == "READY" {
+                ""
+            } else {
+                "bounded failure"
+            },
+        )
+    }
+
+    #[test]
+    fn readiness_cache_preserves_explicit_ready_result_for_same_identity() {
+        let state = AuditProviderReadinessState::default();
+        let identity = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex.exe")),
+            version: Some("codex-cli 0.154.0".into()),
+        };
+        state.cache_for_test(identity.clone(), cached_readiness("READY"));
+
+        assert_eq!(state.read_for_test(&identity).unwrap().status, "READY");
+    }
+
+    #[test]
+    fn readiness_cache_preserves_explicit_nonready_result_for_same_identity() {
+        let state = AuditProviderReadinessState::default();
+        let identity = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex.exe")),
+            version: Some("codex-cli 0.154.0".into()),
+        };
+        state.cache_for_test(identity.clone(), cached_readiness("PROCESS_ERROR"));
+
+        assert_eq!(
+            state.read_for_test(&identity).unwrap().status,
+            "PROCESS_ERROR"
+        );
+    }
+
+    #[test]
+    fn readiness_cache_is_process_scoped_and_resets_with_new_state() {
+        let identity = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex.exe")),
+            version: Some("codex-cli 0.154.0".into()),
+        };
+        let state = AuditProviderReadinessState::default();
+        state.cache_for_test(identity.clone(), cached_readiness("READY"));
+
+        let restarted = AuditProviderReadinessState::default();
+        assert!(restarted.read_for_test(&identity).is_none());
+    }
+
+    #[test]
+    fn readiness_cache_invalidates_on_executable_or_version_identity_change() {
+        let state = AuditProviderReadinessState::default();
+        let identity = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex.exe")),
+            version: Some("codex-cli 0.154.0".into()),
+        };
+        state.cache_for_test(identity, cached_readiness("READY"));
+
+        let changed_executable = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex-next.exe")),
+            version: Some("codex-cli 0.154.0".into()),
+        };
+        let changed_version = AuditProviderIdentity {
+            executable: Some(PathBuf::from("codex.exe")),
+            version: Some("codex-cli 0.155.0".into()),
+        };
+        assert!(state.read_for_test(&changed_executable).is_none());
+        assert!(state.read_for_test(&changed_version).is_none());
     }
 
     fn failed_codex_result(stderr: &str) -> CodexProcessResult {

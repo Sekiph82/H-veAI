@@ -35,7 +35,9 @@ use agent_session_center::{
     SessionEvent,
 };
 #[cfg(not(test))]
-use audit_engine::{AuditInput, AuditInputRequest, AuditProviderReadiness, AuditRun};
+use audit_engine::{
+    AuditInput, AuditInputRequest, AuditProviderReadiness, AuditProviderReadinessState, AuditRun,
+};
 #[cfg(not(test))]
 use codex_adapter::{AgentAdapter, CodexAdapter, CodexReadiness, CodexSession, CodexStartRequest};
 #[cfg(not(test))]
@@ -492,29 +494,36 @@ mod app_commands {
 
     #[tauri::command]
     async fn hiveai_audit_run(
+        readiness: tauri::State<'_, AuditProviderReadinessState>,
         database: tauri::State<'_, DatabaseState>,
         request: AuditInputRequest,
     ) -> Result<AuditRun, String> {
+        let readiness = readiness.inner().clone();
         let database = database.inner().clone();
-        tauri::async_runtime::spawn_blocking(move || audit_engine::run(&database, request))
-            .await
-            .map_err(|error| format!("audit provider task failed: {error}"))?
+        tauri::async_runtime::spawn_blocking(move || {
+            audit_engine::run(&readiness, &database, request)
+        })
+        .await
+        .map_err(|error| format!("audit provider task failed: {error}"))?
     }
 
     #[tauri::command]
     fn hiveai_audit_provider_readiness(
+        readiness: tauri::State<'_, AuditProviderReadinessState>,
         database: tauri::State<'_, DatabaseState>,
     ) -> Result<AuditProviderReadiness, String> {
-        audit_engine::audit_provider_readiness(&database)
+        audit_engine::audit_provider_readiness(&readiness, &database)
     }
 
     #[tauri::command]
     async fn hiveai_audit_provider_check_readiness(
+        readiness: tauri::State<'_, AuditProviderReadinessState>,
         database: tauri::State<'_, DatabaseState>,
     ) -> Result<AuditProviderReadiness, String> {
+        let readiness = readiness.inner().clone();
         let database = database.inner().clone();
         tauri::async_runtime::spawn_blocking(move || {
-            audit_engine::check_audit_provider_readiness(&database)
+            audit_engine::check_audit_provider_readiness(&readiness, &database)
         })
         .await
         .map_err(|error| format!("audit readiness task failed: {error}"))?
@@ -873,6 +882,7 @@ mod app_commands {
             .setup(|app| {
                 app.manage(StartupIntroState::default());
                 app.manage(RuntimeSupervisor::new());
+                app.manage(AuditProviderReadinessState::default());
                 let app_data_dir = app
                     .path()
                     .app_data_dir()

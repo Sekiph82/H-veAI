@@ -73,12 +73,30 @@ describe("M16S local workspace attachment", () => {
   });
 
   it("uses the explicit readiness command and keeps page load at configuration-only state", async () => {
+    let cached = false;
     window.history.pushState({}, "", "/settings");
-    render(<App />);
+    const view = render(<App />);
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_projects_list") return Promise.resolve([baseProject]);
+      if (command === "hiveai_audit_provider_readiness") return Promise.resolve(cached
+        ? { provider: "Codex CLI", status: "PROCESS_ERROR", configured: false, executableAvailable: true, version: "codex-cli 0.153.4", loginState: "ChatGPT login end-to-end check failed", model: "CLI_DEFAULT", credentialSource: "Codex-managed login state", errorCategory: "bounded readiness probe failed" }
+        : { provider: "Codex CLI", status: "AUTH_UNVERIFIED", configured: true, executableAvailable: true, version: "codex-cli 0.153.4", loginState: "ChatGPT login reported; turn unverified", model: "CLI_DEFAULT", credentialSource: "Codex-managed login state", errorCategory: null });
+      if (command === "hiveai_audit_provider_check_readiness") {
+        cached = true;
+        return Promise.resolve({ provider: "Codex CLI", status: "PROCESS_ERROR", configured: false, executableAvailable: true, version: "codex-cli 0.153.4", loginState: "ChatGPT login end-to-end check failed", model: "CLI_DEFAULT", credentialSource: "Codex-managed login state", errorCategory: "bounded readiness probe failed" });
+      }
+      return Promise.resolve({});
+    });
     expect(await screen.findByText("AUTH_UNVERIFIED")).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("hiveai_audit_provider_check_readiness");
     fireEvent.click(screen.getByRole("button", { name: "Check readiness" }));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_audit_provider_check_readiness"));
+    expect(await screen.findByText("PROCESS_ERROR")).toBeInTheDocument();
+
+    window.history.pushState({}, "", "/");
+    view.rerender(<App />);
+    window.history.pushState({}, "", "/settings");
+    view.rerender(<App />);
     expect(await screen.findByText("PROCESS_ERROR")).toBeInTheDocument();
   });
 });
