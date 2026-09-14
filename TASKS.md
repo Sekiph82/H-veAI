@@ -6,10 +6,10 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 - Current Milestone: M17
 - Current Sprint: M17-CLAUDE-ADAPTER
-- Current Task: M17 V02 — Claude Code Adapter strict lifecycle / identity remediation
-- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_REAUDIT_AND_OWNER_NATIVE_ACCEPTANCE
-- Next Task/Action: Independent M17 V02 strict re-audit by ChatGPT, followed only if it passes by owner-native Claude readiness/start/stop/exact-resume acceptance; only then may M17 close and M18 be considered.
-- Required Actor: HUMAN
+- Current Task: M17 V03 - Claude Code Adapter ownership / recovery / boundedness remediation
+- Current Task Status: CHANGES_REQUIRED / REMEDIATION_IN_PROGRESS
+- Next Task/Action: Close F-M17-V02-001 through F-M17-V02-005 from the authoritative V02 strict re-audit, then run the required regression/publication gates and await independent V03 strict re-audit before any owner-native Claude acceptance.
+- Required Actor: CODEX
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -20,7 +20,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
 - [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
 - [x] M16T — Codex-only audit provider native acceptance remediation V11 (validated complete; M16 PASS/CLOSED)
-- [~] M17 — Claude Code Adapter V02 strict lifecycle / identity remediation complete; awaiting independent V02 strict re-audit and owner-native acceptance (M18-M20 remain planned/blocked)
+- [~] M17 — Claude Code Adapter V03 ownership / recovery / boundedness remediation in progress; V02 strict re-audit findings F-M17-V02-001 through F-M17-V02-005 require closure (M18-M20 remain planned/blocked)
 
 # H!veAI MASTER TASKS
 
@@ -1584,7 +1584,7 @@ M21 NOT STARTED.
 - [ ] Production QA publication.
 - [ ] Independent strict audit.
 
-M17 ACTIVE / IMPLEMENTATION_IN_PROGRESS. M18-M20 remain planned/blocked by dependency order.
+M17 V03 CHANGES_REQUIRED / REMEDIATION_IN_PROGRESS. M18-M20 remain planned/blocked by dependency order.
 
 ---
 
