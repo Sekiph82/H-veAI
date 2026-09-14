@@ -7,9 +7,9 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - Current Milestone: M17
 - Current Sprint: M17-CLAUDE-ADAPTER
 - Current Task: M17 V05 — Claude Code Adapter diagnostic / action-truth / production-matrix remediation
-- Current Task Status: CHANGES_REQUIRED / REMEDIATION_IN_PROGRESS
-- Next Task/Action: Close F-M17-V04-001 through F-M17-V04-003 from the authoritative V04 strict re-audit, then stop for independent V05 strict re-audit by ChatGPT; owner-native Claude acceptance remains gated on a PASS.
-- Required Actor: CODEX
+- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_REAUDIT_AND_OWNER_NATIVE_ACCEPTANCE
+- Next Task/Action: Run the independent M17 V05 strict re-audit by ChatGPT, then perform owner-native Claude acceptance if and only if the re-audit passes; do not activate M18.
+- Required Actor: HUMAN
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -20,7 +20,7 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
 - [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
 - [x] M16T — Codex-only audit provider native acceptance remediation V11 (validated complete; M16 PASS/CLOSED)
-- [~] M17 — Claude Code Adapter V05 diagnostic / action-truth / production-matrix remediation in progress; V04 strict re-audit is CHANGES_REQUIRED and M18-M20 remain planned/blocked
+- [~] M17 — Claude Code Adapter V05 diagnostic / action-truth / production-matrix remediation implementation complete; awaiting independent V05 strict re-audit and owner-native acceptance; M18-M20 remain planned/blocked
 
 # H!veAI MASTER TASKS
 
