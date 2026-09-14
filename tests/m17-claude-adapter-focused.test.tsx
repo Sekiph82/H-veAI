@@ -120,7 +120,7 @@ describe("M17 Claude Code adapter", () => {
       if (command === "hiveai_projects_list") return Promise.resolve(project);
       if (command === "hiveai_agent_readiness") return Promise.resolve(readiness);
       if (command === "hiveai_agent_sessions_list") {
-        return Promise.resolve([{ ...session, state: "WAITING_PERMISSION", diagnosticCode: "CLAUDE_PERMISSION_REQUIRED", diagnosticMessage: "Claude is waiting for an explicit permission decision." }]);
+        return Promise.resolve([{ ...session, state: "WAITING_PERMISSION", supportsResume: false, diagnosticCode: "CLAUDE_PERMISSION_REQUIRED", diagnosticMessage: "Claude is waiting for an explicit permission decision." }]);
       }
       if (command === "hiveai_git_snapshot") return Promise.resolve({ stagedFiles: [], unstagedFiles: [], untrackedFiles: [], conflictedFiles: [] });
       if (command === "hiveai_git_diff") return Promise.resolve({ text: "", truncated: false });
@@ -130,5 +130,7 @@ describe("M17 Claude Code adapter", () => {
     fireEvent.click(await screen.findByRole("button", { name: /View CLAUDE FREEFORM_PROJECT_OPERATION WAITING_PERMISSION/i }));
     expect(screen.getByTestId("agent-session-detail")).toHaveTextContent("WAITING PERMISSION");
     expect(screen.getByTestId("agent-session-detail")).toHaveTextContent("Claude is waiting for an explicit permission decision.");
+    expect(screen.getByRole("button", { name: "Stop owned session" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Resume exact session" })).not.toBeInTheDocument();
   });
 });

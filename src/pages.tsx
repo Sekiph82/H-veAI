@@ -4079,6 +4079,27 @@ function renderMarkdown(text: string) {
   return blocks;
 }
 
+const CLAUDE_LIVE_SESSION_STATES = new Set([
+  "STARTING",
+  "RUNNING",
+  "WAITING_PERMISSION",
+  "WAITING_USER",
+  "AUTH_REQUIRED",
+  "USAGE_LIMITED",
+  "NETWORK_ERROR",
+  "STOPPING",
+]);
+
+function isClaudeLiveSessionState(state: string) {
+  return CLAUDE_LIVE_SESSION_STATES.has(state);
+}
+
+function isLiveAgentSession(session: AgentSession) {
+  return session.provider === "CLAUDE"
+    ? isClaudeLiveSessionState(session.state)
+    : ["STARTING", "RUNNING", "WAITING_PERMISSION", "WAITING_USER", "STOPPING"].includes(session.state);
+}
+
 function AgentSessionOutput({ session }: { session: AgentSession }) {
   const projection = projectConversation(session.stdout);
   const dedicatedFinalResponse = session.finalResponse?.trim() || "";
@@ -4087,12 +4108,7 @@ function AgentSessionOutput({ session }: { session: AgentSession }) {
     dedicatedFinalResponse ||
     (!hasDedicatedChannel ? projection.assistant : "");
   const promptBody = session.promptBody?.trim();
-  const active = [
-    "STARTING",
-    "RUNNING",
-    "WAITING_PERMISSION",
-    "STOPPING",
-  ].includes(session.state);
+  const active = isLiveAgentSession(session);
   const evidenceDiagnostic = session.diagnosticCode?.endsWith(
     "ASSISTANT_EVIDENCE_UNAVAILABLE",
   )
@@ -4387,9 +4403,7 @@ export function Agents() {
   React.useEffect(() => {
     if (
       !selectedSession ||
-      !["STARTING", "RUNNING", "WAITING_PERMISSION", "STOPPING"].includes(
-        selectedSession.state,
-      )
+      !isLiveAgentSession(selectedSession)
     )
       return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -4668,7 +4682,7 @@ export function Agents() {
               <span>{selectedSession.operationKind.replaceAll("_", " ")}</span>
             </div>
             <div className="agent-session-actions">
-              {["STARTING", "RUNNING", "WAITING_PERMISSION", "WAITING_USER"].includes(selectedSession.state) ? (
+              {isLiveAgentSession(selectedSession) ? (
                 <button
                   className="secondary-button"
                   type="button"
@@ -4729,9 +4743,7 @@ export function Agents() {
             ) : null}
             <AgentSessionOutput session={selectedSession} />
             {selectedSession.supportsPty &&
-            ["STARTING", "RUNNING", "WAITING_PERMISSION", "STOPPING"].includes(
-              selectedSession.state,
-            ) ? (
+            isLiveAgentSession(selectedSession) ? (
               <details className="agent-advanced-section">
                 <summary>Live terminal</summary>
                 <AgentTerminal session={selectedSession} onResize={resize} />
