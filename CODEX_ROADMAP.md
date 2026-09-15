@@ -18,7 +18,7 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native evidence. M16 is PASS/CLOSED after independent strict audit and final owner-native acceptance. M17 V01 through V04 remain historical strict-audit CHANGES_REQUIRED records; V05 passed independent source re-audit and owner-native acceptance, so M17 is PASS/CLOSED.
 - Pre-M18 X03 readiness-route truth hotfix and X04 TASKS-only authority hotfix are PASS/CLOSED after independent source audits and owner-native acceptance. They do not change the numbered roadmap denominator.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. M17 is PASS/CLOSED. M18 V03 independent strict audit = CHANGES_REQUIRED with 0 BLOCKER / 5 MAJOR; M18 remains ACTIVE and V04 strict remediation is current under `M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`; M19-M20 remain planned/blocked by dependency order.
+- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. M17 is PASS/CLOSED. M18 V03 independent strict audit = CHANGES_REQUIRED with 0 BLOCKER / 5 MAJOR; M18 remains ACTIVE and V04 strict remediation now also includes owner-directed M18.10 Prompt Engine/Agent Sessions UX consolidation under `M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`; M19-M20 remain planned/blocked by dependency order.
 - Strict completed progress is **18/20 = 90%**. M18 remains the active numbered milestone; M19-M20 remain blocked.
 
 ---
@@ -524,7 +524,7 @@ These hotfixes do not change the numbered 20-milestone denominator.
 
 ## M18 - GitHub Integration
 
-Purpose: reconcile local development truth with GitHub repositories/PRs/issues/Actions/releases.
+Purpose: reconcile local development truth with GitHub repositories/PRs/issues/Actions/releases while completing the owner-directed Prompt Engine/session workspace consolidation discovered during M18 native review.
 
 Packages:
 - M18.01 Repository/branch/commit reads.
@@ -536,10 +536,15 @@ Packages:
 - M18.07 Local/remote reconciliation.
 - M18.08 Least-privilege mutation/security.
 - M18.09 Remote/offline/reconciliation tests and audit.
+- M18.10.01 Prompt Engine + Agent Session Center top-level workspace consolidation.
+- M18.10.02 Backward-compatible `/agents` deep links and exact post-dispatch integrated session handoff.
+- M18.10.03 Codex/Claude builder-provider readiness presentation moved to Settings, separate from the Codex Audit Provider.
+- M18.10.04 Prompt Engine nullable `required_actor` SQLite/context crash remediation.
+- M18.10.05 Focused routing/readiness/null-actor/session-provenance regressions plus post-source-audit owner-native visual acceptance.
 
-Exit: H!veAI understands remote GitHub state without silently overwriting local work.
+Exit: H!veAI understands remote GitHub state without silently overwriting local work, and prompt creation/session execution form one coherent owner-accepted workspace without weakening M14/M15 provenance or provider safety.
 
-Status: ACTIVE / V03 CHANGES_REQUIRED / V04 STRICT REMEDIATION READY. The independent V03 strict audit found 0 BLOCKER / 5 MAJOR findings. V04 is limited to F-M18-V03-001 through F-M18-V03-005 and must stop for independent re-audit and required owner-native acceptance. Execute only `docs/H!veAI/prompts/M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`. Canonical tracker files remain read-only for Codex. M19 remains blocked.
+Status: ACTIVE / V03 CHANGES_REQUIRED / V04 STRICT REMEDIATION + OWNER UX ADDENDUM READY. The independent V03 strict audit found 0 BLOCKER / 5 MAJOR findings. V04 is limited to F-M18-V03-001 through F-M18-V03-005 plus M18.10.01 through M18.10.05 and must stop for independent re-audit before required owner-native acceptance. Execute only `docs/H!veAI/prompts/M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`. Canonical tracker files remain read-only for Codex. M19 remains blocked.
 
 ---
 
