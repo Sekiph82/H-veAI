@@ -29,14 +29,10 @@ beforeEach(() => {
 });
 
 describe("M14 Agent Session Center", () => {
-  it("keeps readiness native and exposes the compact Claude capability panel", async () => {
+  it("routes the legacy Agents entry into Prompt Engine sessions without a readiness wall", async () => {
     render(<App />);
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_agent_readiness"));
-    expect(screen.getByTestId("claude-readiness")).toHaveTextContent("2.1.248 (Claude Code)");
-    expect(screen.getByTestId("claude-readiness")).toHaveTextContent("BOUNDED_STREAM_JSON");
-    expect(screen.queryByText("codex-cli 0.149.1")).not.toBeInTheDocument();
-    expect(screen.queryByText("Provider readiness")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("agent-center-readiness")).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument();
+    expect(screen.queryByTestId("claude-readiness")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByLabelText("Agent provider")).toHaveValue("CLAUDE"));
   });
 

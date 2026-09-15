@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
+use std::collections::HashSet;
 #[cfg(not(test))]
 use std::io::Read;
 #[cfg(not(test))]
@@ -18,7 +19,7 @@ use std::time::Duration;
 #[cfg(not(test))]
 use std::time::Instant;
 
-const CACHE_SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 const MAX_BRANCHES: usize = 25;
 const MAX_COMMITS: usize = 25;
 const MAX_PULL_REQUESTS: usize = 10;
@@ -32,7 +33,7 @@ const MAX_ACTION_RUNS_ENRICHED: usize = 5;
 const MAX_ACTION_JOBS: usize = 20;
 const MAX_ACTION_STEPS: usize = 25;
 const MAX_ACTION_LOG_CHARS: usize = 512;
-const MAX_SUBRESOURCE_REQUESTS: usize = 80;
+const MAX_SUBRESOURCE_REQUESTS: usize = 40;
 const MAX_RELEASES: usize = 10;
 const MAX_TAGS: usize = 25;
 const MAX_COMMENTS: usize = 10;
@@ -136,6 +137,8 @@ pub struct GitHubPullRequest {
     pub reviews: Vec<GitHubPullRequestReview>,
     pub checks: Vec<GitHubCheck>,
     pub comments: Vec<String>,
+    pub raw_task_references: Vec<String>,
+    pub raw_session_references: Vec<String>,
     pub task_links: Vec<String>,
     pub session_links: Vec<String>,
 }
@@ -184,7 +187,10 @@ pub struct GitHubIssue {
     pub html_url: Option<String>,
     pub body_excerpt: Option<String>,
     pub comments: Vec<String>,
+    pub raw_task_references: Vec<String>,
+    pub raw_session_references: Vec<String>,
     pub task_links: Vec<String>,
+    pub session_links: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,9 +207,18 @@ pub struct GitHubActionRun {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub failed_log_summary: Option<String>,
+    pub failed_log_evidence: Vec<GitHubActionLogEvidence>,
     pub jobs_state: String,
     pub logs_state: String,
     pub jobs: Vec<GitHubActionJob>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubActionLogEvidence {
+    pub job_id: u64,
+    pub job_name: Option<String>,
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,7 +459,8 @@ fn snapshot_with_transport<T: GitHubReadTransport>(
     let commits = parse_commits(commits_value);
     let mut pull_requests = parse_pull_requests(prs_value);
     enrich_pull_requests(&mut pull_requests, &resources);
-    let issues = parse_issues(issues_value);
+    let mut issues = parse_issues(issues_value);
+    validate_project_owned_links(database, project, &mut pull_requests, &mut issues);
     let mut actions = parse_actions(actions_value);
     enrich_actions(&mut actions, &resources);
     let releases = parse_releases(releases_value);
@@ -656,9 +672,8 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
     let selected_prs = parse_pull_requests(resource_value(&resources, RESOURCE_PULL_REQUESTS));
     for pr in selected_prs.iter().take(MAX_PR_ENRICHED) {
         let base = format!("{repository_path}/pulls/{}", pr.number);
-        push_enrichment(
-            &mut resources,
-            load_or_fetch(
+        resources.push(acquire_enrichment(
+            &mut budget,
                 database,
                 project,
                 &identity.full_name,
@@ -667,12 +682,9 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 &base,
                 now,
                 transport,
-            ),
+        ));
+        resources.push(acquire_enrichment(
             &mut budget,
-        );
-        push_enrichment(
-            &mut resources,
-            load_or_fetch(
                 database,
                 project,
                 &identity.full_name,
@@ -681,12 +693,9 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 &format!("{base}/files?per_page={MAX_PR_FILES}"),
                 now,
                 transport,
-            ),
+        ));
+        resources.push(acquire_enrichment(
             &mut budget,
-        );
-        push_enrichment(
-            &mut resources,
-            load_or_fetch(
                 database,
                 project,
                 &identity.full_name,
@@ -695,12 +704,9 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 &format!("{base}/reviews?per_page={MAX_PR_REVIEWS}"),
                 now,
                 transport,
-            ),
+        ));
+        resources.push(acquire_enrichment(
             &mut budget,
-        );
-        push_enrichment(
-            &mut resources,
-            load_or_fetch(
                 database,
                 project,
                 &identity.full_name,
@@ -709,12 +715,9 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 &format!("{repository_path}/issues/{}/comments?per_page={MAX_COMMENTS}", pr.number),
                 now,
                 transport,
-            ),
+        ));
+        resources.push(acquire_enrichment(
             &mut budget,
-        );
-        push_enrichment(
-            &mut resources,
-            load_or_fetch(
                 database,
                 project,
                 &identity.full_name,
@@ -723,13 +726,10 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 &format!("{base}/comments?per_page={MAX_COMMENTS}"),
                 now,
                 transport,
-            ),
-            &mut budget,
-        );
+        ));
         if let Some(head_sha) = pr.head_sha.as_deref() {
-            push_enrichment(
-                &mut resources,
-                load_or_fetch(
+            resources.push(acquire_enrichment(
+                &mut budget,
                     database,
                     project,
                     &identity.full_name,
@@ -738,12 +738,9 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                     &format!("{repository_path}/commits/{head_sha}/check-runs?per_page={MAX_PR_CHECKS}"),
                     now,
                     transport,
-                ),
+            ));
+            resources.push(acquire_enrichment(
                 &mut budget,
-            );
-            push_enrichment(
-                &mut resources,
-                load_or_fetch(
                     database,
                     project,
                     &identity.full_name,
@@ -752,15 +749,14 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                     &format!("{repository_path}/commits/{head_sha}/status?per_page={MAX_PR_CHECKS}"),
                     now,
                     transport,
-                ),
-                &mut budget,
-            );
+            ));
         }
     }
     let selected_runs = parse_actions(resource_value(&resources, RESOURCE_ACTIONS));
     for run in selected_runs.iter().take(MAX_ACTION_RUNS_ENRICHED) {
         let kind = format!("GITHUB_ACTION_{}_JOBS", run.id);
-        let jobs = load_or_fetch(
+        let jobs = acquire_enrichment(
+            &mut budget,
             database,
             project,
             &identity.full_name,
@@ -770,18 +766,21 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
             now,
             transport,
         );
-        let jobs_for_logs = jobs.value.clone();
-        push_enrichment(&mut resources, jobs, &mut budget);
-        for job_id in parse_job_ids(jobs_for_logs).into_iter().take(2) {
-            if !run.conclusion.as_deref().is_some_and(|value| {
-                matches!(value, "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED")
-            }) {
-                break;
-            }
+        let failed_jobs = jobs
+            .value
+            .as_ref()
+            .map(parse_action_jobs)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(is_action_failure_job)
+            .take(2)
+            .map(|job| job.id)
+            .collect::<Vec<_>>();
+        resources.push(jobs);
+        for job_id in failed_jobs {
             let kind = format!("GITHUB_ACTION_JOB_{}_LOG", job_id);
-            push_enrichment_text(
-                &mut resources,
-                load_or_fetch_text(
+            resources.push(acquire_enrichment_text(
+                &mut budget,
                     database,
                     project,
                     &identity.full_name,
@@ -790,46 +789,57 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                     &format!("{repository_path}/actions/jobs/{job_id}/logs"),
                     now,
                     transport,
-                ),
-                &mut budget,
-            );
+            ));
         }
     }
     resources
 }
 
-fn push_enrichment(resources: &mut Vec<ResourceResult>, result: ResourceResult, budget: &mut RequestBudget) {
+fn acquire_enrichment<T: GitHubReadTransport>(
+    budget: &mut RequestBudget,
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    repository: &str,
+    branch: &str,
+    kind: &str,
+    url: &str,
+    now: &str,
+    transport: &mut T,
+) -> ResourceResult {
     if budget.take() {
-        resources.push(result);
+        load_or_fetch(database, project, repository, branch, kind, url, now, transport)
     } else {
-        resources.push(ResourceResult {
-            kind: result.kind,
-            value: None,
-            state: "UNAVAILABLE".into(),
-            fetched_at: None,
-            last_known_good_at: None,
-            error: Some("GITHUB_SUBRESOURCE_REQUEST_BOUND".into()),
-        });
+        bounded_resource(kind)
     }
 }
 
-fn push_enrichment_text(resources: &mut Vec<ResourceResult>, result: ResourceResult, budget: &mut RequestBudget) {
-    push_enrichment(resources, result, budget);
+fn acquire_enrichment_text<T: GitHubReadTransport>(
+    budget: &mut RequestBudget,
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    repository: &str,
+    branch: &str,
+    kind: &str,
+    url: &str,
+    now: &str,
+    transport: &mut T,
+) -> ResourceResult {
+    if budget.take() {
+        load_or_fetch_text(database, project, repository, branch, kind, url, now, transport)
+    } else {
+        bounded_resource(kind)
+    }
 }
 
-fn parse_job_ids(value: Option<Value>) -> Vec<u64> {
-    let Some(value) = value else { return Vec::new() };
-    let jobs = value
-        .get("jobs")
-        .and_then(Value::as_array)
-        .or_else(|| value.as_array())
-        .map(|items| items.to_vec())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|job| job.get("id").and_then(Value::as_u64))
-        .take(MAX_ACTION_JOBS)
-        .collect();
-    jobs
+fn bounded_resource(kind: &str) -> ResourceResult {
+    ResourceResult {
+        kind: kind.into(),
+        value: None,
+        state: "UNAVAILABLE".into(),
+        fetched_at: None,
+        last_known_good_at: None,
+        error: Some("GITHUB_SUBRESOURCE_REQUEST_BOUND".into()),
+    }
 }
 
 fn load_or_fetch<T: GitHubReadTransport>(
@@ -1231,37 +1241,62 @@ fn read_bounded<R: Read>(mut reader: R, limit: usize) -> (Vec<u8>, bool) {
 }
 
 fn sanitize_error(value: &str) -> String {
-    let mut pending_bearer = false;
-    let redacted = value
-        .split_whitespace()
-        .map(|token| {
-            let lower = token.to_ascii_lowercase();
-            let result = if pending_bearer {
-                pending_bearer = false;
-                "[REDACTED]".to_string()
-            } else if lower == "bearer" {
-                pending_bearer = true;
-                "Bearer".to_string()
-            } else if lower.starts_with("authorization:") {
-                "Authorization: [REDACTED]".to_string()
-            } else if ["token=", "access_token=", "api_key=", "apikey="]
-                .iter()
-                .any(|prefix| lower.starts_with(prefix))
-            {
-                format!("{}[REDACTED]", token.split('=').next().unwrap_or("secret"))
-            } else if ["ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"]
-                .iter()
-                .any(|prefix| lower.starts_with(prefix))
-            {
-                "[REDACTED]".to_string()
-            } else {
-                token.to_string()
-            };
-            result
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    redacted
+    let bytes = value.as_bytes();
+    let mut output = String::new();
+    let mut cursor = 0;
+    let mut last = 0;
+    while cursor < bytes.len() {
+        if let Some((start, end, closing_quote)) = authorization_span(bytes, cursor) {
+            output.push_str(&value[last..start]);
+            output.push_str("[REDACTED]");
+            if let Some(quote) = closing_quote {
+                output.push(quote as char);
+            }
+            cursor = end;
+            last = end;
+            continue;
+        }
+        if let Some((start, end, closing_quote)) = credential_assignment_span(bytes, cursor) {
+            output.push_str(&value[last..start]);
+            output.push_str("[REDACTED]");
+            if let Some(quote) = closing_quote {
+                output.push(quote as char);
+            }
+            cursor = end;
+            last = end;
+            continue;
+        }
+        if let Some((start, end, closing_quote)) = bearer_span(bytes, cursor) {
+            output.push_str(&value[last..start]);
+            output.push_str("[REDACTED]");
+            if let Some(quote) = closing_quote {
+                output.push(quote as char);
+            }
+            cursor = end;
+            last = end;
+            continue;
+        }
+        if let Some(prefix_len) = token_family_len(bytes, cursor) {
+            let mut end = cursor + prefix_len;
+            while end < bytes.len() && is_token_char(bytes[end]) {
+                end += 1;
+            }
+            if end > cursor + prefix_len {
+                output.push_str(&value[last..cursor]);
+                output.push_str("[REDACTED]");
+                cursor = end;
+                last = end;
+                continue;
+            }
+        }
+        cursor += value[cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1);
+    }
+    output.push_str(&value[last..]);
+    output
         .chars()
         .filter(|c| !c.is_ascii_control() || *c == '\n')
         .collect::<String>()
@@ -1269,6 +1304,164 @@ fn sanitize_error(value: &str) -> String {
         .chars()
         .take(512)
         .collect()
+}
+
+fn ascii_eq_at(bytes: &[u8], index: usize, needle: &[u8]) -> bool {
+    index + needle.len() <= bytes.len()
+        && bytes[index..index + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+}
+
+fn boundary_before(bytes: &[u8], index: usize) -> bool {
+    index == 0 || !bytes[index - 1].is_ascii_alphanumeric() && bytes[index - 1] != b'_'
+}
+
+fn boundary_after(bytes: &[u8], index: usize) -> bool {
+    index >= bytes.len() || !bytes[index].is_ascii_alphanumeric() && bytes[index] != b'_'
+}
+
+fn skip_credential_separators(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len()
+        && (bytes[index].is_ascii_whitespace()
+            || matches!(bytes[index], b':' | b'=' | b'"' | b'\''))
+    {
+        index += 1;
+    }
+    index
+}
+
+fn quoted_end(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+        } else if bytes[index] == quote {
+            return index + 1;
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn value_end(bytes: &[u8], start: usize, authorization: bool) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        let delimiter = if authorization {
+            matches!(bytes[index], b',' | b';' | b'\r' | b'\n')
+        } else {
+            bytes[index].is_ascii_whitespace()
+                || matches!(bytes[index], b'&' | b',' | b';' | b'}' | b']')
+        };
+        if delimiter {
+            break;
+        }
+        index += 1;
+    }
+    index
+}
+
+fn authorization_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)> {
+    const KEY: &[u8] = b"authorization";
+    if !ascii_eq_at(bytes, index, KEY)
+        || !boundary_before(bytes, index)
+        || !boundary_after(bytes, index + KEY.len())
+    {
+        return None;
+    }
+    let mut separator = index + KEY.len();
+    while separator < bytes.len() && bytes[separator].is_ascii_whitespace() {
+        separator += 1;
+    }
+    if bytes.get(separator) != Some(&b':') {
+        return None;
+    }
+    let mut start = separator + 1;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
+    if let Some(quote) = quote {
+        let value_start = start + 1;
+        let end = quoted_end(bytes, value_start, quote);
+        return Some((value_start, end, Some(quote)));
+    }
+    let end = value_end(bytes, start, true);
+    (start < end).then_some((start, end, None))
+}
+
+fn credential_assignment_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)> {
+    const KEYS: [&[u8]; 7] = [
+        b"access_token",
+        b"access-token",
+        b"api_key",
+        b"api-key",
+        b"apikey",
+        b"auth-token",
+        b"token",
+    ];
+    let key = KEYS.iter().copied().find(|key| {
+        ascii_eq_at(bytes, index, key)
+            && boundary_before(bytes, index)
+            && boundary_after(bytes, index + key.len())
+    })?;
+    let mut separator = index + key.len();
+    if bytes.get(separator) == Some(&b'"') || bytes.get(separator) == Some(&b'\'') {
+        separator += 1;
+    }
+    while separator < bytes.len() && bytes[separator].is_ascii_whitespace() {
+        separator += 1;
+    }
+    if !matches!(bytes.get(separator), Some(b'=') | Some(b':')) {
+        return None;
+    }
+    let mut start = separator + 1;
+    while start < bytes.len() && bytes[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
+    if let Some(quote) = quote {
+        let value_start = start + 1;
+        let end = quoted_end(bytes, value_start, quote);
+        return Some((value_start, end, Some(quote)));
+    }
+    let end = value_end(bytes, start, false);
+    (start < end).then_some((start, end, None))
+}
+
+fn bearer_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)> {
+    const KEY: &[u8] = b"bearer";
+    if !ascii_eq_at(bytes, index, KEY)
+        || !boundary_before(bytes, index)
+        || !boundary_after(bytes, index + KEY.len())
+    {
+        return None;
+    }
+    let mut start = skip_credential_separators(bytes, index + KEY.len());
+    if start >= bytes.len() {
+        return None;
+    }
+    let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
+    if let Some(quote) = quote {
+        start += 1;
+        let end = quoted_end(bytes, start, quote);
+        return (start < end).then_some((start, end, Some(quote)));
+    }
+    let end = value_end(bytes, start, false);
+    (start < end).then_some((start, end, None))
+}
+
+fn token_family_len(bytes: &[u8], index: usize) -> Option<usize> {
+    [b"github_pat_".as_slice(), b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"]
+        .into_iter()
+        .find(|prefix| ascii_eq_at(bytes, index, prefix))
+        .map(<[u8]>::len)
+}
+
+fn is_token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
 fn credential_key(key: &str) -> bool {
@@ -1376,9 +1569,12 @@ fn parse_pull_requests(value: Option<&Value>) -> Vec<GitHubPullRequest> {
             let title = string(Some(v), "title").unwrap_or_else(|| "Untitled pull request".into());
             let body = string(Some(v), "body").unwrap_or_default();
             let merged = v.get("merged_at").is_some_and(|value| !value.is_null());
-            let mut task_links = explicit_links(&format!("{title} {body}"));
-            task_links.retain(|link| link.starts_with("TASK-") || link.starts_with('M'));
-            let session_links = explicit_links(&format!("{title} {body}"))
+            let raw_references = explicit_links(&format!("{title} {body}"));
+            let raw_task_references = raw_references
+                .into_iter()
+                .filter(|link| link.starts_with("TASK-") || link.starts_with('M'))
+                .collect();
+            let raw_session_references = explicit_links(&format!("{title} {body}"))
                 .into_iter()
                 .filter(|link| link.starts_with("SESSION-"))
                 .collect();
@@ -1416,8 +1612,10 @@ fn parse_pull_requests(value: Option<&Value>) -> Vec<GitHubPullRequest> {
                 reviews: Vec::new(),
                 checks: Vec::new(),
                 comments: bounded_comments(v.get("comments")),
-                task_links,
-                session_links,
+                raw_task_references,
+                raw_session_references,
+                task_links: Vec::new(),
+                session_links: Vec::new(),
             })
         })
         .collect()
@@ -1429,6 +1627,22 @@ fn parse_issues(value: Option<&Value>) -> Vec<GitHubIssue> {
         .filter(|v| v.get("pull_request").is_none())
         .take(MAX_ISSUES)
         .filter_map(|v| {
+            let text = format!(
+                "{} {}",
+                string(Some(v), "title").unwrap_or_default(),
+                string(Some(v), "body").unwrap_or_default()
+            );
+            let raw_references = explicit_links(&text);
+            let raw_task_references = raw_references
+                .iter()
+                .filter(|link| link.starts_with("TASK-") || link.starts_with('M'))
+                .cloned()
+                .collect();
+            let raw_session_references = raw_references
+                .iter()
+                .filter(|link| link.starts_with("SESSION-"))
+                .cloned()
+                .collect();
             Some(GitHubIssue {
                 number: v.get("number")?.as_u64()?,
                 title: bound_text(
@@ -1452,14 +1666,10 @@ fn parse_issues(value: Option<&Value>) -> Vec<GitHubIssue> {
                 html_url: string(Some(v), "html_url"),
                 body_excerpt: string(Some(v), "body").map(|body| bound_text(&body, MAX_BODY_CHARS)),
                 comments: bounded_comments(v.get("comments")),
-                task_links: explicit_links(&format!(
-                    "{} {}",
-                    string(Some(v), "title").unwrap_or_default(),
-                    string(Some(v), "body").unwrap_or_default()
-                ))
-                .into_iter()
-                .filter(|link| link.starts_with("TASK-") || link.starts_with('M'))
-                .collect(),
+                raw_task_references,
+                raw_session_references,
+                task_links: Vec::new(),
+                session_links: Vec::new(),
             })
         })
         .collect()
@@ -1527,11 +1737,95 @@ fn parse_actions(value: Option<&Value>) -> Vec<GitHubActionRun> {
                 created_at: string(Some(v), "created_at"),
                 updated_at: string(Some(v), "updated_at"),
                 failed_log_summary,
+                failed_log_evidence: Vec::new(),
                 jobs_state: "NOT_REQUESTED".into(),
                 logs_state: "NOT_REQUESTED".into(),
                 jobs,
             })
         })
+        .collect()
+}
+
+fn validate_project_owned_links(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    pull_requests: &mut [GitHubPullRequest],
+    issues: &mut [GitHubIssue],
+) {
+    let task_ids = canonical_project_task_ids(database, project);
+    let session_ids = persisted_project_session_ids(database, project);
+    for pull_request in pull_requests {
+        pull_request.task_links = pull_request
+            .raw_task_references
+            .iter()
+            .filter(|reference| task_ids.contains(*reference))
+            .cloned()
+            .collect();
+        pull_request.session_links = pull_request
+            .raw_session_references
+            .iter()
+            .filter(|reference| session_ids.contains(*reference))
+            .cloned()
+            .collect();
+    }
+    for issue in issues {
+        issue.task_links = issue
+            .raw_task_references
+            .iter()
+            .filter(|reference| task_ids.contains(*reference))
+            .cloned()
+            .collect();
+        issue.session_links = issue
+            .raw_session_references
+            .iter()
+            .filter(|reference| session_ids.contains(*reference))
+            .cloned()
+            .collect();
+    }
+}
+
+fn canonical_project_task_ids(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+) -> HashSet<String> {
+    let Some(snapshot) = crate::github_tracking::cached_snapshot(database, project).ok().flatten()
+    else {
+        return HashSet::new();
+    };
+    if snapshot.remote_health != "CURRENT" {
+        return HashSet::new();
+    }
+    let mut ids = snapshot
+        .task_rows
+        .into_iter()
+        .map(|row| row.id)
+        .collect::<HashSet<_>>();
+    if let Some(id) = snapshot.current_task_id {
+        ids.insert(id);
+    }
+    if let Some(id) = snapshot.next_task_id {
+        ids.insert(id);
+    }
+    ids
+}
+
+fn persisted_project_session_ids(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+) -> HashSet<String> {
+    let Ok(connection) = database.open_connection() else {
+        return HashSet::new();
+    };
+    let Ok(mut statement) = connection.prepare("SELECT id FROM agent_sessions WHERE project_id=?1")
+    else {
+        return HashSet::new();
+    };
+    statement
+        .query_map([&project.id], |row| row.get::<_, String>(0))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
         .collect()
 }
 
@@ -1705,23 +1999,58 @@ fn enrich_actions(actions: &mut [GitHubActionRun], resources: &[ResourceResult])
             .and_then(|r| r.value.as_ref())
             .map(|value| parse_action_jobs(value))
             .unwrap_or_default();
+        run.failed_log_summary = None;
+        run.failed_log_evidence.clear();
         if run.jobs_state != "CURRENT" || run.jobs.is_empty() {
             run.logs_state = if run.jobs_state == "CURRENT" { "NOT_APPLICABLE".into() } else { run.jobs_state.clone() };
             continue;
         }
+        let eligible_jobs = run
+            .jobs
+            .iter()
+            .filter(|job| is_action_failure_job(job))
+            .take(2)
+            .collect::<Vec<_>>();
+        if eligible_jobs.is_empty() {
+            run.logs_state = "NOT_APPLICABLE".into();
+            continue;
+        }
         let mut log_states = Vec::new();
-        for job in run.jobs.iter().take(2) {
+        for job in eligible_jobs {
             let kind = format!("GITHUB_ACTION_JOB_{}_LOG", job.id);
-            log_states.push(resource_state(resources, &kind));
-            if run.failed_log_summary.is_none() {
-                run.failed_log_summary = resource_result(resources, &kind)
+            let state = resource_state(resources, &kind);
+            log_states.push(state.clone());
+            if state == "CURRENT" {
+                if let Some(excerpt) = resource_result(resources, &kind)
                     .and_then(|r| r.value.as_ref())
                     .and_then(Value::as_str)
-                    .map(|value| bound_text(value, MAX_ACTION_LOG_CHARS));
+                    .map(|value| bound_text(value, MAX_ACTION_LOG_CHARS))
+                {
+                    run.failed_log_evidence.push(GitHubActionLogEvidence {
+                        job_id: job.id,
+                        job_name: job.name.clone(),
+                        excerpt: excerpt.clone(),
+                    });
+                    if run.failed_log_summary.is_none() {
+                        run.failed_log_summary = Some(format!(
+                            "Job #{}{}: {}",
+                            job.id,
+                            job.name.as_deref().map(|name| format!(" {name}")).unwrap_or_default(),
+                            excerpt
+                        ));
+                    }
+                }
             }
         }
         run.logs_state = if log_states.iter().all(|state| state == "CURRENT") { "CURRENT".into() } else if log_states.iter().any(|state| state == "CURRENT") { "PARTIAL".into() } else { log_states.first().cloned().unwrap_or_else(|| "NOT_APPLICABLE".into()) };
     }
+}
+
+fn is_action_failure_job(job: &GitHubActionJob) -> bool {
+    [job.conclusion.as_deref(), job.status.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| matches!(value, "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"))
 }
 
 fn parse_action_jobs(value: &Value) -> Vec<GitHubActionJob> {
@@ -1990,6 +2319,62 @@ mod tests {
         }
     }
 
+    fn current_tracking_snapshot() -> crate::github_tracking::RemoteTrackingSnapshot {
+        crate::github_tracking::RemoteTrackingSnapshot {
+            project_key: "github:Sekiph82/H-veAI@main".into(),
+            display_name: "H-veAI".into(),
+            repository: "Sekiph82/H-veAI".into(),
+            branch: "main".into(),
+            remote_head: Some("head".into()),
+            project_blob_sha: None,
+            tasks_blob_sha: Some("tasks".into()),
+            rules_blob_sha: None,
+            events_blob_sha: None,
+            current_milestone: Some("M18.10".into()),
+            current_sprint: None,
+            current_task_id: Some("M18.10.01".into()),
+            current_task_title: Some("Current task".into()),
+            current_task_status: Some("IN_PROGRESS".into()),
+            workflow_state: Some("IN_PROGRESS".into()),
+            required_actor: Some("OWNER".into()),
+            next_action: None,
+            next_task_id: Some("TASK-42".into()),
+            next_task_title: Some("Next task".into()),
+            blockers: Vec::new(),
+            progress_scope_type: Some("TASKS".into()),
+            progress_scope_id: Some("M18.10".into()),
+            progress_completed: Some(1),
+            progress_total: Some(2),
+            progress_percent: Some(50.0),
+            last_completed_task_id: None,
+            last_completed_task_title: None,
+            updated_at: None,
+            updated_by: None,
+            total_tasks: Some(2),
+            completed_tasks: Some(1),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+            fetched_at: "2026-09-15T00:00:00Z".into(),
+            remote_health: "CURRENT".into(),
+            error: None,
+            recent_events: Vec::new(),
+            task_rows: vec![crate::github_tracking::RemoteTaskRow {
+                id: "M18.10.01".into(),
+                title: "Current task".into(),
+                status: "IN_PROGRESS".into(),
+                source_path: "TASKS.md".into(),
+                source_line: 1,
+            }, crate::github_tracking::RemoteTaskRow {
+                id: "TASK-42".into(),
+                title: "Next task".into(),
+                status: "PLANNED".into(),
+                source_path: "TASKS.md".into(),
+                source_line: 2,
+            }],
+        }
+    }
+
     #[test]
     fn reconciliation_matrix_keeps_dirty_separate_from_commit_relationship() {
         let cases = [
@@ -2056,13 +2441,16 @@ mod tests {
         let value = json!([{"number": 7, "title": "M18.01 TASK-42", "body": "same title does not imply ownership SESSION-abc", "state": "open", "draft": false, "user": {"login": "owner"}, "head": {"ref": "feature", "sha": "abc"}, "base": {"ref": "main", "sha": "def"}, "comments": 99}]);
         let prs = parse_pull_requests(Some(&value));
         assert_eq!(prs.len(), 1);
-        assert_eq!(prs[0].task_links, vec!["M18.01", "TASK-42"]);
-        assert_eq!(prs[0].session_links, vec!["SESSION-abc"]);
+        assert_eq!(prs[0].raw_task_references, vec!["M18.01", "TASK-42"]);
+        assert_eq!(prs[0].raw_session_references, vec!["SESSION-abc"]);
+        assert!(prs[0].task_links.is_empty());
+        assert!(prs[0].session_links.is_empty());
         assert!(prs[0].comments.is_empty());
 
         let issues = json!([{"number": 1, "title": "M18.03", "body": "TASK-8 is explicit", "state": "open", "labels": [{"name": "bug"}]}]);
         let parsed = parse_issues(Some(&issues));
-        assert_eq!(parsed[0].task_links, vec!["M18.03", "TASK-8"]);
+        assert_eq!(parsed[0].raw_task_references, vec!["M18.03", "TASK-8"]);
+        assert!(parsed[0].task_links.is_empty());
         assert_eq!(parsed[0].labels, vec!["bug"]);
     }
 
@@ -2111,7 +2499,8 @@ mod tests {
         assert_eq!(pr.check_status.as_deref(), Some("SUCCESS"));
         assert_eq!(pr.comments.len(), 2);
         assert_eq!(snapshot.actions[0].jobs[0].steps[0].name.as_deref(), Some("compile"));
-        assert_eq!(snapshot.actions[0].failed_log_summary.as_deref(), Some("compile failed"));
+        assert_eq!(snapshot.actions[0].failed_log_summary.as_deref(), Some("Job #56 build: compile failed"));
+        assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 56);
         for expected in [detail, files, reviews, comments, review_comments, checks, status, jobs, logs] {
             assert!(transport.requests.iter().any(|request| request == &expected), "missing request {expected}");
         }
@@ -2276,5 +2665,125 @@ mod tests {
         assert!(!redacted.contains("github_pat_secret"));
         assert!(!redacted.contains("gho_old"));
         assert_eq!(bound_text(&"0123456789", 4), "0123");
+    }
+
+    #[test]
+    fn sanitizer_redacts_url_query_json_quoted_and_no_space_credentials() {
+        let samples = [
+            "https://example.test/callback?access_token=URL_SECRET&next=1",
+            "https://example.test/?token=QUERY_SECRET&x=1",
+            "Authorization:Bearer NOSPACE_SECRET",
+            "Authorization: Bearer SPACE_SECRET",
+            r#"{"token":"JSON_SECRET","api_key":"JSON_KEY","nested":{"access-token":"NESTED_SECRET"}}"#,
+            "github_pat_PAT_SECRET ghp_GHP_SECRET gho_OAUTH_SECRET ghu_USER_SECRET ghs_SERVER_SECRET ghr_REFRESH_SECRET",
+        ];
+        let redacted = samples.iter().map(|sample| sanitize_error(sample)).collect::<Vec<_>>().join(" ");
+        for secret in ["URL_SECRET", "QUERY_SECRET", "NOSPACE_SECRET", "SPACE_SECRET", "JSON_SECRET", "JSON_KEY", "NESTED_SECRET", "PAT_SECRET", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
+            assert!(!redacted.contains(secret), "secret leaked: {secret}; output={redacted}");
+        }
+    }
+
+    #[test]
+    fn legacy_and_malformed_cache_entries_are_never_trusted() {
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let legacy = CacheEnvelope {
+            schema_version: 1,
+            resource_kind: RESOURCE_REPOSITORY.into(),
+            repository: "Sekiph82/H-veAI".into(),
+            branch: "main".into(),
+            fetched_at: "2026-09-15T00:00:00Z".into(),
+            last_known_good_at: "2026-09-15T00:00:00Z".into(),
+            payload: json!({"full_name":"Sekiph82/H-veAI"}),
+        };
+        persist_cache(&database, &project.id, &legacy).unwrap();
+        assert!(load_cache(&database, &project.id, RESOURCE_REPOSITORY, "Sekiph82/H-veAI", "main").unwrap().is_none());
+        database.open_connection().unwrap().execute(
+            "UPDATE github_sync_state SET metadata_json=?1 WHERE project_id=?2 AND resource_kind=?3",
+            params!["{malformed", project.id, RESOURCE_REPOSITORY],
+        ).unwrap();
+        assert_eq!(load_cache(&database, &project.id, RESOURCE_REPOSITORY, "Sekiph82/H-veAI", "main").unwrap_err(), "GITHUB_CACHE_MALFORMED");
+    }
+
+    #[test]
+    fn project_owned_links_require_current_canonical_tasks_and_persisted_sessions() {
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let tracking = current_tracking_snapshot();
+        database.open_connection().unwrap().execute(
+            "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, 'GITHUB_TASKS_REMOTE', 'head', ?3, ?4)",
+            params![format!("{}:GITHUB_TASKS_REMOTE", project.id), project.id, tracking.fetched_at, serde_json::to_string(&tracking).unwrap()],
+        ).unwrap();
+        database.open_connection().unwrap().execute(
+            "INSERT INTO agent_sessions (id, project_id, provider, state, created_at) VALUES ('SESSION-owned', ?1, 'CODEX', 'COMPLETED', 'now')",
+            [&project.id],
+        ).unwrap();
+        let value = json!([{"number": 9, "title": "M18.10.01 TASK-42 M19 SESSION-owned SESSION-foreign", "body": "TASK-foreign"}]);
+        let issue_value = json!([{"number": 10, "title": "M18.10.01 TASK-42 SESSION-owned SESSION-foreign", "body": "TASK-foreign"}]);
+        let mut prs = parse_pull_requests(Some(&value));
+        let mut issues = parse_issues(Some(&issue_value));
+        validate_project_owned_links(&database, &project, &mut prs, &mut issues);
+        assert_eq!(prs[0].task_links, vec!["M18.10.01", "TASK-42"]);
+        assert_eq!(prs[0].session_links, vec!["SESSION-owned"]);
+        assert_eq!(issues[0].task_links, vec!["M18.10.01", "TASK-42"]);
+        assert_eq!(issues[0].session_links, vec!["SESSION-owned"]);
+        assert!(prs[0].raw_task_references.contains(&"M19".into()));
+        assert!(prs[0].raw_task_references.contains(&"TASK-foreign".into()));
+        assert!(prs[0].raw_session_references.contains(&"SESSION-foreign".into()));
+    }
+
+    #[test]
+    fn failed_job_selection_skips_success_and_skipped_jobs_and_preserves_provenance() {
+        let mut actions = parse_actions(Some(&json!({"workflow_runs":[{"id":1,"name":"CI"}]})));
+        let resources = vec![
+            ResourceResult { kind: "GITHUB_ACTION_1_JOBS".into(), value: Some(json!({"jobs":[
+                {"id":1,"name":"success","status":"completed","conclusion":"success"},
+                {"id":2,"name":"skipped","status":"completed","conclusion":"skipped"},
+                {"id":3,"name":"failed","status":"completed","conclusion":"failure"},
+                {"id":4,"name":"cancelled","status":"completed","conclusion":"cancelled"},
+                {"id":5,"name":"timed out","status":"completed","conclusion":"timed_out"},
+                {"id":6,"name":"action required","status":"action_required"}
+            ]})), state: "CURRENT".into(), fetched_at: None, last_known_good_at: None, error: None },
+            ResourceResult { kind: "GITHUB_ACTION_JOB_3_LOG".into(), value: Some(Value::String("failed log".into())), state: "CURRENT".into(), fetched_at: None, last_known_good_at: None, error: None },
+            ResourceResult { kind: "GITHUB_ACTION_JOB_4_LOG".into(), value: Some(Value::String("cancelled log".into())), state: "CURRENT".into(), fetched_at: None, last_known_good_at: None, error: None },
+        ];
+        enrich_actions(&mut actions, &resources);
+        assert_eq!(actions[0].failed_log_evidence.iter().map(|item| item.job_id).collect::<Vec<_>>(), vec![3, 4]);
+        assert_eq!(actions[0].failed_log_summary.as_deref(), Some("Job #3 failed: failed log"));
+        assert_eq!(actions[0].logs_state, "CURRENT");
+    }
+
+    #[test]
+    fn enrichment_reserves_before_acquisition_and_never_calls_transport_after_cap() {
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let identity = identity_from_project(&project).map(identity_from_view).unwrap();
+        let repo = "https://api.github.com/repos/Sekiph82/H-veAI";
+        let pull_url = format!("{repo}/pulls?state=all&per_page={MAX_PULL_REQUESTS}");
+        let action_url = format!("{repo}/actions/runs?per_page={MAX_ACTION_RUNS}");
+        let pulls = (1..=5).map(|number| json!({"number":number,"title":format!("M18.10.{number:02}"),"head":{"sha":format!("sha-{number}")}})).collect::<Vec<_>>();
+        let runs = (1..=5).map(|id| json!({"id":id,"name":format!("run-{id}")})).collect::<Vec<_>>();
+        let mut transport = FixtureTransport::default()
+            .response(&pull_url, 200, &serde_json::to_string(&pulls).unwrap())
+            .response(&action_url, 200, &serde_json::json!({"workflow_runs":runs}).to_string());
+        for number in 1..=5 {
+            let jobs_url = format!("{repo}/actions/runs/{number}/jobs?per_page={MAX_ACTION_JOBS}");
+            transport = transport.response(&jobs_url, 200, &format!(r#"{{"jobs":[{{"id":{},"name":"failed","status":"completed","conclusion":"failure"}}]}}"#, 100 + number));
+        }
+        let resources = fetch_resources_with_transport(&database, &project, &identity, "2026-09-15T00:00:00Z", &mut transport);
+        assert_eq!(transport.requests.iter().filter(|url| url.contains("/actions/jobs/")).count(), 2, "requests={:?}", transport.requests);
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/103/logs")));
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/104/logs")));
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/105/logs")));
+        assert_eq!(transport.requests.len(), 8 + MAX_SUBRESOURCE_REQUESTS);
+        assert_eq!(resources.iter().filter(|resource| resource.kind.contains("_LOG")).count(), 3);
+        let log_states = resources.iter().filter(|resource| resource.kind.contains("_LOG")).map(|resource| resource.state.as_str()).collect::<Vec<_>>();
+        assert_eq!(log_states, vec!["CURRENT", "CURRENT", "UNAVAILABLE"]);
     }
 }

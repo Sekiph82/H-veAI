@@ -1,9 +1,8 @@
-import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/Shell";
 import { RegistryProvider } from "./registryContext";
 import {
   ActivityPage,
-  Agents,
   Audits,
   CommandCenter,
   ProjectCockpit,
@@ -36,7 +35,5 @@ export default function App() {
 }
 
 function LegacyAgentsRoute() {
-  const location = useLocation();
-  const params = new URLSearchParams(location.search);
-  return params.has("projectId") || params.has("sessionId") ? <PromptEnginePage legacyRoute /> : <Agents />;
+  return <PromptEnginePage legacyRoute />;
 }

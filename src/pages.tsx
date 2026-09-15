@@ -2325,12 +2325,13 @@ function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
                 ["Diff", pr.detailState !== "CURRENT" ? `Unavailable (${pr.detailState ?? "UNAVAILABLE"})` : pr.changedFiles == null ? "Unavailable" : `${pr.changedFiles} files, +${pr.additions ?? 0}/-${pr.deletions ?? 0}`],
                 ["Review / checks", `${pr.reviewStatus ?? reviewsState} / ${pr.checkStatus ?? checksState}`],
                 ["Evidence state", `Files ${filesState} · Reviews ${reviewsState} · Comments ${commentsState} · Checks ${checksState}`],
-                ["Explicit links", [...pr.taskLinks, ...pr.sessionLinks].join(", ") || "None evidenced"],
+                ["Validated links", [...(pr.taskLinks ?? []), ...(pr.sessionLinks ?? [])].join(", ") || "None evidenced"],
               ]} />
               <CockpitList title="Changed files" values={files.map((file) => `${file.filename} / ${file.status ?? "UNKNOWN"} / +${file.additions ?? 0}/-${file.deletions ?? 0}`)} empty={`Changed-file evidence ${filesState.toLowerCase()}`} />
               <CockpitList title="Reviews" values={reviews.map((review) => `${review.user ?? "Unknown"} / ${review.state ?? "UNKNOWN"}${review.bodyExcerpt ? ` / ${review.bodyExcerpt}` : ""}`)} empty={`Review evidence ${reviewsState.toLowerCase()}`} />
               <CockpitList title="Checks" values={checks.map((check) => `${check.name ?? "Unnamed check"} / ${check.conclusion ?? check.status ?? "UNKNOWN"}`)} empty={`Check evidence ${checksState.toLowerCase()}`} />
               <CockpitList title="Comments / reviews" values={pr.comments} empty="No bounded comment evidence" />
+              <CockpitList title="Raw explicit references" values={[...(pr.rawTaskReferences ?? []), ...(pr.rawSessionReferences ?? [])]} empty="No raw explicit references" />
             </details>;
             })}
             {!data.pullRequests.length ? <EmptyState title="No pull requests in bounded window" detail="No current PR records were returned by the selected repository." /> : null}
@@ -2340,7 +2341,8 @@ function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
           <div className="cockpit-record-list">
             {data.issues.map((issue) => <details className="cockpit-record" key={issue.number}>
               <summary><strong>#{issue.number} {issue.title}</strong><span>{issue.state}</span></summary>
-              <CockpitFacts facts={[["Author", issue.author ?? "Unknown"], ["Labels", issue.labels.join(", ") || "None"], ["Explicit task links", issue.taskLinks.join(", ") || "None evidenced"]]} />
+              <CockpitFacts facts={[["Author", issue.author ?? "Unknown"], ["Labels", issue.labels.join(", ") || "None"], ["Validated links", [...(issue.taskLinks ?? []), ...(issue.sessionLinks ?? [])].join(", ") || "None evidenced"]]} />
+              <CockpitList title="Raw explicit references" values={[...(issue.rawTaskReferences ?? []), ...(issue.rawSessionReferences ?? [])]} empty="No raw explicit references" />
               {issue.bodyExcerpt ? <p className="cockpit-muted">{issue.bodyExcerpt}</p> : null}
             </details>)}
             {!data.issues.length ? <EmptyState title="No issues in bounded window" detail="Issues are repository-scoped; task relationships appear only from explicit references." /> : null}
@@ -2357,6 +2359,7 @@ function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
               return <details className="cockpit-record" key={run.id}>
               <summary><strong>{run.name ?? "Unnamed workflow"}</strong><span>{run.conclusion ?? run.status ?? "UNKNOWN"}</span></summary>
               <CockpitFacts facts={[["Run", String(run.id)], ["Event", run.event ?? "Unknown"], ["Branch / SHA", `${run.branch ?? "?"} / ${run.headSha ?? "?"}`], ["PRs", (run.pullRequestNumbers ?? []).map(String).join(", ") || "None evidenced"], ["Jobs / logs", `${jobsState} / ${logsState}`], ["Failed log summary", run.failedLogSummary ?? `Unavailable (${logsState})`]]} />
+              <CockpitList title="Failed-job log provenance" values={(run.failedLogEvidence ?? []).map((evidence) => `Job #${evidence.jobId}${evidence.jobName ? ` ${evidence.jobName}` : ""}: ${evidence.excerpt}`)} empty="No eligible failed-job log evidence" />
               <CockpitList title="Jobs / steps" values={jobs.flatMap((job) => [
                 `${job.name ?? "Unnamed job"} / ${job.conclusion ?? job.status ?? "UNKNOWN"}`,
                 ...(Array.isArray(job.steps) ? job.steps : []).map((step) => `  ${step.number ?? "?"}. ${step.name ?? "Unnamed step"} / ${step.conclusion ?? step.status ?? "UNKNOWN"}`),

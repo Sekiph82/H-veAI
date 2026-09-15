@@ -51,6 +51,8 @@ export type GitHubIntegrationSnapshot = {
     reviews: Array<{ id: number; user: string | null; state: string | null; submittedAt: string | null; bodyExcerpt: string | null }>;
     checks: Array<{ id: number; name: string | null; status: string | null; conclusion: string | null; detailsUrl: string | null }>;
     comments: string[];
+    rawTaskReferences: string[];
+    rawSessionReferences: string[];
     taskLinks: string[];
     sessionLinks: string[];
   }>;
@@ -65,7 +67,10 @@ export type GitHubIntegrationSnapshot = {
     htmlUrl: string | null;
     bodyExcerpt: string | null;
     comments: string[];
+    rawTaskReferences: string[];
+    rawSessionReferences: string[];
     taskLinks: string[];
+    sessionLinks: string[];
   }>;
   actions: Array<{
     id: number;
@@ -79,6 +84,7 @@ export type GitHubIntegrationSnapshot = {
     createdAt: string | null;
     updatedAt: string | null;
     failedLogSummary: string | null;
+    failedLogEvidence: Array<{ jobId: number; jobName: string | null; excerpt: string }>;
     jobsState: string;
     logsState: string;
     jobs: Array<{

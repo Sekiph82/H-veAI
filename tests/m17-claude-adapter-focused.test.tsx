@@ -101,11 +101,10 @@ beforeEach(() => {
 });
 
 describe("M17 Claude Code adapter", () => {
-  it("exposes truthful readiness capabilities and resumes the exact provider session", async () => {
+  it("resumes the exact Claude provider session from integrated Prompt Engine sessions", async () => {
     render(<App />);
-    expect(await screen.findByTestId("claude-readiness")).toHaveTextContent("READY");
-    expect(screen.getByTestId("claude-readiness")).toHaveTextContent("2.1.270 (Claude Code)");
-    expect(screen.getByTestId("claude-readiness")).toHaveTextContent("RESUME");
+    expect(await screen.findByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument();
+    expect(screen.queryByTestId("claude-readiness")).not.toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: /View CLAUDE FREEFORM_PROJECT_OPERATION ORPHANED/i }));
     expect(screen.getByTestId("agent-session-detail")).toHaveTextContent("ORPHANED");
