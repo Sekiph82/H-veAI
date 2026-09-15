@@ -66,10 +66,11 @@ describe("M14 Agent Session Center", () => {
     expect(screen.queryByTestId("agent-session-detail")).not.toBeInTheDocument();
     expect(screen.queryByText("SESSION_STARTED")).not.toBeInTheDocument();
     fireEvent.click(viewButton);
-    expect(screen.getByTestId("agent-stdout-reader")).toHaveTextContent("read-only repository summary");
-    expect(screen.getByTestId("agent-stdout-reader")).toHaveTextContent("You");
-    expect(screen.getByTestId("agent-stdout-reader")).toHaveTextContent("Claude");
-    expect(screen.getByTestId("agent-stdout-reader")).toHaveTextContent("Summarize the repository safely.");
+    const reader = await screen.findByTestId("agent-stdout-reader", {}, { timeout: 5000 });
+    expect(reader).toHaveTextContent("read-only repository summary");
+    expect(reader).toHaveTextContent("You");
+    expect(reader).toHaveTextContent("Claude");
+    expect(reader).toHaveTextContent("Summarize the repository safely.");
     expect(screen.queryByText("SESSION_STARTED")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Timeline"));
     expect(await screen.findByText("SESSION STARTED")).toBeInTheDocument();

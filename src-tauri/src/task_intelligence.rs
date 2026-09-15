@@ -9,7 +9,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::cell::RefCell;
 
 const MAX_TASKS: usize = 4096;
 const MAX_FIELD_BYTES: usize = 4096;
@@ -18,11 +18,10 @@ const MAX_WARNINGS: usize = 512;
 const OWNER: &str = "M09_TASK_INTELLIGENCE_PARSER";
 const SCHEMA_VERSION: u32 = 1;
 #[cfg(test)]
-static RETRY_FAILPOINT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
-#[cfg(test)]
-static RETRY_RELATIVE_PATH_FAILPOINT: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-#[cfg(test)]
-static RETRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+thread_local! {
+    static RETRY_FAILPOINT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static RETRY_RELATIVE_PATH_FAILPOINT: RefCell<Option<String>> = const { RefCell::new(None) };
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -280,12 +279,7 @@ fn read_authoritative_source(
         return Ok(None);
     };
     #[cfg(test)]
-    if let Some(relative_path) = RETRY_RELATIVE_PATH_FAILPOINT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .take()
-    {
+    if let Some(relative_path) = RETRY_RELATIVE_PATH_FAILPOINT.with(|failpoint| failpoint.borrow_mut().take()) {
         current.relative_path = relative_path;
     }
     let refreshed_root =
@@ -312,12 +306,7 @@ fn read_authoritative_source(
         ));
     }
     #[cfg(test)]
-    if let Some(path) = RETRY_FAILPOINT
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .unwrap()
-        .take()
-    {
+    if let Some(path) = RETRY_FAILPOINT.with(|failpoint| failpoint.borrow_mut().take()) {
         fs::write(path, b"- [ ] changed again\n").map_err(|error| {
             warning(
                 "SOURCE_READ_FAILED",
@@ -1430,10 +1419,6 @@ mod tests {
     }
     #[test]
     fn p01_second_change_after_refresh_is_skipped_after_exactly_one_retry() {
-        let _retry_test_guard = RETRY_TEST_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap();
         let (_db_dir, dir, db, id) = fixture("- [ ] old\n");
         let target = dir.path().join("TASKS.md");
         let source = task_sources::discover(&db, &id)
@@ -1442,20 +1427,13 @@ mod tests {
             .find(|s| s.relative_path == "TASKS.md")
             .unwrap();
         fs::write(&target, "- [ ] changed\n").unwrap();
-        *RETRY_FAILPOINT
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = Some(target);
+        RETRY_FAILPOINT.with(|failpoint| *failpoint.borrow_mut() = Some(target));
         assert!(read_authoritative_source(&db, &id, &source)
             .unwrap()
             .is_none());
     }
     #[test]
     fn p01_retry_rechecks_physical_containment() {
-        let _retry_test_guard = RETRY_TEST_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap();
         let (_db_dir, dir, db, id) = fixture("- [ ] safe\n");
         let target = dir.path().join("TASKS.md");
         let project_name = dir.path().file_name().unwrap().to_string_lossy();
@@ -1468,10 +1446,8 @@ mod tests {
             .find(|source| source.relative_path == "TASKS.md")
             .unwrap();
         fs::write(&target, "- [ ] changed\n").unwrap();
-        *RETRY_RELATIVE_PATH_FAILPOINT
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap() = Some(format!("../{outside_name}"));
+        RETRY_RELATIVE_PATH_FAILPOINT
+            .with(|failpoint| *failpoint.borrow_mut() = Some(format!("../{outside_name}")));
         let result = read_authoritative_source(&db, &id, &source);
         fs::remove_file(&outside_path).unwrap();
         let warning = result.unwrap_err();

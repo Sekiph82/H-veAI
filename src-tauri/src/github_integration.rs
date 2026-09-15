@@ -1332,6 +1332,14 @@ fn skip_credential_separators(bytes: &[u8], mut index: usize) -> usize {
     index
 }
 
+fn redacted_marker_end(bytes: &[u8], start: usize) -> Option<usize> {
+    const MARKER: &[u8] = b"[REDACTED]";
+    bytes
+        .get(start..start + MARKER.len())
+        .filter(|value| *value == MARKER)
+        .map(|_| start + MARKER.len())
+}
+
 fn quoted_end(bytes: &[u8], start: usize, quote: u8) -> usize {
     let mut index = start;
     while index < bytes.len() {
@@ -1375,6 +1383,12 @@ fn authorization_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Optio
     while separator < bytes.len() && bytes[separator].is_ascii_whitespace() {
         separator += 1;
     }
+    if matches!(bytes.get(separator), Some(b'"' | b'\'')) {
+        separator += 1;
+        while separator < bytes.len() && bytes[separator].is_ascii_whitespace() {
+            separator += 1;
+        }
+    }
     if bytes.get(separator) != Some(&b':') {
         return None;
     }
@@ -1382,14 +1396,29 @@ fn authorization_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Optio
     while start < bytes.len() && bytes[start].is_ascii_whitespace() {
         start += 1;
     }
+    if let Some(end) = redacted_marker_end(bytes, start) {
+        return Some((start, end, None));
+    }
     let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
     if let Some(quote) = quote {
         let value_start = start + 1;
         let end = quoted_end(bytes, value_start, quote);
         return Some((value_start, end, Some(quote)));
     }
-    let end = value_end(bytes, start, true);
-    (start < end).then_some((start, end, None))
+    let scheme_end = value_end(bytes, start, false);
+    if scheme_end == start {
+        return None;
+    }
+    let secret_start = skip_credential_separators(bytes, scheme_end);
+    if let Some(end) = redacted_marker_end(bytes, secret_start) {
+        return Some((secret_start, end, None));
+    }
+    let end = value_end(bytes, secret_start, false);
+    if secret_start < end {
+        Some((secret_start, end, None))
+    } else {
+        Some((start, scheme_end, None))
+    }
 }
 
 fn credential_assignment_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)> {
@@ -1421,6 +1450,9 @@ fn credential_assignment_span(bytes: &[u8], index: usize) -> Option<(usize, usiz
     while start < bytes.len() && bytes[start].is_ascii_whitespace() {
         start += 1;
     }
+    if let Some(end) = redacted_marker_end(bytes, start) {
+        return Some((start, end, None));
+    }
     let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
     if let Some(quote) = quote {
         let value_start = start + 1;
@@ -1442,6 +1474,9 @@ fn bearer_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)>
     let mut start = skip_credential_separators(bytes, index + KEY.len());
     if start >= bytes.len() {
         return None;
+    }
+    if let Some(end) = redacted_marker_end(bytes, start) {
+        return Some((start, end, None));
     }
     let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
     if let Some(quote) = quote {
@@ -2508,25 +2543,142 @@ mod tests {
     }
 
     #[test]
+    fn production_actions_failure_matrix_is_exact_and_truthful() {
+        let action_case = |jobs_status: u16, jobs: Value, logs: Vec<(u64, u16, String)>| {
+            let database_dir = tempfile::tempdir().unwrap();
+            let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+            crate::github_tracking::ensure_portfolio(&database).unwrap();
+            let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+            let repo = "https://api.github.com/repos/Sekiph82/H-veAI";
+            let action_url = format!("{repo}/actions/runs?per_page={MAX_ACTION_RUNS}");
+            let jobs_url = format!("{repo}/actions/runs/55/jobs?per_page={MAX_ACTION_JOBS}");
+            let mut transport = FixtureTransport::default()
+                .response(&action_url, 200, r#"{"workflow_runs":[{"id":55,"name":"CI","status":"completed","conclusion":"failure"}]}"#)
+                .response(&jobs_url, jobs_status, &jobs.to_string());
+            for (job_id, status, body) in logs {
+                transport = transport.response(&format!("{repo}/actions/jobs/{job_id}/logs"), status, &body);
+            }
+            let snapshot = snapshot_with_transport(&database, &project, &mut transport).unwrap();
+            (snapshot, transport, jobs_url)
+        };
+
+        let (snapshot, transport, jobs_url) = action_case(
+            200,
+            json!({"jobs":[
+                {"id":1,"name":"success","status":"completed","conclusion":"success"},
+                {"id":2,"name":"failure","status":"completed","conclusion":"failure"}
+            ]}),
+            vec![(2, 200, "failure log".into())],
+        );
+        assert!(transport.requests.contains(&jobs_url));
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/2/logs")));
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/1/logs")));
+        assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 2);
+
+        let (_, transport, _) = action_case(
+            200,
+            json!({"jobs":[
+                {"id":1,"name":"success","status":"completed","conclusion":"success"},
+                {"id":2,"name":"skipped","status":"completed","conclusion":"skipped"},
+                {"id":3,"name":"third failure","status":"completed","conclusion":"failure"}
+            ]}),
+            vec![(3, 200, "third failure log".into())],
+        );
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/3/logs")));
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/1/logs")));
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/2/logs")));
+
+        for (job_id, status, conclusion) in [(10, "cancelled", "cancelled"), (11, "completed", "timed_out")] {
+            let (snapshot, transport, _) = action_case(
+                200,
+                json!({"jobs":[{"id":job_id,"name":status,"status":status,"conclusion":conclusion}]}),
+                vec![(job_id, 200, format!("{status} log"))],
+            );
+            assert!(transport.requests.iter().any(|url| url.ends_with(&format!("/actions/jobs/{job_id}/logs"))));
+            assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, job_id);
+        }
+        let (snapshot, transport, _) = action_case(
+            200,
+            json!({"jobs":[{"id":12,"name":"action required","status":"action_required"}]}),
+            vec![(12, 200, "action required log".into())],
+        );
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/12/logs")));
+        assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 12);
+
+        let (snapshot, transport, _) = action_case(
+            200,
+            json!({"jobs":[
+                {"id":20,"name":"first failure","status":"completed","conclusion":"failure"},
+                {"id":21,"name":"second failure","status":"completed","conclusion":"failure"}
+            ]}),
+            vec![(20, 500, "unavailable".into()), (21, 200, "second current".into())],
+        );
+        assert_eq!(snapshot.actions[0].logs_state, "PARTIAL");
+        assert_eq!(snapshot.actions[0].failed_log_evidence.iter().map(|item| item.job_id).collect::<Vec<_>>(), vec![21]);
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/20/logs")));
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/21/logs")));
+
+        let (snapshot, transport, _) = action_case(
+            503,
+            json!({"jobs":[{"id":30,"name":"failure","status":"completed","conclusion":"failure"}]}),
+            vec![(30, 200, "must not be requested".into())],
+        );
+        assert_eq!(snapshot.actions[0].jobs_state, "UNAVAILABLE");
+        assert_eq!(snapshot.actions[0].logs_state, "UNAVAILABLE");
+        assert!(snapshot.actions[0].failed_log_evidence.is_empty());
+        assert!(!transport.requests.iter().any(|url| url.contains("/actions/jobs/")));
+
+        let (snapshot, transport, _) = action_case(
+            200,
+            json!({"jobs":[
+                {"id":40,"name":"success","status":"completed","conclusion":"success"},
+                {"id":41,"name":"skipped","status":"completed","conclusion":"skipped"}
+            ]}),
+            vec![(40, 200, "must not be requested".into()), (41, 200, "must not be requested".into())],
+        );
+        assert_eq!(snapshot.actions[0].logs_state, "NOT_APPLICABLE");
+        assert!(snapshot.actions[0].failed_log_evidence.is_empty());
+        assert!(!transport.requests.iter().any(|url| url.contains("/actions/jobs/")));
+
+        let long_excerpt = "x".repeat(MAX_ACTION_LOG_CHARS + 100);
+        let (snapshot, transport, _) = action_case(
+            200,
+            json!({"jobs":[
+                {"id":50,"name":"first","status":"completed","conclusion":"failure"},
+                {"id":51,"name":"second","status":"completed","conclusion":"failure"},
+                {"id":52,"name":"third","status":"completed","conclusion":"failure"}
+            ]}),
+            vec![(50, 200, long_excerpt), (51, 200, "second".into()), (52, 200, "third".into())],
+        );
+        assert_eq!(snapshot.actions[0].failed_log_evidence.len(), 2);
+        assert_eq!(snapshot.actions[0].failed_log_evidence[0].excerpt.chars().count(), MAX_ACTION_LOG_CHARS);
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/50/logs")));
+        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/51/logs")));
+        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/52/logs")));
+    }
+
+    #[test]
     fn successful_remote_payloads_are_redacted_before_cache_and_frontend_projection() {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
         let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
         let url = format!("https://api.github.com/repos/Sekiph82/H-veAI/issues?state=all&per_page={MAX_ISSUES}");
-        let secret_body = "Authorization: Bearer arbitrary-secret github_pat_test-secret token=query-secret";
-        let mut transport = FixtureTransport::default().response(&url, 200, &format!(r#"[{{"number":3,"title":"M18.03","body":"{secret_body}","state":"open"}}]"#));
+        let secret_body = "https://example.test/callback?access_token=URL_SECRET&token=QUERY_SECRET Authorization:Bearer BEARER_NOSPACE_SECRET Authorization: Bearer BEARER_SPACED_SECRET Authorization:Basic BASIC_NOSPACE_SECRET Authorization: Basic BASIC_SPACED_SECRET {\"Authorization\":\"Basic QUOTED_AUTH_SECRET\",\"token\":\"QUOTED_TOKEN_SECRET\",\"api_key\":\"QUOTED_API_KEY_SECRET\"} github_pat_test-secret ghp_GHP_SECRET gho_OAUTH_SECRET ghu_USER_SECRET ghs_SERVER_SECRET ghr_REFRESH_SECRET";
+        let issue_payload = json!([{"number":3,"title":"M18.03","body":secret_body,"state":"open"}]);
+        let mut transport = FixtureTransport::default().response(&url, 200, &issue_payload.to_string());
         let snapshot = snapshot_with_transport(&database, &project, &mut transport).unwrap();
         let issue = &snapshot.issues[0];
         let returned = serde_json::to_string(issue).unwrap();
-        assert!(!returned.contains("arbitrary-secret"));
-        assert!(!returned.contains("github_pat_test-secret"));
-        assert!(!returned.contains("query-secret"));
+        for secret in ["URL_SECRET", "QUERY_SECRET", "BEARER_NOSPACE_SECRET", "BEARER_SPACED_SECRET", "BASIC_NOSPACE_SECRET", "BASIC_SPACED_SECRET", "QUOTED_AUTH_SECRET", "QUOTED_TOKEN_SECRET", "QUOTED_API_KEY_SECRET", "test-secret", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
+            assert!(!returned.contains(secret), "DTO leaked {secret}: {returned}");
+        }
         let metadata: Vec<String> = database.open_connection().unwrap().prepare("SELECT metadata_json FROM github_sync_state WHERE project_id=?1").unwrap().query_map([&project.id], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
         let persisted = metadata.join("\n");
-        assert!(!persisted.contains("arbitrary-secret"));
-        assert!(!persisted.contains("github_pat_test-secret"));
-        assert!(!persisted.contains("query-secret"));
+        for secret in ["URL_SECRET", "QUERY_SECRET", "BEARER_NOSPACE_SECRET", "BEARER_SPACED_SECRET", "BASIC_NOSPACE_SECRET", "BASIC_SPACED_SECRET", "QUOTED_AUTH_SECRET", "QUOTED_TOKEN_SECRET", "QUOTED_API_KEY_SECRET", "test-secret", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
+            assert!(!persisted.contains(secret), "cache leaked {secret}: {persisted}");
+        }
+        assert!(load_cache(&database, &project.id, RESOURCE_ISSUES, "Sekiph82/H-veAI", "main").unwrap().is_some());
     }
 
     #[test]
@@ -2674,11 +2826,13 @@ mod tests {
             "https://example.test/?token=QUERY_SECRET&x=1",
             "Authorization:Bearer NOSPACE_SECRET",
             "Authorization: Bearer SPACE_SECRET",
-            r#"{"token":"JSON_SECRET","api_key":"JSON_KEY","nested":{"access-token":"NESTED_SECRET"}}"#,
+            "Authorization:Basic BASIC_NOSPACE_SECRET",
+            "Authorization: Basic BASIC_SPACED_SECRET",
+            r#"{"Authorization":"Basic QUOTED_AUTH_SECRET","authorization": "Bearer QUOTED_BEARER_SECRET","token":"JSON_SECRET","api_key":"JSON_KEY","nested":{"access-token":"NESTED_SECRET"}}"#,
             "github_pat_PAT_SECRET ghp_GHP_SECRET gho_OAUTH_SECRET ghu_USER_SECRET ghs_SERVER_SECRET ghr_REFRESH_SECRET",
         ];
         let redacted = samples.iter().map(|sample| sanitize_error(sample)).collect::<Vec<_>>().join(" ");
-        for secret in ["URL_SECRET", "QUERY_SECRET", "NOSPACE_SECRET", "SPACE_SECRET", "JSON_SECRET", "JSON_KEY", "NESTED_SECRET", "PAT_SECRET", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
+        for secret in ["URL_SECRET", "QUERY_SECRET", "NOSPACE_SECRET", "SPACE_SECRET", "BASIC_NOSPACE_SECRET", "BASIC_SPACED_SECRET", "QUOTED_AUTH_SECRET", "QUOTED_BEARER_SECRET", "JSON_SECRET", "JSON_KEY", "NESTED_SECRET", "PAT_SECRET", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
             assert!(!redacted.contains(secret), "secret leaked: {secret}; output={redacted}");
         }
     }
@@ -2713,6 +2867,7 @@ mod tests {
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
         let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let foreign_project = crate::projects::fetch_project(&database, "github:Sekiph82/FormuLab@main").unwrap();
         let tracking = current_tracking_snapshot();
         database.open_connection().unwrap().execute(
             "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, 'GITHUB_TASKS_REMOTE', 'head', ?3, ?4)",
@@ -2722,8 +2877,22 @@ mod tests {
             "INSERT INTO agent_sessions (id, project_id, provider, state, created_at) VALUES ('SESSION-owned', ?1, 'CODEX', 'COMPLETED', 'now')",
             [&project.id],
         ).unwrap();
-        let value = json!([{"number": 9, "title": "M18.10.01 TASK-42 M19 SESSION-owned SESSION-foreign", "body": "TASK-foreign"}]);
-        let issue_value = json!([{"number": 10, "title": "M18.10.01 TASK-42 SESSION-owned SESSION-foreign", "body": "TASK-foreign"}]);
+        let mut foreign_tracking = current_tracking_snapshot();
+        foreign_tracking.project_key = "github:Sekiph82/FormuLab@main".into();
+        foreign_tracking.repository = "Sekiph82/FormuLab".into();
+        foreign_tracking.task_rows = vec![crate::github_tracking::RemoteTaskRow {
+            id: "TASK-FORMULAB-01".into(), title: "Foreign task".into(), status: "PLANNED".into(), source_path: "TASKS.md".into(), source_line: 1,
+        }];
+        database.open_connection().unwrap().execute(
+            "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, 'GITHUB_TASKS_REMOTE', 'foreign-head', ?3, ?4)",
+            params![format!("{}:GITHUB_TASKS_REMOTE", foreign_project.id), foreign_project.id, foreign_tracking.fetched_at, serde_json::to_string(&foreign_tracking).unwrap()],
+        ).unwrap();
+        database.open_connection().unwrap().execute(
+            "INSERT INTO agent_sessions (id, project_id, provider, state, created_at) VALUES ('SESSION-FORMULAB-01', ?1, 'CLAUDE', 'COMPLETED', 'now')",
+            [&foreign_project.id],
+        ).unwrap();
+        let value = json!([{"number": 9, "title": "M18.10.01 TASK-42 TASK-FORMULAB-01 M19 SESSION-owned SESSION-FORMULAB-01 SESSION-foreign", "body": "TASK-foreign"}]);
+        let issue_value = json!([{"number": 10, "title": "M18.10.01 TASK-42 TASK-FORMULAB-01 SESSION-owned SESSION-FORMULAB-01 SESSION-foreign", "body": "TASK-foreign"}]);
         let mut prs = parse_pull_requests(Some(&value));
         let mut issues = parse_issues(Some(&issue_value));
         validate_project_owned_links(&database, &project, &mut prs, &mut issues);
@@ -2732,7 +2901,9 @@ mod tests {
         assert_eq!(issues[0].task_links, vec!["M18.10.01", "TASK-42"]);
         assert_eq!(issues[0].session_links, vec!["SESSION-owned"]);
         assert!(prs[0].raw_task_references.contains(&"M19".into()));
+        assert!(prs[0].raw_task_references.contains(&"TASK-FORMULAB-01".into()));
         assert!(prs[0].raw_task_references.contains(&"TASK-foreign".into()));
+        assert!(prs[0].raw_session_references.contains(&"SESSION-FORMULAB-01".into()));
         assert!(prs[0].raw_session_references.contains(&"SESSION-foreign".into()));
     }
 

@@ -1726,14 +1726,7 @@ mod tests {
                 .add_path(project_root.path().join("TASKS.md"))),
             })
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1000));
-        assert_eq!(
-            crate::task_intelligence::list(&database, &project.id)
-                .unwrap()
-                .tasks[0]
-                .title,
-            "changed before dashboard signal"
-        );
+        wait_for_task_title(&database, &project.id, "changed before dashboard signal");
         fs::write(
             project_root.path().join(MANIFEST_RELATIVE_PATH),
             "hiveaiDashboardSchema: hiveai-project-dashboard/v1\ndashboardMode: source-map\ntrackingMode: single-dashboard-watch\nrefreshPolicy: project-agent-maintained; H!veAI watches only .hiveai/PROJECT_DASHBOARD.md\n## Source authorities\nCanonical task source: `TASKS.md`\n## H!veAI live status\n| Field | Value |\n| --- | --- |\n| Current task | changed at dashboard signal |\n",

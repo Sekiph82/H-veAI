@@ -79,7 +79,7 @@ describe("M13 Codex adapter", () => {
     });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /View CODEX CODEX_EXEC FAILED/i }));
-    fireEvent.click(screen.getByText("Technical details"));
+    fireEvent.click(await screen.findByText("Technical details", {}, { timeout: 5000 }));
     expect((await screen.findAllByText("FAILED")).length).toBeGreaterThan(0);
     expect(screen.getByText("CODEX_PROCESS_FAILED")).toBeInTheDocument();
     expect(screen.getByText("Codex exited with code 1")).toBeInTheDocument();

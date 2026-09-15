@@ -128,8 +128,9 @@ describe("M17 Claude Code adapter", () => {
     });
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: /View CLAUDE FREEFORM_PROJECT_OPERATION WAITING_PERMISSION/i }));
-    expect(screen.getByTestId("agent-session-detail")).toHaveTextContent("WAITING PERMISSION");
-    expect(screen.getByTestId("agent-session-detail")).toHaveTextContent("Claude is waiting for an explicit permission decision.");
+    const detail = await screen.findByTestId("agent-session-detail", {}, { timeout: 5000 });
+    expect(detail).toHaveTextContent("WAITING PERMISSION");
+    expect(detail).toHaveTextContent("Claude is waiting for an explicit permission decision.");
     expect(screen.getByRole("button", { name: "Stop owned session" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Resume exact session" })).not.toBeInTheDocument();
   });

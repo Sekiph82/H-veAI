@@ -136,6 +136,46 @@ describe("M15C Agents route targeting", () => {
     expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(0);
   });
 
+  it("fails closed for a project-only legacy target", async () => {
+    window.history.pushState({}, "", `/agents?projectId=${project.id}`);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).get("surface")).toBe("sessions");
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(0);
+  });
+
+  it("fails closed for a session-only legacy target", async () => {
+    window.history.pushState({}, "", `/agents?sessionId=${baseSession.id}`);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).get("surface")).toBe("sessions");
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(0);
+  });
+
+  it("fails closed for duplicate session IDs", async () => {
+    window.history.pushState({}, "", `/agents?projectId=${project.id}&sessionId=${baseSession.id}&sessionId=session-2`);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).get("surface")).toBe("sessions");
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(0);
+  });
+
+  it("fails closed for a malformed session ID", async () => {
+    window.history.pushState({}, "", `/agents?projectId=${project.id}&sessionId=${encodeURIComponent("bad id")}`);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).get("surface")).toBe("sessions");
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(0);
+  });
+
+  it("fails closed for an overlong project ID", async () => {
+    window.history.pushState({}, "", `/agents?projectId=${"p".repeat(257)}&sessionId=${baseSession.id}`);
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument());
+    expect(new URLSearchParams(window.location.search).get("surface")).toBe("sessions");
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(0);
+  });
+
   it("selects the exact target session and keeps later manual selection", async () => {
     const second = { ...baseSession, id: "session-2", finalResponse: "The manually selected result." };
     sessions = [baseSession, second];
