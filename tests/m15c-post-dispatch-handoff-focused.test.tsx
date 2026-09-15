@@ -52,7 +52,7 @@ async function dispatchFixture(selectedProvider: "CODEX" | "CLAUDE" = "CODEX") {
   await waitFor(() => expect(screen.getByRole("button", { name: /Dispatch to/ })).toBeEnabled());
   if (selectedProvider === "CLAUDE") fireEvent.click(screen.getByRole("button", { name: "Claude" }));
   fireEvent.click(screen.getByRole("button", { name: new RegExp(`Dispatch to ${selectedProvider === "CODEX" ? "Codex" : "Claude"}`) }));
-  await waitFor(() => expect(screen.getByRole("button", { name: /View result in Agents/ })).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByRole("button", { name: /View session/ })).toBeInTheDocument());
 }
 
 describe("M15C Prompt Engine post-dispatch handoff", () => {
@@ -63,19 +63,19 @@ describe("M15C Prompt Engine post-dispatch handoff", () => {
     fireEvent.click(screen.getByRole("button", { name: /Approve exact version/ }));
     await waitFor(() => expect(screen.getByRole("button", { name: /Dispatch to/ })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /Dispatch to Codex/ }));
-    await waitFor(() => expect(screen.getByRole("button", { name: /View result in Agents/ })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: /View session/ })).toBeInTheDocument());
     expect(invoke.mock.calls.filter(([command]) => command === "hiveai_audit_link_remediation_session")).toHaveLength(1);
     const dispatchCount = invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch").length;
-    fireEvent.click(screen.getByRole("button", { name: /View result in Agents/ }));
-    await waitFor(() => expect(window.location.pathname).toBe("/agents"));
+    fireEvent.click(screen.getByRole("button", { name: /View session/ }));
+    await waitFor(() => expect(window.location.pathname).toBe("/prompts"));
     expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(dispatchCount);
   });
 
   it("shows the exact target and navigation does not redispatch", async () => {
     await dispatchFixture();
     const dispatchCount = invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch").length;
-    fireEvent.click(screen.getByRole("button", { name: /View result in Agents/ }));
-    await waitFor(() => expect(window.location.pathname).toBe("/agents"));
+    fireEvent.click(screen.getByRole("button", { name: /View session/ }));
+    await waitFor(() => expect(window.location.pathname).toBe("/prompts"));
     expect(new URLSearchParams(window.location.search).get("projectId")).toBe(project.id);
     expect(new URLSearchParams(window.location.search).get("sessionId")).toBe(baseSession.id);
     expect(invoke.mock.calls.filter(([command]) => command === "hiveai_prompt_dispatch")).toHaveLength(dispatchCount);
@@ -84,15 +84,15 @@ describe("M15C Prompt Engine post-dispatch handoff", () => {
 
   it("clears a stale handoff when a new draft replaces the dispatched version", async () => {
     await dispatchFixture();
-    expect(screen.getByRole("button", { name: /View result in Agents/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /View session/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Generate draft/ }));
-    await waitFor(() => expect(screen.queryByRole("button", { name: /View result in Agents/ })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByRole("button", { name: /View session/ })).not.toBeInTheDocument());
   });
 
   it("clears a stale handoff when the project changes", async () => {
     await dispatchFixture();
     fireEvent.change(screen.getByLabelText("Prompt project"), { target: { value: otherProject.id } });
-    expect(screen.queryByRole("button", { name: /View result in Agents/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /View session/ })).not.toBeInTheDocument();
   });
 });
 
@@ -102,7 +102,7 @@ describe("M15D Prompt Engine result placement", () => {
     const dispatchPanel = document.querySelector(".prompt-dispatch-panel");
     expect(dispatchPanel).not.toBeNull();
     expect(dispatchPanel).toContainElement(screen.getByText(/Dispatched CODEX session/));
-    expect(dispatchPanel).toContainElement(screen.getByRole("button", { name: /View result in Agents/ }));
+    expect(dispatchPanel).toContainElement(screen.getByRole("button", { name: /View session/ }));
     expect(document.querySelector(".safe-notice.prompt-notice")).not.toBeInTheDocument();
     expect(dispatchPanel?.querySelector(".prompt-dispatch-row")?.nextElementSibling).toHaveClass("prompt-dispatch-result");
   });
@@ -111,7 +111,7 @@ describe("M15D Prompt Engine result placement", () => {
     await dispatchFixture("CLAUDE");
     const dispatchPanel = document.querySelector(".prompt-dispatch-panel");
     expect(dispatchPanel).toContainElement(screen.getByText(/Dispatched CLAUDE session/));
-    expect(dispatchPanel).toContainElement(screen.getByRole("button", { name: /View result in Agents/ }));
+    expect(dispatchPanel).toContainElement(screen.getByRole("button", { name: /View session/ }));
     expect(document.querySelector(".safe-notice.prompt-notice")).not.toBeInTheDocument();
   });
 });
@@ -139,7 +139,7 @@ describe("M15C Agents route targeting", () => {
     window.history.pushState({}, "", `/agents?projectId=${project.id}&sessionId=missing-session`);
     render(<App />);
     expect(await screen.findByText("The dispatched session is not persisted under that registered project.")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Agent Session Center" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Prompt Engine" })).toBeInTheDocument();
   });
 
   it("keeps a running targeted session selected while polling updates it", async () => {

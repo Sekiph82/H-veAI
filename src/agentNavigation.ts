@@ -17,5 +17,5 @@ export function parseAgentRouteTarget(search: string): AgentRouteTarget | null {
 }
 
 export function agentRouteTarget(target: AgentRouteTarget) {
-  return `/agents?projectId=${encodeURIComponent(target.projectId)}&sessionId=${encodeURIComponent(target.sessionId)}`;
+  return `/prompts?surface=sessions&projectId=${encodeURIComponent(target.projectId)}&sessionId=${encodeURIComponent(target.sessionId)}`;
 }

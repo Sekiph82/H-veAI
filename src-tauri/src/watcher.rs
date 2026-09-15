@@ -1225,7 +1225,33 @@ mod tests {
     use crate::project_dashboard::MANIFEST_RELATIVE_PATH;
     use std::fs;
     use std::process::Command;
+    use std::time::Instant;
     use tempfile::tempdir;
+
+    fn wait_for_task_title(database: &DatabaseState, project_id: &str, expected: &str) {
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            if crate::task_intelligence::list(database, project_id)
+                .ok()
+                .and_then(|snapshot| snapshot.tasks.first().map(|task| task.title.clone()))
+                .as_deref()
+                == Some(expected)
+            {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            crate::task_intelligence::list(database, project_id)
+                .unwrap()
+                .tasks[0]
+                .title,
+            expected
+        );
+    }
 
     fn init_git_repo(root: &Path) {
         let run = |args: &[&str]| {
@@ -1803,14 +1829,7 @@ mod tests {
                 .add_path(project_root.path().join("TASKS.md"))),
             })
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1000));
-        assert_eq!(
-            crate::task_intelligence::list(&database, &project.id)
-                .unwrap()
-                .tasks[0]
-                .title,
-            "ignored while migrated"
-        );
+        wait_for_task_title(&database, &project.id, "ignored while migrated");
 
         fs::remove_file(project_root.path().join(MANIFEST_RELATIVE_PATH)).unwrap();
         manager
@@ -1845,14 +1864,7 @@ mod tests {
                 .add_path(project_root.path().join("TASKS.md"))),
             })
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1100));
-        assert_eq!(
-            crate::task_intelligence::list(&database, &project.id)
-                .unwrap()
-                .tasks[0]
-                .title,
-            "legacy resumed"
-        );
+        wait_for_task_title(&database, &project.id, "legacy resumed");
         fs::create_dir_all(project_root.path().join(".hiveai")).unwrap();
         fs::write(
             project_root.path().join(MANIFEST_RELATIVE_PATH),

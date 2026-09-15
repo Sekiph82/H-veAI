@@ -333,7 +333,7 @@ pub fn collect_context(
         None,
     ));
     if let Some(task_id) = request.task_id.as_deref() {
-        let task: Option<(String, String, String, Option<String>, Option<String>, Option<String>)> = connection.query_row("SELECT title,state,required_actor,milestone,metadata_json,updated_at FROM tasks WHERE id=?1 AND project_id=?2", params![task_id, request.project_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(|e| e.to_string())?;
+        let task: Option<(String, String, Option<String>, Option<String>, Option<String>, Option<String>)> = connection.query_row("SELECT title,state,required_actor,milestone,metadata_json,updated_at FROM tasks WHERE id=?1 AND project_id=?2", params![task_id, request.project_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(|e| e.to_string())?;
         if let Some((title, state, actor, milestone, metadata, updated)) = task {
             let value = serde_json::to_string(&json!({"id":task_id,"title":title,"state":state,"requiredActor":actor,"milestone":milestone,"updatedAt":updated,"requirements":task_requirements(metadata.as_deref())})).unwrap();
             items.push(context_item(
@@ -1239,6 +1239,63 @@ mod tests {
                 .and_then(|value| value.as_str()),
             Some("finding-gen")
         );
+    }
+
+    #[test]
+    fn nullable_required_actor_is_preserved_through_context_and_generation() {
+        let app_data = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(app_data.path().to_path_buf()).unwrap();
+        let project = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into(),
+                name: Some("Nullable actor fixture".into()),
+            },
+        )
+        .unwrap();
+        database
+            .open_connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO tasks (id,project_id,source_id,title,state,required_actor,milestone,metadata_json,created_at,updated_at) VALUES ('task-null-actor',?1,NULL,'No actor task','BACKLOG',NULL,'M18.10.04','{}','now','now')",
+                [&project.id],
+            )
+            .unwrap();
+
+        let context = collect_context(
+            &database,
+            PromptContextRequest {
+                project_id: project.id.clone(),
+                task_id: Some("task-null-actor".into()),
+            },
+        )
+        .unwrap();
+        let task_value = context
+            .items
+            .iter()
+            .find(|item| item.reference == "task:task-null-actor")
+            .and_then(|item| item.value.as_deref())
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(task_value).unwrap();
+        assert!(parsed
+            .get("requiredActor")
+            .is_some_and(serde_json::Value::is_null));
+
+        let generated = generate(
+            &database,
+            PromptGenerateRequest {
+                project_id: project.id,
+                task_id: Some("task-null-actor".into()),
+                kind: PromptKind::Implementation,
+                title: "Handle a task without an assigned actor".into(),
+                summary: "Generate a bounded prompt without inventing actor truth".into(),
+                finding_ids: None,
+            },
+        )
+        .unwrap();
+        assert!(generated.content.contains("No actor task"));
+        assert!(!generated.content.contains("required actor: HUMAN"));
     }
 
     #[test]

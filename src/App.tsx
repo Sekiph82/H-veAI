@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Route, Routes, useLocation } from "react-router-dom";
 import { AppShell } from "./components/Shell";
 import { RegistryProvider } from "./registryContext";
 import {
@@ -23,7 +23,7 @@ export default function App() {
             <Route path="/projects" element={<Projects />} />
             <Route path="/projects/:id" element={<ProjectCockpit />} />
             <Route path="/tasks" element={<Tasks />} />
-            <Route path="/agents" element={<Agents />} />
+            <Route path="/agents" element={<LegacyAgentsRoute />} />
             <Route path="/prompts" element={<PromptEnginePage />} />
             <Route path="/audits" element={<Audits />} />
             <Route path="/activity" element={<ActivityPage />} />
@@ -33,4 +33,10 @@ export default function App() {
       </BrowserRouter>
     </RegistryProvider>
   );
+}
+
+function LegacyAgentsRoute() {
+  const location = useLocation();
+  const params = new URLSearchParams(location.search);
+  return params.has("projectId") || params.has("sessionId") ? <PromptEnginePage legacyRoute /> : <Agents />;
 }

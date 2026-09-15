@@ -2308,18 +2308,31 @@ function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
       <div className="cockpit-live-grid">
         <CockpitPanel title="Pull requests" detail={`${data.pullRequests.length} bounded record(s)`}>
           <div className="cockpit-record-list">
-            {data.pullRequests.map((pr) => <details className="cockpit-record" key={pr.number}>
+            {data.pullRequests.map((pr) => {
+              const filesState = pr.filesState ?? "UNAVAILABLE";
+              const reviewsState = pr.reviewsState ?? "UNAVAILABLE";
+              const commentsState = pr.commentsState ?? "UNAVAILABLE";
+              const checksState = pr.checksState ?? "UNAVAILABLE";
+              const files = Array.isArray(pr.files) ? pr.files : [];
+              const reviews = Array.isArray(pr.reviews) ? pr.reviews : [];
+              const checks = Array.isArray(pr.checks) ? pr.checks : [];
+              return <details className="cockpit-record" key={pr.number}>
               <summary><strong>#{pr.number} {pr.title}</strong><span>{pr.merged ? "MERGED" : pr.state}{pr.draft ? " / DRAFT" : ""}</span></summary>
               <CockpitFacts facts={[
                 ["Author", pr.author ?? "Unknown"],
                 ["Branches", `${pr.sourceBranch ?? "?"} → ${pr.targetBranch ?? "?"}`],
                 ["SHAs", `${pr.headSha ?? "?"} → ${pr.baseSha ?? "?"}`],
-                ["Diff", pr.changedFiles == null ? "Unavailable" : `${pr.changedFiles} files, +${pr.additions ?? 0}/-${pr.deletions ?? 0}`],
-                ["Review / checks", `${pr.reviewStatus ?? "Unavailable"} / ${pr.checkStatus ?? "Unavailable"}`],
+                ["Diff", pr.detailState !== "CURRENT" ? `Unavailable (${pr.detailState ?? "UNAVAILABLE"})` : pr.changedFiles == null ? "Unavailable" : `${pr.changedFiles} files, +${pr.additions ?? 0}/-${pr.deletions ?? 0}`],
+                ["Review / checks", `${pr.reviewStatus ?? reviewsState} / ${pr.checkStatus ?? checksState}`],
+                ["Evidence state", `Files ${filesState} · Reviews ${reviewsState} · Comments ${commentsState} · Checks ${checksState}`],
                 ["Explicit links", [...pr.taskLinks, ...pr.sessionLinks].join(", ") || "None evidenced"],
               ]} />
+              <CockpitList title="Changed files" values={files.map((file) => `${file.filename} / ${file.status ?? "UNKNOWN"} / +${file.additions ?? 0}/-${file.deletions ?? 0}`)} empty={`Changed-file evidence ${filesState.toLowerCase()}`} />
+              <CockpitList title="Reviews" values={reviews.map((review) => `${review.user ?? "Unknown"} / ${review.state ?? "UNKNOWN"}${review.bodyExcerpt ? ` / ${review.bodyExcerpt}` : ""}`)} empty={`Review evidence ${reviewsState.toLowerCase()}`} />
+              <CockpitList title="Checks" values={checks.map((check) => `${check.name ?? "Unnamed check"} / ${check.conclusion ?? check.status ?? "UNKNOWN"}`)} empty={`Check evidence ${checksState.toLowerCase()}`} />
               <CockpitList title="Comments / reviews" values={pr.comments} empty="No bounded comment evidence" />
-            </details>)}
+            </details>;
+            })}
             {!data.pullRequests.length ? <EmptyState title="No pull requests in bounded window" detail="No current PR records were returned by the selected repository." /> : null}
           </div>
         </CockpitPanel>
@@ -2335,17 +2348,22 @@ function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
         </CockpitPanel>
       </div>
       <div className="cockpit-live-grid">
-        <CockpitPanel title="Actions / CI" detail={`${data.actions.length} bounded workflow run(s)`}>
+        <CockpitPanel title="Actions / CI" detail={`${data.actions.length} bounded workflow run(s) · ${data.cache.resources.find((resource) => resource.kind === "GITHUB_ACTIONS")?.state ?? "UNAVAILABLE"}`}>
           <div className="cockpit-record-list">
-            {data.actions.map((run) => <details className="cockpit-record" key={run.id}>
+            {data.actions.map((run) => {
+              const jobsState = run.jobsState ?? "UNAVAILABLE";
+              const logsState = run.logsState ?? "UNAVAILABLE";
+              const jobs = Array.isArray(run.jobs) ? run.jobs : [];
+              return <details className="cockpit-record" key={run.id}>
               <summary><strong>{run.name ?? "Unnamed workflow"}</strong><span>{run.conclusion ?? run.status ?? "UNKNOWN"}</span></summary>
-              <CockpitFacts facts={[["Run", String(run.id)], ["Event", run.event ?? "Unknown"], ["Branch / SHA", `${run.branch ?? "?"} / ${run.headSha ?? "?"}`], ["PRs", run.pullRequestNumbers.map(String).join(", ") || "None evidenced"], ["Failed log summary", run.failedLogSummary ?? "Unavailable"]]} />
-              <CockpitList title="Jobs / steps" values={run.jobs.flatMap((job) => [
+              <CockpitFacts facts={[["Run", String(run.id)], ["Event", run.event ?? "Unknown"], ["Branch / SHA", `${run.branch ?? "?"} / ${run.headSha ?? "?"}`], ["PRs", (run.pullRequestNumbers ?? []).map(String).join(", ") || "None evidenced"], ["Jobs / logs", `${jobsState} / ${logsState}`], ["Failed log summary", run.failedLogSummary ?? `Unavailable (${logsState})`]]} />
+              <CockpitList title="Jobs / steps" values={jobs.flatMap((job) => [
                 `${job.name ?? "Unnamed job"} / ${job.conclusion ?? job.status ?? "UNKNOWN"}`,
-                ...job.steps.map((step) => `  ${step.number ?? "?"}. ${step.name ?? "Unnamed step"} / ${step.conclusion ?? step.status ?? "UNKNOWN"}`),
+                ...(Array.isArray(job.steps) ? job.steps : []).map((step) => `  ${step.number ?? "?"}. ${step.name ?? "Unnamed step"} / ${step.conclusion ?? step.status ?? "UNKNOWN"}`),
               ])} empty="No bounded job/step evidence" />
-            </details>)}
-            {!data.actions.length ? <EmptyState title="No CI runs in bounded window" detail="No workflow runs were returned; this is distinct from an unavailable CI response." /> : null}
+            </details>;
+            })}
+            {!data.actions.length ? (data.cache.resources.find((resource) => resource.kind === "GITHUB_ACTIONS")?.state === "CURRENT" ? <EmptyState title="No CI runs" detail="The Actions resource is current and contains no workflow runs." /> : <div className="safe-notice" role="status">Actions evidence unavailable: {data.cache.resources.find((resource) => resource.kind === "GITHUB_ACTIONS")?.state ?? "UNAVAILABLE"}. No-CI cannot be verified.</div>) : null}
           </div>
         </CockpitPanel>
         <CockpitPanel title="Releases and tags" detail={`${data.releases.length} releases / ${data.tags.length} tags`}>
@@ -4360,7 +4378,7 @@ function elapsedLabel(session: AgentSession, now: number) {
   return `${Math.floor(elapsed / 1000)}s`;
 }
 
-export function Agents() {
+export function Agents({ embedded = false }: { embedded?: boolean } = {}) {
   const desktop = isTauriDesktop();
   const location = useLocation();
   const navigate = useNavigate();
@@ -4453,9 +4471,9 @@ export function Agents() {
     if (!routeTarget) {
       setRouteSessionId(null);
       setRouteNotice(
-        "This Agents link is missing a valid registered project and session target.",
+        "This session link is missing a valid registered project and session target.",
       );
-      navigate("/agents", { replace: true });
+      navigate(embedded ? "/prompts?surface=sessions" : "/agents", { replace: true });
       return;
     }
     if (!records.some((record) => record.id === routeTarget.projectId)) {
@@ -4463,7 +4481,7 @@ export function Agents() {
       setRouteNotice(
         "The dispatched project is not registered in this workspace.",
       );
-      navigate("/agents", { replace: true });
+      navigate(embedded ? "/prompts?surface=sessions" : "/agents", { replace: true });
       return;
     }
     setRouteNotice(null);
@@ -4504,7 +4522,7 @@ export function Agents() {
         "The dispatched session is not persisted under that registered project.",
       );
     }
-    navigate("/agents", { replace: true });
+    navigate(embedded ? "/prompts?surface=sessions" : "/agents", { replace: true });
   }, [
     navigate,
     routeSessionId,
@@ -4648,10 +4666,10 @@ export function Agents() {
   );
   return (
     <>
-      <PageHeader
+      {!embedded ? <PageHeader
         title="Agent Session Center"
         description="Observe owned Codex and Claude sessions for registered projects."
-      />
+      /> : null}
       {!desktop ? (
         <div className="fixture-note">
           Native H!veAI is required for provider sessions.
@@ -4667,7 +4685,7 @@ export function Agents() {
           {routeNotice}
         </div>
       ) : null}
-      {desktop ? (
+      {desktop && !embedded ? (
         <section className="panel agent-readiness-panel" data-testid="claude-readiness">
           <SectionHeader title="Claude Code readiness" detail="Installed local CLI only" />
           {(() => {
@@ -5091,8 +5109,49 @@ export function Settings() {
           <span className="settings-hint">Desktop app only</span>
         ) : null}
       </section>
+      <BuilderProviderSettings desktop={desktop} />
       <AuditProviderSettings desktop={desktop} />
     </>
+  );
+}
+
+function BuilderProviderSettings({ desktop }: { desktop: boolean }) {
+  const [readiness, setReadiness] = React.useState<ProviderReadiness[]>([]);
+  const [message, setMessage] = React.useState<string | null>(null);
+
+  const refresh = React.useCallback(async () => {
+    if (!desktop) return;
+    try {
+      const next = await getAgentReadiness();
+      setReadiness(Array.isArray(next) ? next : []);
+      setMessage(null);
+    } catch (caught) {
+      setMessage(caught instanceof Error ? caught.message : String(caught));
+    }
+  }, [desktop]);
+
+  React.useEffect(() => { void refresh(); }, [refresh]);
+
+  return (
+    <section className="panel settings-panel" aria-label="Builder Providers" data-testid="builder-providers">
+      <SectionHeader title="Builder Providers" detail="Codex and Claude session readiness" />
+      <div className="settings-provider-grid">
+        {(["CODEX", "CLAUDE"] as const).map((provider) => {
+          const item = readiness.find((candidate) => candidate.provider === provider);
+          return (
+            <article className="settings-provider-card" key={provider} data-testid={`builder-provider-${provider.toLowerCase()}`}>
+              <div className="settings-provider-card-title"><ProviderBadge provider={provider} /><strong>{item?.readinessState?.replaceAll("_", " ") ?? "UNAVAILABLE"}</strong></div>
+              <span>Version <b>{item?.version ?? "Unavailable"}</b></span>
+              <span>Diagnostics <b>{item?.diagnosticMessage ?? "Unavailable"}</b></span>
+              <span>Resume <b>{item ? (item.supportsResume ? "Supported" : "Unavailable") : "Unavailable"}</b></span>
+              <span>Capabilities <b>{item?.capabilities.slice(0, 8).join(", ") || "Unavailable"}</b></span>
+            </article>
+          );
+        })}
+      </div>
+      <p className="settings-hint">Builder/session readiness is separate from the Codex Audit Provider contract. H!veAI uses provider-managed authentication and does not read credential files or expose API keys.</p>
+      {message ? <div className="safe-notice" role="status">{message}</div> : null}
+    </section>
   );
 }
 

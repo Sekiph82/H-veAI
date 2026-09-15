@@ -42,6 +42,14 @@ export type GitHubIntegrationSnapshot = {
     deletions: number | null;
     reviewStatus: string | null;
     checkStatus: string | null;
+    detailState: string;
+    filesState: string;
+    reviewsState: string;
+    commentsState: string;
+    checksState: string;
+    files: Array<{ filename: string; status: string | null; additions: number | null; deletions: number | null; changes: number | null; patchExcerpt: string | null }>;
+    reviews: Array<{ id: number; user: string | null; state: string | null; submittedAt: string | null; bodyExcerpt: string | null }>;
+    checks: Array<{ id: number; name: string | null; status: string | null; conclusion: string | null; detailsUrl: string | null }>;
     comments: string[];
     taskLinks: string[];
     sessionLinks: string[];
@@ -71,6 +79,8 @@ export type GitHubIntegrationSnapshot = {
     createdAt: string | null;
     updatedAt: string | null;
     failedLogSummary: string | null;
+    jobsState: string;
+    logsState: string;
     jobs: Array<{
       id: number;
       name: string | null;

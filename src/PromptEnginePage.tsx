@@ -10,7 +10,12 @@ import { approvePrompt, collectPromptContext, dispatchPrompt, editPrompt, genera
 import { getAudit, linkRemediationSession } from "./auditEngine";
 import { agentRouteTarget, type AgentRouteTarget } from "./agentNavigation";
 
-export function PromptEnginePage() {
+const EmbeddedAgentSessions = React.lazy(async () => {
+  const module = await import("./pages");
+  return { default: module.Agents };
+});
+
+export function PromptEnginePage({ legacyRoute = false }: { legacyRoute?: boolean }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { records } = useProjectRegistry();
@@ -31,10 +36,30 @@ export function PromptEnginePage() {
   const [notice, setNotice] = React.useState<string | null>(null);
   const [dispatchNotice, setDispatchNotice] = React.useState<string | null>(null);
   const [dispatchedTarget, setDispatchedTarget] = React.useState<AgentRouteTarget | null>(null);
+  const [surface, setSurface] = React.useState<"builder" | "sessions">(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("surface") === "sessions" || params.has("sessionId") ? "sessions" : "builder";
+  });
   const [auditHandoff, setAuditHandoff] = React.useState<{ auditId: string; promptId: string; versionId: string } | null>(null);
   const linkingAuditRef = React.useRef<string | null>(null);
   const desktop = isTauriDesktop();
   const selectedProject = active.find((record) => record.id === projectId);
+  const isLegacyRoute = legacyRoute || location.pathname === "/agents";
+  const redirectingLegacyRoute = isLegacyRoute && location.pathname === "/agents";
+
+  React.useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("surface") === "sessions" || params.has("sessionId")) {
+      setSurface("sessions");
+    }
+  }, [location.search]);
+
+  React.useEffect(() => {
+    if (!isLegacyRoute || location.pathname !== "/agents") return;
+    const params = new URLSearchParams(location.search);
+    params.set("surface", "sessions");
+    navigate(`/prompts?${params.toString()}`, { replace: true });
+  }, [isLegacyRoute, location.pathname, location.search, navigate]);
 
   React.useEffect(() => {
     if (!projectId || !desktop) return;
@@ -132,10 +157,16 @@ export function PromptEnginePage() {
   const canGenerate = Boolean(desktop && projectId && title.trim() && summary.trim() && !busy);
   return <>
     <PageHeader title="Prompt Engine" description="Build bounded, reviewable prompts with exact provider provenance." />
+    <div className="prompt-surface-switcher" role="tablist" aria-label="Prompt Engine workspace">
+      <button className={`secondary-button${surface === "builder" ? " prompt-surface-selected" : ""}`} type="button" role="tab" aria-selected={surface === "builder"} onClick={() => setSurface("builder")}>Prompt Builder</button>
+      <button className={`secondary-button${surface === "sessions" ? " prompt-surface-selected" : ""}`} type="button" role="tab" aria-selected={surface === "sessions"} onClick={() => setSurface("sessions")}>Sessions</button>
+    </div>
+    {redirectingLegacyRoute ? <div className="safe-notice" role="status">Opening the integrated Prompt Engine Sessions surface.</div> : null}
     {!desktop ? <div className="fixture-note">Native H!veAI is required for prompt persistence and provider dispatch.</div> : null}
     {error ? <div className="safe-notice" role="alert">{error}</div> : null}
     {notice ? <div className="safe-notice prompt-notice" role="status"><Check size={15} />{notice}</div> : null}
-    <div className="prompt-engine-flow">
+    {surface === "sessions" && !redirectingLegacyRoute ? <React.Suspense fallback={<div className="fixture-note">Loading persisted sessions...</div>}><EmbeddedAgentSessions embedded /></React.Suspense> : null}
+    {surface === "builder" && !redirectingLegacyRoute ? <div className="prompt-engine-flow">
       <section className="panel prompt-setup-panel"><SectionHeader title="1. Context and goal" detail="Registry-backed project and task authority" />
         <label>Project<select aria-label="Prompt project" value={projectId} onChange={(event) => { setProjectId(event.target.value); setTaskId(""); setContext(null); setVersion(null); setDispatchedTarget(null); setDispatchNotice(null); }} disabled={busy || !active.length}>{active.map((record) => <option key={record.id} value={record.id}>{record.name}</option>)}</select></label>
         <TaskPicker tasks={tasks} value={taskId} onChange={setTaskId} disabled={busy || !projectId} ariaLabel="Prompt task" />
@@ -150,9 +181,9 @@ export function PromptEnginePage() {
       </section>
       <section className="panel prompt-dispatch-panel"><SectionHeader title="3. Provider and dispatch" detail={version?.approvalState === "APPROVED" ? "Choose one provider, then dispatch the exact approved version" : "Approval is required before dispatch"} />
         <div className="prompt-dispatch-row"><div className="prompt-provider-control" role="group" aria-label="Prompt provider"><span className="prompt-control-label">Provider</span><div className="prompt-provider-options">{(["CODEX", "CLAUDE"] as const).map((option) => <button key={option} className={`prompt-provider-option${provider === option ? " prompt-provider-option-selected" : ""}`} type="button" aria-pressed={provider === option} onClick={() => setProvider(option)} disabled={busy}>{option === "CODEX" ? "Codex" : "Claude"}</button>)}</div></div><button className="primary-button" type="button" onClick={() => void dispatch()} disabled={busy || !version || version.approvalState !== "APPROVED" || version.dispatchState !== "AVAILABLE"}><Send size={15} /> Dispatch to {provider === "CODEX" ? "Codex" : "Claude"}</button></div>
-        {dispatchNotice ? <div className="prompt-dispatch-result" role="status"><div className="prompt-dispatch-result-message"><Check size={15} />{dispatchNotice}</div>{dispatchedTarget ? <button className="secondary-button prompt-handoff-action" type="button" onClick={() => navigate(agentRouteTarget(dispatchedTarget))}><ArrowUpRight size={15} /> View result in Agents</button> : null}</div> : null}
+        {dispatchNotice ? <div className="prompt-dispatch-result" role="status"><div className="prompt-dispatch-result-message"><Check size={15} />{dispatchNotice}</div>{dispatchedTarget ? <button className="secondary-button prompt-handoff-action" type="button" onClick={() => navigate(agentRouteTarget(dispatchedTarget))}><ArrowUpRight size={15} /> View session</button> : null}</div> : null}
         {version ? <details className="prompt-evidence"><summary>Version history and provenance</summary><div className="prompt-version-list">{history.map((item) => <div key={item.id}><strong>v{item.version}</strong><span>{item.approvalState} · {item.dispatchState}</span><code>{item.bodySha256.slice(0, 16)}...</code><small>{item.dispatchedSessionId ? `Session ${item.dispatchedSessionId}` : item.dispatchError ?? "Not dispatched"}</small></div>)}</div><dl className="prompt-provenance"><div><dt>Context</dt><dd>{version.contextManifest?.manifestSha256 ?? "Unavailable"}</dd></div><div><dt>Origin</dt><dd>{version.origin}</dd></div><div><dt>Approved hash</dt><dd>{version.approvedBodySha256 ?? "Not approved"}</dd></div></dl></details> : <div className="prompt-dispatch-note">The dispatch control stays inactive until a human approves an exact prompt version.</div>}
       </section>
-    </div>
+    </div> : null}
   </>;
 }

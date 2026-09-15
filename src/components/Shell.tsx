@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   Activity,
   Bell,
-  Bot,
   Boxes,
   Command,
   FolderKanban,
@@ -30,7 +29,6 @@ const navigation = [
   { to: "/", label: "Command Center", icon: LayoutDashboard },
   { to: "/projects", label: "Projects", icon: FolderKanban },
   { to: "/tasks", label: "Tasks", icon: Boxes },
-  { to: "/agents", label: "Agents", icon: Bot },
   { to: "/prompts", label: "Prompt Engine", icon: WandSparkles },
   { to: "/audits", label: "Audit Center", icon: ShieldCheck },
   { to: "/activity", label: "Activity", icon: Activity },
