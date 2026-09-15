@@ -277,7 +277,7 @@ pub struct LocalGitHubEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[serde(rename_all = "camelCase")]
 pub struct GitHubReconciliation {
     pub state: String,
     pub local_branch: Option<String>,
@@ -2469,6 +2469,31 @@ mod tests {
             reconcile(&unavailable, "main", Some("remote"), "CURRENT").state,
             "UNKNOWN"
         );
+    }
+
+    #[test]
+    fn reconciliation_serializes_exact_frontend_wire_contract() {
+        let value = serde_json::to_value(GitHubReconciliation {
+            state: "DIVERGED".into(),
+            local_branch: Some("main".into()),
+            local_head: Some("local-sha".into()),
+            remote_branch: "main".into(),
+            remote_head: Some("remote-sha".into()),
+            local_dirty: true,
+            evidence: vec!["local and remote histories diverged".into()],
+        })
+        .expect("production reconciliation DTO should serialize");
+
+        assert_eq!(value["state"], "DIVERGED");
+        assert_eq!(value["localBranch"], "main");
+        assert_eq!(value["localHead"], "local-sha");
+        assert_eq!(value["remoteBranch"], "main");
+        assert_eq!(value["remoteHead"], "remote-sha");
+        assert_eq!(value["localDirty"], true);
+        assert_eq!(value["evidence"][0], "local and remote histories diverged");
+        assert!(value.get("STATE").is_none());
+        assert!(value.get("LOCAL_BRANCH").is_none());
+        assert!(value.get("EVIDENCE").is_none());
     }
 
     #[test]

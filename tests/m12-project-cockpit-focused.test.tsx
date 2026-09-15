@@ -190,12 +190,13 @@ function commandCenterSnapshotFor(id: string): CommandCenterSnapshot {
 }
 
 function githubIntegrationFor(id: string): GitHubIntegrationSnapshot {
+  const repositoryName = id === "alpha" ? "Project-Alpha" : "Project-Beta";
   return {
     projectId: id,
     repository: {
       owner: "Sekiph82",
-      name: "Project-Alpha",
-      fullName: "Sekiph82/Project-Alpha",
+      name: repositoryName,
+      fullName: `Sekiph82/${repositoryName}`,
       defaultBranch: "main",
       trackedBranch: "main",
       remoteHead: "remote-sha",
@@ -225,19 +226,29 @@ function githubIntegrationFor(id: string): GitHubIntegrationSnapshot {
       deletions: 2,
       reviewStatus: "APPROVED",
       checkStatus: "PASSING",
+      detailState: "CURRENT",
+      filesState: "CURRENT",
+      reviewsState: "CURRENT",
+      commentsState: "CURRENT",
+      checksState: "CURRENT",
+      files: [],
+      reviews: [],
+      checks: [],
       comments: ["SESSION-M18-01 reviewed"],
+      rawTaskReferences: ["M18.02"],
+      rawSessionReferences: ["SESSION-M18-01"],
       taskLinks: ["M18.02"],
       sessionLinks: ["SESSION-M18-01"],
     }],
-    issues: [{ number: 7, title: "Integration evidence", state: "OPEN", labels: ["M18"], author: "Sekiph82", createdAt: null, updatedAt: null, htmlUrl: null, bodyExcerpt: "TASK-M18 evidence", comments: [], taskLinks: ["TASK-M18"] }],
-    actions: [{ id: 44, name: "CI", event: "push", status: "COMPLETED", conclusion: "FAILURE", branch: "main", headSha: "remote-sha", pullRequestNumbers: [12], createdAt: null, updatedAt: null, failedLogSummary: "bounded failure summary", jobs: [{ id: 45, name: "test", status: "COMPLETED", conclusion: "FAILURE", steps: [{ name: "unit tests", status: "COMPLETED", conclusion: "FAILURE", number: 1 }] }] }],
+    issues: [{ number: 7, title: "Integration evidence", state: "OPEN", labels: ["M18"], author: "Sekiph82", createdAt: null, updatedAt: null, htmlUrl: null, bodyExcerpt: "TASK-M18 evidence", comments: [], rawTaskReferences: ["TASK-M18"], rawSessionReferences: [], taskLinks: ["TASK-M18"], sessionLinks: [] }],
+    actions: [{ id: 44, name: "CI", event: "push", status: "COMPLETED", conclusion: "FAILURE", branch: "main", headSha: "remote-sha", pullRequestNumbers: [12], createdAt: null, updatedAt: null, failedLogSummary: "bounded failure summary", failedLogEvidence: [], jobsState: "CURRENT", logsState: "CURRENT", jobs: [{ id: 45, name: "test", status: "COMPLETED", conclusion: "FAILURE", steps: [{ name: "unit tests", status: "COMPLETED", conclusion: "FAILURE", number: 1 }] }] }],
     releases: [{ id: 1, name: "M18", tagName: "v18", targetCommitish: "main", draft: false, prerelease: false, publishedAt: null, htmlUrl: null }],
     tags: [{ name: "v18", commitSha: "remote-sha", protected: false }],
     local: { available: true, branch: "main", headSha: "local-sha", upstream: "origin/main", aheadCount: 1, behindCount: 0, detached: false, dirty: false, health: "HEALTHY", error: null },
     reconciliation: { state: "LOCAL_AHEAD", localBranch: "main", localHead: "local-sha", remoteBranch: "main", remoteHead: "remote-sha", localDirty: false, evidence: ["LOCAL_AHEAD: local commit is ahead of the remote branch"] },
     remoteHealth: "HEALTHY",
     fetchedAt: "2026-09-15T10:00:00Z",
-    cache: { schemaVersion: 1, state: "CURRENT", fetchedAt: "2026-09-15T10:00:00Z", lastKnownGoodAt: "2026-09-15T10:00:00Z", ageSeconds: 1, provenance: "LIVE_REMOTE", resources: [] },
+    cache: { schemaVersion: 2, state: "CURRENT", fetchedAt: "2026-09-15T10:00:00Z", lastKnownGoodAt: "2026-09-15T10:00:00Z", ageSeconds: 1, provenance: "LIVE_REMOTE", resources: [] },
     mutationPolicy: { remoteMutations: "DENIED", pullRequestCreation: "DENIED", workflowRetry: "DENIED", localGitMutations: "DENIED", confirmationRequired: false },
     warnings: [],
   };
@@ -442,6 +453,107 @@ describe("M12 project cockpit", () => {
     expect(screen.getByText("Pull requests")).toBeInTheDocument();
     expect(screen.getByText(/No PR creation, issue mutation, workflow retry/)).toBeInTheDocument();
     expect(invoke).toHaveBeenCalledWith("hiveai_github_integration_snapshot", { projectId: "alpha" });
+  });
+
+  it("fails closed for missing or malformed GitHub evidence without blanking the shell", async () => {
+    const malformed = githubIntegrationFor("alpha") as unknown as { reconciliation: Record<string, unknown> };
+    delete malformed.reconciliation.evidence;
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) =>
+      command === "hiveai_github_integration_snapshot"
+        ? Promise.resolve(malformed)
+        : defaultInvoke(command, args));
+
+    renderLive("/projects/alpha");
+    expect(await screen.findByRole("heading", { name: "Project Alpha" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("GitHub integration evidence is malformed/unavailable");
+    expect(screen.getByRole("heading", { name: "Project Alpha" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks", exact: true }));
+    expect(await screen.findByRole("heading", { name: "Canonical tasks" })).toBeInTheDocument();
+  });
+
+  it("fails closed for a malformed bounded array and preserves native rejection diagnostics", async () => {
+    const malformed = { ...githubIntegrationFor("alpha"), actions: null } as unknown as GitHubIntegrationSnapshot;
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) =>
+      command === "hiveai_github_integration_snapshot"
+        ? Promise.resolve(malformed)
+        : defaultInvoke(command, args));
+    renderLive("/projects/alpha");
+    await screen.findByRole("heading", { name: "Project Alpha" });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("GitHub integration evidence is malformed/unavailable");
+
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) =>
+      command === "hiveai_github_integration_snapshot"
+        ? Promise.reject(new Error("native GitHub snapshot rejected"))
+        : defaultInvoke(command, args));
+    fireEvent.click(screen.getByRole("button", { name: "Overview", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("native GitHub snapshot rejected");
+  });
+
+  it("contains an unexpected GitHub panel render exception inside the panel", async () => {
+    const payload = githubIntegrationFor("alpha");
+    let resourceReads = 0;
+    Object.defineProperty(payload.cache, "resources", {
+      configurable: true,
+      get: () => {
+        resourceReads += 1;
+        if (resourceReads > 1) throw new Error("unexpected GitHub panel render failure");
+        return [];
+      },
+    });
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) =>
+      command === "hiveai_github_integration_snapshot"
+        ? Promise.resolve(payload)
+        : defaultInvoke(command, args));
+    renderLive("/projects/alpha");
+    await screen.findByRole("heading", { name: "Project Alpha" });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("GitHub integration evidence is malformed/unavailable");
+    expect(screen.getByRole("heading", { name: "Project Alpha" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/projects/alpha");
+  });
+
+  it("ignores a stale GitHub response after leaving the tab", async () => {
+    let resolveGitHub: ((value: GitHubIntegrationSnapshot) => void) | undefined;
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) =>
+      command === "hiveai_github_integration_snapshot"
+        ? new Promise((resolve) => { resolveGitHub = resolve; })
+        : defaultInvoke(command, args));
+    renderLive("/projects/alpha");
+    await screen.findByRole("heading", { name: "Project Alpha" });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(screen.getByText("Reading bounded GitHub resources...")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Tasks", exact: true }));
+    expect(await screen.findByRole("heading", { name: "Canonical tasks" })).toBeInTheDocument();
+    resolveGitHub?.(githubIntegrationFor("alpha"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByRole("heading", { name: "Canonical tasks" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Sekiph82/Project-Alpha" })).not.toBeInTheDocument();
+  });
+
+  it("ignores stale GitHub data when the cockpit project changes", async () => {
+    let resolveAlphaGitHub: ((value: GitHubIntegrationSnapshot) => void) | undefined;
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
+      if (command === "hiveai_github_integration_snapshot" && args?.projectId === "alpha") {
+        return new Promise((resolve) => { resolveAlphaGitHub = resolve; });
+      }
+      return defaultInvoke(command, args);
+    });
+    renderLive("/projects/alpha");
+    await screen.findByRole("heading", { name: "Project Alpha" }, { timeout: 5000 });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    window.history.pushState({}, "", "/projects/beta");
+    fireEvent(window, new PopStateEvent("popstate"));
+    expect(await screen.findByRole("heading", { name: "Project Beta" }, { timeout: 5000 })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(await screen.findByRole("heading", { name: "Sekiph82/Project-Beta" }, { timeout: 5000 })).toBeInTheDocument();
+    resolveAlphaGitHub?.(githubIntegrationFor("alpha"));
+    await waitFor(() => {
+      expect(screen.getByRole("heading", { name: "Sekiph82/Project-Beta" })).toBeInTheDocument();
+      expect(screen.queryByText("Sekiph82/Project-Alpha")).not.toBeInTheDocument();
+    }, { timeout: 5000 });
   });
 
   it("requires rationale and records an explicit workflow correction event", async () => {

@@ -70,6 +70,7 @@ import {
 } from "./projectCockpit";
 import {
   getGitHubIntegrationSnapshot,
+  isValidGitHubIntegrationSnapshot,
   type GitHubIntegrationSnapshot,
 } from "./githubIntegration";
 import {
@@ -1384,7 +1385,11 @@ function LiveProjectCockpit({
       {tab === "Tests" ? <CockpitLiveTests snapshot={snapshot} /> : null}
       {tab === "Activity" ? <CockpitLiveActivity snapshot={snapshot} /> : null}
       {tab === "Files" ? <CockpitLiveFiles snapshot={snapshot} /> : null}
-      {tab === "GitHub" ? <CockpitGitHubIntegration projectId={snapshot.project.id} /> : null}
+      {tab === "GitHub" ? (
+        <GitHubIntegrationErrorBoundary projectId={snapshot.project.id}>
+          <CockpitGitHubIntegration projectId={snapshot.project.id} />
+        </GitHubIntegrationErrorBoundary>
+      ) : null}
       {tab === "Settings" ? (
         <CockpitLiveSettings
           snapshot={snapshot}
@@ -2233,6 +2238,35 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
   );
 }
 
+class GitHubIntegrationErrorBoundary extends React.Component<
+  { projectId: string; children: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(previousProps: { projectId: string }) {
+    if (previousProps.projectId !== this.props.projectId && this.state.hasError) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <section className="panel" data-testid="github-integration-panel">
+          <SectionHeader title="GitHub integration" detail="Project-scoped remote evidence" />
+          <div className="safe-notice" role="alert">GitHub integration evidence is malformed/unavailable</div>
+        </section>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
   const desktop = isTauriDesktop();
   const [data, setData] = React.useState<GitHubIntegrationSnapshot | null>(null);
@@ -2249,7 +2283,15 @@ function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
     }
     setLoading(true);
     void getGitHubIntegrationSnapshot(projectId)
-      .then((next) => { if (active) setData(next); })
+      .then((next) => {
+        if (!active) return;
+        if (next.projectId !== projectId || !isValidGitHubIntegrationSnapshot(next)) {
+          setData(null);
+          setError("GitHub integration evidence is malformed/unavailable");
+          return;
+        }
+        setData(next);
+      })
       .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : String(caught)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
