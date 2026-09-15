@@ -4,12 +4,12 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 ## Project Status
 
-- Current Milestone: M17
-- Current Sprint: M17-CLAUDE-ADAPTER
-- Current Task: M17 V05 — Claude Code Adapter diagnostic / action-truth / production-matrix remediation
-- Current Task Status: IMPLEMENTATION_COMPLETE / AWAITING_INDEPENDENT_STRICT_REAUDIT_AND_OWNER_NATIVE_ACCEPTANCE
-- Next Task/Action: Run the independent M17 V05 strict re-audit by ChatGPT, then perform owner-native Claude acceptance if and only if the re-audit passes; do not activate M18.
-- Required Actor: HUMAN
+- Current Milestone: M18
+- Current Sprint: M18-GITHUB-INTEGRATION
+- Current Task: M18 V03 — GitHub Integration whole-milestone implementation
+- Current Task Status: ACTIVE / READY_FOR_IMPLEMENTATION
+- Next Task/Action: Safely synchronize the standalone H!veAI checkout, then execute the authoritative M18 V03 whole-milestone builder prompt; keep TASKS.md and CODEX_ROADMAP.md read-only for Codex, stop for independent strict audit after implementation, and do not activate M19.
+- Required Actor: CODEX
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -20,7 +20,10 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M21-R03 — Standalone relocation and AI-Commerce retirement readiness V01 (independent audit and owner final launch acceptance PASS; historical parent retired from active use; GitHub repository retained)
 - [x] M16S — Post-M21 local workspace and GPT audit provider closure V02 (source-audit PASS; superseded before final owner provider acceptance by the Codex-only architecture decision)
 - [x] M16T — Codex-only audit provider native acceptance remediation V11 (validated complete; M16 PASS/CLOSED)
-- [~] M17 — Claude Code Adapter V05 diagnostic / action-truth / production-matrix remediation implementation complete; awaiting independent V05 strict re-audit and owner-native acceptance; M18-M20 remain planned/blocked
+- [x] M17 — Claude Code Adapter V05 source audit PASS and owner-native acceptance PASS; M17 PASS/CLOSED
+- [x] X03 — Pre-M18 Audit Provider Route Truth hotfix source audit PASS and owner-native acceptance PASS
+- [x] X04 — Pre-M18 TASKS-only Audit Evidence Authority hotfix V05 source audit PASS and owner-native acceptance PASS
+- [~] M18 — GitHub Integration ACTIVE / READY_FOR_IMPLEMENTATION; M19-M20 remain planned/blocked
 
 # H!veAI MASTER TASKS
 
@@ -38,10 +41,11 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 - Builder logs are claims, not acceptance evidence.
 - Historical failed prompts/logs/audits remain immutable and do not become active tasks again unless an independent later audit explicitly reopens a production defect.
 - User-facing roadmap denominator remains **20** even though the historical baseline is labeled `M00` and release is `M20`.
+- Canonical tracker transitions are owned by ChatGPT under `docs/H!veAI/governance/TRACKER_TRANSITION_OWNERSHIP_V01.md`; Codex reads and synchronizes these files but does not edit them.
 
 ## Current truth
 
-- M00 through M12 are PASS/CLOSED.
+- M00 through M17 are PASS/CLOSED.
 - M08 presentation bootstrap, Task Source Discovery, remediation chain, and native `/tasks` manual acceptance are PASS/CLOSED.
 - M09 original strict audit = historical FAIL.
 - M09A strict re-audit = historical FAIL after closing the original seven findings but exposing two residual production defects.
@@ -52,12 +56,12 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 - Pre-M10 Native UX Hotfix X01/X02 = PASS/CLOSED after independent source audit plus user native acceptance.
   - X01: terminal/console popup suppression accepted fixed after approximately 45 minutes of native runtime with no unwanted terminal windows.
   - X02: startup intro audio/replay behavior accepted fixed; audio works and same-process route navigation does not replay the intro.
-- Strict completed milestone count is **17 / 20 = 85%**; M16 is PASS/CLOSED, M16T is validated complete, and M17 is active; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 hotfix is not a numbered roadmap milestone.
+- Strict completed milestone count is **18 / 20 = 90%**; M17 is PASS/CLOSED, pre-M18 X03/X04 are PASS/CLOSED, and M18 is ACTIVE; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 and pre-M18 hotfixes are not numbered roadmap milestones.
 - M10 original strict audit = historical FAIL with 5 MAJOR findings.
 - M10A remediation, independent re-audit, and Akilta native click acceptance are complete; Akilta footer link = PASS/ACCEPTED.
 - Original M11 implementation is a historical strict-audit FAIL with 8 MAJOR findings.
 - M11A REV4, REV5, REV6, and REV7 remediation history remains immutable; all findings are closed by the accepted strict audits. M11A REV7 = PASS/CLOSED and the final Projects visual cleanup = PASS/CLOSED.
-- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 through V11 are validated complete; M16 is PASS/CLOSED; M17 is active; M18-M20 remain planned/blocked.
+- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 through V11 are validated complete; M16 is PASS/CLOSED; M17 is PASS/CLOSED; pre-M18 X03/X04 are PASS/CLOSED; M18 is ACTIVE; M19-M20 remain planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository remains retained for preservation and has not been deleted.
 
 ---
@@ -1416,7 +1420,7 @@ M15D REMEDIATION COMPLETE / ACCEPTED STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPT
 
 M16 PASS/CLOSED after independent strict audit and final owner-native acceptance.
 
-The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16T V11 is implementation-complete and awaiting independent audit plus owner native acceptance, and M17 is not activated.
+The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16T V11 is validated complete, M16 and M17 are PASS/CLOSED, pre-M18 X03/X04 are PASS/CLOSED, and M18 is active.
 
 ## M16A - Re-audit provenance and freshness remediation
 - [x] M16-R59 explicit evidence-backed prior-finding dispositions; omission never closes.
@@ -1545,46 +1549,66 @@ M21 NOT STARTED.
 # M17 - Claude Code Adapter
 
 ### M17.01 - Claude availability/readiness
-- [ ] Detect Claude Code installation/version.
-- [ ] Detect auth/readiness safely.
-- [ ] Surface unavailable/quota/waiting states truthfully.
+- [x] Detect Claude Code installation/version.
+- [x] Detect auth/readiness safely.
+- [x] Surface unavailable/quota/waiting states truthfully.
 
 ### M17.02 - Common adapter compliance
-- [ ] Implement same provider-neutral interface as Codex.
-- [ ] Keep project/task/session identity consistent.
+- [x] Implement same provider-neutral interface as Codex.
+- [x] Keep project/task/session identity consistent.
 
 ### M17.03 - Start/resume/continue/stop
-- [ ] Start in registered project/worktree cwd.
-- [ ] Resume/continue supported session.
-- [ ] Stop cleanly.
+- [x] Start in registered project/worktree cwd.
+- [x] Resume/continue supported session.
+- [x] Stop cleanly.
 
 ### M17.04 - Structured stream mapping
-- [ ] Map Claude output/events to common session events.
-- [ ] Capture stdout/stderr/exit.
-- [ ] Preserve bounded logs.
+- [x] Map Claude output/events to common session events.
+- [x] Capture stdout/stderr/exit.
+- [x] Preserve bounded logs.
 
 ### M17.05 - Permission/wait detection
-- [ ] Detect waiting-for-user state.
-- [ ] Detect permission request.
-- [ ] Detect rate/quota limitation where observable.
-- [ ] Surface actionable attention state.
+- [x] Detect waiting-for-user state.
+- [x] Detect permission request.
+- [x] Detect rate/quota limitation where observable.
+- [x] Surface actionable attention state.
 
 ### M17.06 - Crash/orphan recovery
-- [ ] Detect completion/crash/orphan.
-- [ ] Recover truthful state after H!veAI restart.
+- [x] Detect completion/crash/orphan.
+- [x] Recover truthful state after H!veAI restart.
 
 ### M17.07 - Security/process tests
-- [ ] cwd containment.
-- [ ] argument injection resistance.
-- [ ] output/event mapping.
-- [ ] stop/resume/recovery.
+- [x] cwd containment.
+- [x] argument injection resistance.
+- [x] output/event mapping.
+- [x] stop/resume/recovery.
 
 ### M17.08 - Regression/audit/closure
-- [ ] Full process/UI/security regression.
-- [ ] Production QA publication.
-- [ ] Independent strict audit.
+- [x] Full process/UI/security regression.
+- [x] Production QA publication.
+- [x] Independent strict audit.
 
-M17 V04 CHANGES_REQUIRED / REMEDIATION_IN_PROGRESS. The authoritative V03 strict re-audit requires closure of F-M17-V03-001 through F-M17-V03-005. M18-M20 remain planned/blocked by dependency order.
+M17 PASS/CLOSED after the V05 independent strict source PASS and owner-native acceptance. Owner-native evidence proved Claude readiness/authenticated status and real provider invocation; the provider weekly quota prevented a full live Stop→Resume round trip, and the owner explicitly accepted that external limitation. M18 is unlocked.
+
+---
+
+# PRE-M18 AUDIT / AUTHORITY HOTFIX QUEUE
+
+### X03 - Audit provider readiness route truth
+- [x] Persist explicit Codex readiness across same-process route navigation.
+- [x] Present old unavailable audit rows as historical selected-run truth rather than current provider status.
+- [x] Independent strict source audit PASS.
+- [x] Owner-native Settings → Audit Center → Settings READY persistence acceptance PASS.
+
+### X04 - Root TASKS-only current-state authority
+- [x] Exclude `.hiveai/PROJECT.json`, `STATE.json`, `HANDOFF.md`, `EVENT_INDEX.json`, `EVENTS.jsonl`, `RULES.md`, hidden TASKS, Project Dashboard materialization, persisted workflow rows, watcher projections, audit/test/permission/agent evidence from current project/task/workflow authority.
+- [x] Make repository-root `TASKS.md` the sole local current-state authority and tracked-branch root `TASKS.md` the sole GitHub-remote current-state authority.
+- [x] Normalize Command Center and Project Cockpit milestone/state/actor/blocker/next-action/current attention/queue truth from TASKS only.
+- [x] Fail closed as unavailable / NEEDS_RECONCILIATION when canonical TASKS truth is unavailable; never revive legacy control-plane current truth.
+- [x] Independent V05 strict source audit PASS.
+- [x] Owner-native Command Center / Project Cockpit / fresh Audit Center acceptance PASS.
+
+Pre-M18 X03/X04 PASS/CLOSED. These hotfixes are not numbered roadmap milestones.
 
 ---
 
@@ -1636,7 +1660,7 @@ M17 V04 CHANGES_REQUIRED / REMEDIATION_IN_PROGRESS. The authoritative V03 strict
 - [ ] Full regression/publication.
 - [ ] Independent strict audit.
 
-M18 PLANNED/BLOCKED until M17/core agent flows.
+M18 ACTIVE / READY_FOR_IMPLEMENTATION. Execute only `docs/H!veAI/prompts/M18_GITHUB_INTEGRATION_V03_PROMPT.md`. Codex must keep TASKS.md and CODEX_ROADMAP.md read-only and must not activate M19.
 
 ---
 
@@ -1778,17 +1802,14 @@ M20 PLANNED/BLOCKED until M19 and final hardening gates.
 
 # Milestone policy
 
-- M00-M09 are PASS/CLOSED.
-- Pre-M10 Native UX Hotfix X01/X02 is PASS/CLOSED after independent audit and user native acceptance.
+- M00-M17 are PASS/CLOSED.
+- Pre-M10 Native UX Hotfix X01/X02 and pre-M18 X03/X04 are PASS/CLOSED after independent audit and required user native acceptance.
+- M18 is ACTIVE / READY_FOR_IMPLEMENTATION; M19-M20 remain planned/blocked by dependency order.
 - M10 original strict audit is historical FAIL; M10A remediation is IMPLEMENTATION COMPLETE / PENDING INDEPENDENT RE-AUDIT.
-- M13C R32 remediation is complete; M13 remains open pending independent strict re-audit and user native/visual acceptance. M14A closes M14-R35/R36/R37; M14B closes M14-R38/R39/R40; M14 is PASS/CLOSED on accepted strict-audit and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence; M16 remains OPEN during M16T Codex-only provider migration; M17-M20 remain planned/blocked.
-- M11/M12 must implement the Project Dashboard manifest authority resolver before treating `.hiveai/PROJECT_DASHBOARD.md` as live runtime truth.
+- M13C R32 remediation is complete; M13 remains open pending independent strict re-audit and user native/visual acceptance. M14A closes M14-R35/R36/R37; M14B closes M14-R38/R39/R40; M14 is PASS/CLOSED on accepted strict-audit and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence; M16 and M17 are PASS/CLOSED.
+- M11/M12 historical Project Dashboard/control-plane implementation remains provenance only; under the accepted X04 authority decision it must never override root TASKS current truth.
 - Each future milestone should be executed as one bounded milestone unless an actual independent audit requires a remediation prompt.
 - Subpackage numbering is for traceability, source/evidence mapping, and progress visibility, not an instruction to generate many tiny prompts.
 - Every milestone closes only after production implementation, direct evidence, full regression, governed publication where applicable, and independent audit acceptance.
-- M16O GitHub-first eight-repository tracking reset is implementation-complete: all eight target branches use the unified v3 contract, real branch state is pushed, and Command Center/Project Cockpit read remote GitHub snapshots with stale-cache fallback only. M16 remains OPEN at 16/20 = 80%; M16N is superseded and was not executed.
-- M16S V02 source-audit PASS is superseded before final owner provider acceptance. M16T V02 closes the bounded child-stream drain and canonical tracker-truth findings; the active OpenAI HTTP/API-key path remains removed, local Codex CLI remains the production provider, readiness remains bounded and truthful, and existing audit/workspace contracts remain preserved. M16T V07 adds the bounded audit-history validity presentation; M16T V08 adds input-aware freeform/task requirement-reference contract enforcement; M16T V09 adds explicit failure classification, structured-output readiness probing, and bounded sanitized diagnostics; M16T V10 preserves explicit schema-status parity through persistence and replaces the trivial readiness probe with a representative V08 schema feature probe; M16T V11 removes nonessential transport keywords and preserves exact readiness final-result failure stages; M16T awaits independent strict audit and owner native re-acceptance; M17 is not activated.
+- Canonical tracker transitions are owned by ChatGPT; Codex must keep TASKS.md and CODEX_ROADMAP.md read-only and only synchronize them from GitHub main.
 - M21 and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence. The historical local AI-Commerce parent is retired from active use; the GitHub repository is retained for preservation and has not been deleted.
-
-
-
