@@ -5,8 +5,10 @@
 Execute this prompt only after GitHub `main` contains:
 
 - `docs/H!veAI/audits/M18_GITHUB_INTEGRATION_V04_STRICT_REAUDIT.md` with verdict `FAIL — CHANGES_REQUIRED`;
-- root `TASKS.md` showing M18 still open and V05 remediation as the current work;
-- `CODEX_ROADMAP.md` showing M18 still open and M19 blocked.
+- root `TASKS.md` showing M18 remains OPEN and M19 remains blocked;
+- `CODEX_ROADMAP.md` showing M18 remains OPEN and M19 remains blocked.
+
+The V04 independent re-audit plus this V05 prompt are the ChatGPT-owned remediation authority. Canonical tracker files remain READ-ONLY for Codex. If their status prose still names the immediately preceding V04 remediation while ChatGPT's tracker transition is being synchronized, do not edit them and do not reinterpret that stale prose as permission to rerun V04. Execute only this V05 prompt.
 
 This prompt closes only:
 
@@ -92,7 +94,7 @@ Preserve every accepted V04 improvement, including:
 
 ### Current incorrect behavior
 
-V04 introduced shared pre-persistence sanitization, but `sanitize_error()` is whitespace-token based. It can miss secrets when obvious credential key/value patterns occur inside a larger retained string, for example:
+V04 introduced shared pre-persistence sanitization, but `sanitize_error()` is whitespace-token based. It can miss secrets when credential key/value patterns occur inside a larger retained string, for example:
 
 - `https://example.invalid/callback?access_token=TOPSECRET`
 - `https://example.invalid/?token=TOPSECRET&x=1`
@@ -112,7 +114,7 @@ V04 introduced shared pre-persistence sanitization, but `sanitize_error()` is wh
    - representative quoted JSON/text forms.
 3. Preserve harmless surrounding text where practical without retaining secret plaintext.
 4. Redaction must stay bounded and deterministic. Do not add an unbounded regex/backtracking surface.
-5. Bump the GitHub cache schema/representation version or otherwise provide an equally strong explicit incompatibility marker so all pre-safe V03/V04 cache rows fail closed and cannot be surfaced as current merely because a legacy payload happens to compare equal under the new sanitizer.
+5. Bump the GitHub cache schema/representation version or provide an equally strong explicit incompatibility marker so all pre-safe V03/V04 cache rows fail closed and cannot be surfaced as current merely because a legacy payload happens to compare equal under the new sanitizer.
 6. Prefer persisting minimal projected resource evidence instead of response-shaped raw JSON. If a bounded response-shaped projection remains, document exactly why it is safe and prove every retained string passes the sanitizer.
 7. Do not read Git credentials, auth stores, provider credential files, or environment secrets.
 
@@ -136,15 +138,10 @@ V04 checks the workflow-run conclusion and then fetches logs for the first two j
 ### Required target behavior
 
 1. Parse the bounded jobs resource first.
-2. Select log candidates from individual jobs whose conclusion/state truthfully represents failure/attention, at minimum:
-   - FAILURE
-   - CANCELLED
-   - TIMED_OUT
-   - ACTION_REQUIRED
-   - equivalent GitHub job-level failure state if the production response uses another documented spelling already supported by the implementation.
+2. Select log candidates from individual jobs whose conclusion/state truthfully represents failure/attention, at minimum `FAILURE`, `CANCELLED`, `TIMED_OUT`, and `ACTION_REQUIRED`, plus an equivalent GitHub job-level failure spelling only if directly evidenced by the supported response contract.
 3. Do not fetch a successful/skipped job log merely because the overall run failed.
 4. Use a deterministic bounded candidate rule. If only N failed-job logs may be fetched, select the first N failed/attention jobs in the already bounded GitHub job ordering, not the first N jobs overall.
-5. Preserve job provenance for retained log evidence. At minimum the product must be able to identify which job generated the retained excerpt. A run-level aggregate is acceptable only if every excerpt is explicitly tied to an eligible job.
+5. Preserve job provenance for retained log evidence. At minimum the product must identify which job generated each retained excerpt. A run-level aggregate is acceptable only if every excerpt is explicitly tied to an eligible job.
 6. If an eligible job log is unavailable while jobs are current, preserve truthful partial/unavailable log state without fabricating a successful empty log.
 7. A current failed run with no eligible failed-job records must not attach a successful job log as failure evidence.
 
@@ -181,7 +178,7 @@ The lexical grammar is now strict, but every syntactically valid `TASK-...` or `
    - validate against persisted agent sessions owned by the selected project;
    - reject a syntactically valid session ID that belongs to another project.
 5. Milestone references may remain lexical references if they match the strict supported grammar, but do not claim task/session ownership from milestone syntax alone.
-6. Update the DTO/UI naming if necessary so `rawExplicitReferences` and `validatedTaskLinks` / `validatedSessionLinks` cannot be confused.
+6. Update the DTO/UI naming if necessary so raw explicit references and validated links cannot be confused.
 
 ### Required tests
 
