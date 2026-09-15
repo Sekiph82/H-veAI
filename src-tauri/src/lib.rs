@@ -5,8 +5,8 @@ use tauri::{webview::PageLoadEvent, Emitter, Manager};
 #[cfg(not(test))]
 use tauri_plugin_log::{Target, TargetKind};
 
-mod agent_session_center;
 mod agent_adapter;
+mod agent_session_center;
 mod audit_engine;
 mod codex_adapter;
 mod codex_runtime;
@@ -16,6 +16,7 @@ mod db;
 mod external_browser;
 mod final_response;
 mod git_engine;
+mod github_integration;
 mod github_tracking;
 mod process_policy;
 mod project_cockpit;
@@ -44,6 +45,8 @@ use codex_adapter::{AgentAdapter, CodexAdapter, CodexReadiness, CodexSession, Co
 use command_center::CommandCenterSnapshot;
 #[cfg(not(test))]
 use db::{DatabaseState, DatabaseStatus};
+#[cfg(not(test))]
+use github_integration::GitHubIntegrationSnapshot;
 #[cfg(not(test))]
 use github_tracking::GitHubTrackingManager;
 #[cfg(not(test))]
@@ -199,6 +202,15 @@ mod app_commands {
         manager: tauri::State<'_, GitHubTrackingManager>,
     ) -> Result<usize, String> {
         manager.refresh_now()
+    }
+
+    #[tauri::command]
+    fn hiveai_github_integration_snapshot(
+        database: tauri::State<'_, DatabaseState>,
+        project_id: String,
+    ) -> Result<GitHubIntegrationSnapshot, String> {
+        let project = projects::fetch_project(&database, &project_id)?;
+        github_integration::snapshot(&database, &project)
     }
 
     #[tauri::command]
@@ -814,6 +826,7 @@ mod app_commands {
                 hiveai_command_center_snapshot,
                 hiveai_github_tracking_select_project,
                 hiveai_github_tracking_refresh,
+                hiveai_github_integration_snapshot,
                 hiveai_project_dashboard_resolve,
                 hiveai_project_cockpit_snapshot,
                 hiveai_control_plane_snapshot,

@@ -281,7 +281,10 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
     }
     transaction
         .execute(
-            "DELETE FROM github_sync_state WHERE resource_kind <> ?1",
+            // Preserve M18 resource caches. Only obsolete pre-M18 tracking
+            // rows are retired here; branch changes above still invalidate
+            // every resource for the affected Registry identity.
+            "DELETE FROM github_sync_state WHERE resource_kind LIKE 'GITHUB_TRACKING_%' AND resource_kind <> ?1",
             [REMOTE_TASKS_RESOURCE_KIND],
         )
         .map_err(db_error)?;
@@ -1793,6 +1796,33 @@ mod tests {
                 )
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn ensure_portfolio_preserves_m18_resource_caches() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        ensure_portfolio(&database).unwrap();
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES ('m18-cache', 'github:Sekiph82/H-veAI@main', 'GITHUB_REPOSITORY', 'main', 'now', '{}')",
+                [],
+            )
+            .unwrap();
+        ensure_portfolio(&database).unwrap();
+        assert_eq!(
+            database
+                .open_connection()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM github_sync_state WHERE resource_kind='GITHUB_REPOSITORY'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
         );
     }
 }

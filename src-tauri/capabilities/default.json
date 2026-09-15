@@ -17,6 +17,7 @@
     "allow-command-center-read",
     "allow-project-registry",
     "allow-project-cockpit",
+    "allow-github-integration-read",
     "allow-control-plane",
     "allow-git-engine-read",
     "allow-filesystem-watcher",

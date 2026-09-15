@@ -69,6 +69,10 @@ import {
   type ProjectCockpitSnapshot,
 } from "./projectCockpit";
 import {
+  getGitHubIntegrationSnapshot,
+  type GitHubIntegrationSnapshot,
+} from "./githubIntegration";
+import {
   getAgentReadiness,
   listAgentSessions,
   resizeAgentTerminal,
@@ -977,6 +981,7 @@ export function ProjectCockpit() {
     "Agents",
     "Audit",
     "Git",
+    "GitHub",
     "Tests",
     "Activity",
     "Files",
@@ -1169,6 +1174,7 @@ function LiveProjectCockpit({
     "Agents",
     "Audit",
     "Git",
+    "GitHub",
     "Tests",
     "Activity",
     "Files",
@@ -1378,6 +1384,7 @@ function LiveProjectCockpit({
       {tab === "Tests" ? <CockpitLiveTests snapshot={snapshot} /> : null}
       {tab === "Activity" ? <CockpitLiveActivity snapshot={snapshot} /> : null}
       {tab === "Files" ? <CockpitLiveFiles snapshot={snapshot} /> : null}
+      {tab === "GitHub" ? <CockpitGitHubIntegration projectId={snapshot.project.id} /> : null}
       {tab === "Settings" ? (
         <CockpitLiveSettings
           snapshot={snapshot}
@@ -2223,6 +2230,131 @@ function CockpitLiveTasks({ snapshot }: { snapshot: ProjectCockpitSnapshot }) {
         </CockpitPanel>
       </div>
     </>
+  );
+}
+
+function CockpitGitHubIntegration({ projectId }: { projectId: string }) {
+  const desktop = isTauriDesktop();
+  const [data, setData] = React.useState<GitHubIntegrationSnapshot | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    let active = true;
+    setData(null);
+    setError(null);
+    if (!desktop) {
+      setError("GitHub integration evidence is available in the native desktop app.");
+      return () => { active = false; };
+    }
+    setLoading(true);
+    void getGitHubIntegrationSnapshot(projectId)
+      .then((next) => { if (active) setData(next); })
+      .catch((caught) => { if (active) setError(caught instanceof Error ? caught.message : String(caught)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [desktop, projectId]);
+
+  if (loading) {
+    return <section className="panel" data-testid="github-integration-panel"><LoadingState label="Reading bounded GitHub resources..." /></section>;
+  }
+  if (error || !data) {
+    return <section className="panel" data-testid="github-integration-panel"><SectionHeader title="GitHub integration" detail="Project-scoped remote evidence" /><div className="safe-notice" role="alert">{error ?? "GitHub integration evidence is unavailable."}</div></section>;
+  }
+
+  const remote = data.repository;
+  return (
+    <div className="cockpit-github-integration" data-testid="github-integration-panel">
+      <section className="cockpit-live-hero">
+        <div>
+          <span className="eyebrow">GitHub project integration</span>
+          <h2>{remote.fullName}</h2>
+          <p>Registry identity only. Remote reads are bounded, cached, and observational.</p>
+        </div>
+        <div className="cockpit-live-progress">
+          <span>Remote health</span>
+          <strong>{data.remoteHealth}</strong>
+          <span>Cache: <b>{data.cache.state}</b></span>
+        </div>
+      </section>
+      <div className="cockpit-live-grid">
+        <CockpitPanel title="Repository and reconciliation" detail="GitHub API + Local Git Engine">
+          <CockpitFacts facts={[
+            ["Repository", remote.fullName],
+            ["Default branch", remote.defaultBranch],
+            ["Tracked branch", remote.trackedBranch],
+            ["Remote HEAD", remote.remoteHead ?? "Unavailable"],
+            ["Local branch", data.local.branch ?? "Unavailable"],
+            ["Local HEAD", data.local.headSha ?? "Unavailable"],
+            ["Ahead / behind", `${data.local.aheadCount ?? "?"} / ${data.local.behindCount ?? "?"}`],
+            ["Reconciliation", data.reconciliation.state],
+            ["Local worktree", data.local.dirty ? "DIRTY (separate from commit state)" : "CLEAN"],
+          ]} />
+          <CockpitList title="Reconciliation evidence" values={data.reconciliation.evidence} empty="No reconciliation evidence" />
+        </CockpitPanel>
+        <CockpitPanel title="Remote diagnostics" detail="Fail-closed health and cache state">
+          <CockpitFacts facts={[
+            ["Fetched at", data.fetchedAt],
+            ["Last known good", data.cache.lastKnownGoodAt ?? "None"],
+            ["Cache age", data.cache.ageSeconds == null ? "Unknown" : `${data.cache.ageSeconds}s`],
+            ["Provenance", data.cache.provenance],
+            ["PR creation", data.mutationPolicy.pullRequestCreation],
+            ["Workflow retry", data.mutationPolicy.workflowRetry],
+            ["Local Git mutations", data.mutationPolicy.localGitMutations],
+          ]} />
+          {data.warnings.length ? <CockpitList title="Warnings" values={data.warnings} empty="No warnings" /> : null}
+        </CockpitPanel>
+      </div>
+      <div className="cockpit-live-grid">
+        <CockpitPanel title="Pull requests" detail={`${data.pullRequests.length} bounded record(s)`}>
+          <div className="cockpit-record-list">
+            {data.pullRequests.map((pr) => <details className="cockpit-record" key={pr.number}>
+              <summary><strong>#{pr.number} {pr.title}</strong><span>{pr.merged ? "MERGED" : pr.state}{pr.draft ? " / DRAFT" : ""}</span></summary>
+              <CockpitFacts facts={[
+                ["Author", pr.author ?? "Unknown"],
+                ["Branches", `${pr.sourceBranch ?? "?"} → ${pr.targetBranch ?? "?"}`],
+                ["SHAs", `${pr.headSha ?? "?"} → ${pr.baseSha ?? "?"}`],
+                ["Diff", pr.changedFiles == null ? "Unavailable" : `${pr.changedFiles} files, +${pr.additions ?? 0}/-${pr.deletions ?? 0}`],
+                ["Review / checks", `${pr.reviewStatus ?? "Unavailable"} / ${pr.checkStatus ?? "Unavailable"}`],
+                ["Explicit links", [...pr.taskLinks, ...pr.sessionLinks].join(", ") || "None evidenced"],
+              ]} />
+              <CockpitList title="Comments / reviews" values={pr.comments} empty="No bounded comment evidence" />
+            </details>)}
+            {!data.pullRequests.length ? <EmptyState title="No pull requests in bounded window" detail="No current PR records were returned by the selected repository." /> : null}
+          </div>
+        </CockpitPanel>
+        <CockpitPanel title="Issues" detail={`${data.issues.length} bounded record(s); no title-match ownership guessing`}>
+          <div className="cockpit-record-list">
+            {data.issues.map((issue) => <details className="cockpit-record" key={issue.number}>
+              <summary><strong>#{issue.number} {issue.title}</strong><span>{issue.state}</span></summary>
+              <CockpitFacts facts={[["Author", issue.author ?? "Unknown"], ["Labels", issue.labels.join(", ") || "None"], ["Explicit task links", issue.taskLinks.join(", ") || "None evidenced"]]} />
+              {issue.bodyExcerpt ? <p className="cockpit-muted">{issue.bodyExcerpt}</p> : null}
+            </details>)}
+            {!data.issues.length ? <EmptyState title="No issues in bounded window" detail="Issues are repository-scoped; task relationships appear only from explicit references." /> : null}
+          </div>
+        </CockpitPanel>
+      </div>
+      <div className="cockpit-live-grid">
+        <CockpitPanel title="Actions / CI" detail={`${data.actions.length} bounded workflow run(s)`}>
+          <div className="cockpit-record-list">
+            {data.actions.map((run) => <details className="cockpit-record" key={run.id}>
+              <summary><strong>{run.name ?? "Unnamed workflow"}</strong><span>{run.conclusion ?? run.status ?? "UNKNOWN"}</span></summary>
+              <CockpitFacts facts={[["Run", String(run.id)], ["Event", run.event ?? "Unknown"], ["Branch / SHA", `${run.branch ?? "?"} / ${run.headSha ?? "?"}`], ["PRs", run.pullRequestNumbers.map(String).join(", ") || "None evidenced"], ["Failed log summary", run.failedLogSummary ?? "Unavailable"]]} />
+              <CockpitList title="Jobs / steps" values={run.jobs.flatMap((job) => [
+                `${job.name ?? "Unnamed job"} / ${job.conclusion ?? job.status ?? "UNKNOWN"}`,
+                ...job.steps.map((step) => `  ${step.number ?? "?"}. ${step.name ?? "Unnamed step"} / ${step.conclusion ?? step.status ?? "UNKNOWN"}`),
+              ])} empty="No bounded job/step evidence" />
+            </details>)}
+            {!data.actions.length ? <EmptyState title="No CI runs in bounded window" detail="No workflow runs were returned; this is distinct from an unavailable CI response." /> : null}
+          </div>
+        </CockpitPanel>
+        <CockpitPanel title="Releases and tags" detail={`${data.releases.length} releases / ${data.tags.length} tags`}>
+          <CockpitList title="Releases" values={data.releases.map((release) => `${release.tagName ?? "untagged"} / ${release.draft ? "DRAFT" : release.prerelease ? "PRERELEASE" : "PUBLISHED"}`)} empty="No releases" />
+          <CockpitList title="Tags" values={data.tags.map((tag) => `${tag.name} / ${tag.commitSha ?? "target unavailable"}`)} empty="No tags" />
+        </CockpitPanel>
+      </div>
+      <div className="safe-notice" role="status">Remote mutations are {data.mutationPolicy.remoteMutations.toLowerCase()}. No PR creation, issue mutation, workflow retry, push, merge, checkout, reset, or rebase action is exposed.</div>
+    </div>
   );
 }
 

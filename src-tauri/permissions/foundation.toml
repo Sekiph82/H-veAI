@@ -51,6 +51,11 @@ description = "Allows the main window to read one registered project's bounded c
 commands.allow = ["hiveai_project_cockpit_snapshot"]
 
 [[permission]]
+identifier = "allow-github-integration-read"
+description = "Allows the main window to read bounded GitHub resources for the selected registered project."
+commands.allow = ["hiveai_github_integration_snapshot"]
+
+[[permission]]
 identifier = "allow-control-plane"
 description = "Allows the main window to inspect or explicitly adopt the normalized project control plane."
 commands.allow = ["hiveai_control_plane_snapshot", "hiveai_control_plane_adopt", "hiveai_control_plane_upgrade", "hiveai_control_plane_sync_remote", "hiveai_control_plane_local_repair_plan", "hiveai_control_plane_set_auto_fast_forward"]

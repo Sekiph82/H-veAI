@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import type { ProjectCockpitSnapshot } from "../src/projectCockpit";
 import type { CommandCenterSnapshot } from "../src/commandCenter";
+import type { GitHubIntegrationSnapshot } from "../src/githubIntegration";
 
 const invoke = vi.hoisted(() => vi.fn());
 
@@ -188,6 +189,60 @@ function commandCenterSnapshotFor(id: string): CommandCenterSnapshot {
   };
 }
 
+function githubIntegrationFor(id: string): GitHubIntegrationSnapshot {
+  return {
+    projectId: id,
+    repository: {
+      owner: "Sekiph82",
+      name: "Project-Alpha",
+      fullName: "Sekiph82/Project-Alpha",
+      defaultBranch: "main",
+      trackedBranch: "main",
+      remoteHead: "remote-sha",
+      private: false,
+      archived: false,
+      htmlUrl: "https://github.com/Sekiph82/Project-Alpha",
+      description: "Bounded repository evidence",
+    },
+    branches: [{ name: "main", sha: "remote-sha", protected: true }],
+    commits: [{ sha: "remote-sha", message: "M18 integration", author: "Sekiph82", authoredAt: null, committedAt: null, htmlUrl: null }],
+    pullRequests: [{
+      number: 12,
+      title: "M18 integration review",
+      state: "OPEN",
+      draft: false,
+      merged: false,
+      author: "Sekiph82",
+      createdAt: null,
+      updatedAt: null,
+      sourceBranch: "feature/m18",
+      targetBranch: "main",
+      headSha: "head-sha",
+      baseSha: "base-sha",
+      htmlUrl: null,
+      changedFiles: 3,
+      additions: 12,
+      deletions: 2,
+      reviewStatus: "APPROVED",
+      checkStatus: "PASSING",
+      comments: ["SESSION-M18-01 reviewed"],
+      taskLinks: ["M18.02"],
+      sessionLinks: ["SESSION-M18-01"],
+    }],
+    issues: [{ number: 7, title: "Integration evidence", state: "OPEN", labels: ["M18"], author: "Sekiph82", createdAt: null, updatedAt: null, htmlUrl: null, bodyExcerpt: "TASK-M18 evidence", comments: [], taskLinks: ["TASK-M18"] }],
+    actions: [{ id: 44, name: "CI", event: "push", status: "COMPLETED", conclusion: "FAILURE", branch: "main", headSha: "remote-sha", pullRequestNumbers: [12], createdAt: null, updatedAt: null, failedLogSummary: "bounded failure summary", jobs: [{ id: 45, name: "test", status: "COMPLETED", conclusion: "FAILURE", steps: [{ name: "unit tests", status: "COMPLETED", conclusion: "FAILURE", number: 1 }] }] }],
+    releases: [{ id: 1, name: "M18", tagName: "v18", targetCommitish: "main", draft: false, prerelease: false, publishedAt: null, htmlUrl: null }],
+    tags: [{ name: "v18", commitSha: "remote-sha", protected: false }],
+    local: { available: true, branch: "main", headSha: "local-sha", upstream: "origin/main", aheadCount: 1, behindCount: 0, detached: false, dirty: false, health: "HEALTHY", error: null },
+    reconciliation: { state: "LOCAL_AHEAD", localBranch: "main", localHead: "local-sha", remoteBranch: "main", remoteHead: "remote-sha", localDirty: false, evidence: ["LOCAL_AHEAD: local commit is ahead of the remote branch"] },
+    remoteHealth: "HEALTHY",
+    fetchedAt: "2026-09-15T10:00:00Z",
+    cache: { schemaVersion: 1, state: "CURRENT", fetchedAt: "2026-09-15T10:00:00Z", lastKnownGoodAt: "2026-09-15T10:00:00Z", ageSeconds: 1, provenance: "LIVE_REMOTE", resources: [] },
+    mutationPolicy: { remoteMutations: "DENIED", pullRequestCreation: "DENIED", workflowRetry: "DENIED", localGitMutations: "DENIED", confirmationRequired: false },
+    warnings: [],
+  };
+}
+
 function defaultInvoke(command: string, args?: { projectId?: string; request?: { projectId?: string; priority?: number } }) {
   if (command === "hiveai_projects_list") return Promise.resolve(records);
   if (command === "hiveai_project_get") {
@@ -200,6 +255,7 @@ function defaultInvoke(command: string, args?: { projectId?: string; request?: {
       ? Promise.resolve(snapshotFor(id))
       : Promise.reject(new Error("project is not registered"));
   }
+  if (command === "hiveai_github_integration_snapshot") return Promise.resolve(githubIntegrationFor(args?.projectId ?? "alpha"));
   if (command === "hiveai_project_update_settings") return Promise.resolve(project(args?.request?.projectId ?? "alpha", "Project Alpha"));
   if (command === "hiveai_frontend_ready") return Promise.resolve(undefined);
   if (command === "hiveai_database_status") return Promise.resolve({ initialized: true, engine: "SQLite", schemaVersion: 7, migrationCount: 7, databasePath: "hiveai.db", foreignKeysEnabled: true, lastMigrationStatus: "ALREADY_CURRENT", journalMode: "WAL", busyTimeoutMs: 5000, synchronous: "NORMAL", integrityStatus: "ok" });
@@ -357,6 +413,7 @@ describe("M12 project cockpit", () => {
       ["Agents", "Agent sessions"],
       ["Audit", "Audit history"],
       ["Git", "Git visibility"],
+      ["GitHub", "Sekiph82/Project-Alpha"],
       ["Tests", "Test-run history"],
       ["Activity", "Project activity"],
       ["Files", "Relevant files"],
@@ -373,6 +430,18 @@ describe("M12 project cockpit", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_project_update_settings", { request: { projectId: "alpha", priority: 0, preferredBuilder: "CODEX", preferredAuditor: "Codex Audit" } }));
     expect(screen.getByRole("status")).toHaveTextContent("Registry settings saved.");
     expect(within(screen.getByRole("status")).queryByText(/Project Beta/)).not.toBeInTheDocument();
+  });
+
+  it("renders project-scoped bounded GitHub evidence with mutations denied", async () => {
+    renderLive("/projects/alpha");
+    await screen.findByRole("heading", { name: "Project Alpha" });
+    fireEvent.click(screen.getByRole("button", { name: "GitHub", exact: true }));
+    expect(screen.getByTestId("github-integration-panel")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Sekiph82/Project-Alpha" })).toBeInTheDocument());
+    expect(screen.getByText("LOCAL_AHEAD")).toBeInTheDocument();
+    expect(screen.getByText("Pull requests")).toBeInTheDocument();
+    expect(screen.getByText(/No PR creation, issue mutation, workflow retry/)).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("hiveai_github_integration_snapshot", { projectId: "alpha" });
   });
 
   it("requires rationale and records an explicit workflow correction event", async () => {
