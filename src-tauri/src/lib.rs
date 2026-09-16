@@ -18,6 +18,7 @@ mod final_response;
 mod git_engine;
 mod github_integration;
 mod github_tracking;
+mod next_best_task;
 mod process_policy;
 mod project_cockpit;
 mod project_dashboard;
@@ -187,6 +188,14 @@ mod app_commands {
     ) -> Result<CommandCenterSnapshot, String> {
         github_tracking::ensure_portfolio(&database)?;
         command_center::snapshot(&database)
+    }
+
+    #[tauri::command]
+    fn hiveai_next_best_task_snapshot(
+        database: tauri::State<'_, DatabaseState>,
+    ) -> Result<next_best_task::M19Snapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
+        next_best_task::snapshot(&database)
     }
 
     #[tauri::command]
@@ -824,6 +833,7 @@ mod app_commands {
                 hiveai_runtime_status,
                 hiveai_database_status,
                 hiveai_command_center_snapshot,
+                hiveai_next_best_task_snapshot,
                 hiveai_github_tracking_select_project,
                 hiveai_github_tracking_refresh,
                 hiveai_github_integration_snapshot,

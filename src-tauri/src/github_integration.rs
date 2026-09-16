@@ -51,6 +51,16 @@ const RESOURCE_ISSUES: &str = "GITHUB_ISSUES";
 const RESOURCE_ACTIONS: &str = "GITHUB_ACTIONS";
 const RESOURCE_RELEASES: &str = "GITHUB_RELEASES";
 const RESOURCE_TAGS: &str = "GITHUB_TAGS";
+const PRIMARY_RESOURCE_KINDS: [&str; 8] = [
+    RESOURCE_REPOSITORY,
+    RESOURCE_BRANCHES,
+    RESOURCE_COMMITS,
+    RESOURCE_PULL_REQUESTS,
+    RESOURCE_ISSUES,
+    RESOURCE_ACTIONS,
+    RESOURCE_RELEASES,
+    RESOURCE_TAGS,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1021,8 +1031,15 @@ fn cache_is_fresh(fetched_at: &str, now: &str) -> bool {
 }
 
 fn cache_status(resources: &[ResourceResult], now: &str) -> GitHubCacheStatus {
-    let fetched_at = resources.iter().filter_map(|r| r.fetched_at.clone()).max();
-    let last_known_good_at = resources
+    // The public cache contract describes the eight top-level resources.
+    // PR/action enrichment remains independently represented on its parent
+    // record and must not make the bounded frontend cache list unrenderable.
+    let primary = resources
+        .iter()
+        .filter(|resource| PRIMARY_RESOURCE_KINDS.contains(&resource.kind.as_str()))
+        .collect::<Vec<_>>();
+    let fetched_at = primary.iter().filter_map(|r| r.fetched_at.clone()).max();
+    let last_known_good_at = primary
         .iter()
         .filter_map(|r| r.last_known_good_at.clone())
         .max();
@@ -1031,11 +1048,11 @@ fn cache_status(resources: &[ResourceResult], now: &str) -> GitHubCacheStatus {
         let current = DateTime::parse_from_rfc3339(now).ok()?;
         Some((current - fetched).num_seconds().max(0))
     });
-    let state = if resources.iter().any(|r| r.state == "CURRENT")
-        && resources.iter().all(|r| r.state == "CURRENT")
+    let state = if primary.iter().any(|r| r.state == "CURRENT")
+        && primary.iter().all(|r| r.state == "CURRENT")
     {
         "CURRENT"
-    } else if resources.iter().any(|r| r.last_known_good_at.is_some()) {
+    } else if primary.iter().any(|r| r.last_known_good_at.is_some()) {
         "STALE"
     } else {
         "EMPTY"
@@ -1047,7 +1064,7 @@ fn cache_status(resources: &[ResourceResult], now: &str) -> GitHubCacheStatus {
         last_known_good_at,
         age_seconds,
         provenance: "GitHub API resource cache; registry identity scoped".into(),
-        resources: resources
+        resources: primary
             .iter()
             .map(|r| GitHubResourceCacheStatus {
                 kind: r.kind.clone(),
@@ -1061,6 +1078,14 @@ fn cache_status(resources: &[ResourceResult], now: &str) -> GitHubCacheStatus {
 }
 
 fn overall_health(resources: &[ResourceResult]) -> String {
+    let primary = resources
+        .iter()
+        .filter(|resource| PRIMARY_RESOURCE_KINDS.contains(&resource.kind.as_str()))
+        .collect::<Vec<_>>();
+    let optional = resources
+        .iter()
+        .filter(|resource| !PRIMARY_RESOURCE_KINDS.contains(&resource.kind.as_str()))
+        .collect::<Vec<_>>();
     for status in [
         "RATE_LIMITED",
         "AUTH_REQUIRED",
@@ -1069,12 +1094,21 @@ fn overall_health(resources: &[ResourceResult]) -> String {
         "MALFORMED",
         "UNAVAILABLE",
     ] {
-        if resources.iter().any(|r| r.state == status) {
+        if primary.iter().any(|r| r.state == status) {
+            if primary.iter().any(|r| {
+                r.state == status && r.value.is_some() && r.last_known_good_at.is_some()
+            }) {
+                return "STALE".into();
+            }
             return status.into();
         }
     }
-    if resources.iter().any(|r| r.state == "STALE") {
+    if primary.iter().any(|r| r.state == "STALE") {
         "STALE".into()
+    } else if optional.iter().any(|r| r.state != "CURRENT" && r.state != "NOT_REQUESTED") {
+        // Optional enrichment is independently degraded. Keep repository
+        // identity usable and make the uncertainty visible to the panel.
+        "PARTIAL".into()
     } else {
         "CURRENT".into()
     }
@@ -1082,7 +1116,7 @@ fn overall_health(resources: &[ResourceResult]) -> String {
 
 fn classify_failure(error: &str) -> String {
     let upper = error.to_ascii_uppercase();
-    if upper.contains("RATE_LIMIT") || upper.contains("HTTP_403") && upper.contains("API RATE") {
+    if upper.contains("RATE_LIMIT") || upper.contains("HTTP_429") || upper.contains("HTTP_403") && upper.contains("API RATE") {
         "RATE_LIMITED".into()
     } else if upper.contains("HTTP_401") || upper.contains("AUTH") {
         "AUTH_REQUIRED".into()
@@ -1110,6 +1144,8 @@ fn request_json<T: GitHubReadTransport>(transport: &mut T, url: &str) -> Result<
             "GITHUB_HTTP_401_AUTH_REQUIRED"
         } else if status == 403 && body_hint.to_ascii_uppercase().contains("RATE LIMIT") {
             "GITHUB_HTTP_403_RATE_LIMITED"
+        } else if status == 429 {
+            "GITHUB_HTTP_429_RATE_LIMITED"
         } else {
             "GITHUB_HTTP_REMOTE_UNAVAILABLE"
         };
@@ -2280,7 +2316,7 @@ pub fn reconcile(
         "REMOTE_STALE"
     } else if matches!(
         remote_health,
-        "UNAVAILABLE" | "AUTH_REQUIRED" | "RATE_LIMITED" | "OFFLINE" | "TIMEOUT" | "MALFORMED"
+        "UNAVAILABLE" | "AUTH_REQUIRED" | "RATE_LIMITED" | "OFFLINE" | "TIMEOUT" | "MALFORMED" | "PARTIAL"
     ) {
         evidence.push(format!("remote health is {remote_health}"));
         "REMOTE_UNAVAILABLE"
@@ -2713,6 +2749,10 @@ mod tests {
             "RATE_LIMITED"
         );
         assert_eq!(
+            classify_failure("GITHUB_HTTP_429_RATE_LIMITED"),
+            "RATE_LIMITED"
+        );
+        assert_eq!(
             classify_failure("GITHUB_HTTP_401_AUTH_REQUIRED"),
             "AUTH_REQUIRED"
         );
@@ -2726,6 +2766,113 @@ mod tests {
             classify_failure("GITHUB_HTTP_REMOTE_UNAVAILABLE"),
             "UNAVAILABLE"
         );
+    }
+
+    #[test]
+    fn optional_enrichment_failure_keeps_primary_cache_bounded_and_partial() {
+        let mut resources = PRIMARY_RESOURCE_KINDS
+            .iter()
+            .map(|kind| ResourceResult {
+                kind: (*kind).into(),
+                value: Some(json!({"resource": kind})),
+                state: "CURRENT".into(),
+                fetched_at: Some("2026-09-15T00:00:00Z".into()),
+                last_known_good_at: Some("2026-09-15T00:00:00Z".into()),
+                error: None,
+            })
+            .collect::<Vec<_>>();
+        resources.push(ResourceResult {
+            kind: "GITHUB_PR_12_FILES".into(),
+            value: None,
+            state: "RATE_LIMITED".into(),
+            fetched_at: None,
+            last_known_good_at: None,
+            error: Some("GITHUB_HTTP_429_RATE_LIMITED".into()),
+        });
+        assert_eq!(overall_health(&resources), "PARTIAL");
+        let cache = cache_status(&resources, "2026-09-15T00:00:01Z");
+        assert_eq!(cache.state, "CURRENT");
+        assert_eq!(cache.resources.len(), 8);
+        assert!(!cache.resources.iter().any(|resource| resource.kind == "GITHUB_PR_12_FILES"));
+    }
+
+    #[test]
+    fn github_http_429_is_explicitly_rate_limited_without_secret_or_header_leakage() {
+        let url = "https://api.github.com/repos/Sekiph82/Bulk-Edit/pulls";
+        let mut transport = FixtureTransport::default().response(
+            url,
+            429,
+            r#"{"message":"API rate limit exceeded","token":"do-not-log"}"#,
+        );
+        let error = request_json(&mut transport, url).unwrap_err();
+        assert!(error.contains("GITHUB_HTTP_429_RATE_LIMITED"));
+        assert!(!error.contains("do-not-log"));
+        assert_eq!(classify_failure(&error), "RATE_LIMITED");
+    }
+
+    #[test]
+    fn production_github_resource_identities_are_exact_for_control_bulk_and_pixel_projects() {
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        for (project_id, expected) in [
+            ("github:Sekiph82/H-veAI@main", "Sekiph82/H-veAI"),
+            ("github:Sekiph82/Bulk-Edit@main", "Sekiph82/Bulk-Edit"),
+            (
+                "github:Sekiph82/ScrubBots-Level-Factory@main",
+                "Sekiph82/ScrubBots-Level-Factory",
+            ),
+        ] {
+            let project = crate::projects::fetch_project(&database, project_id).unwrap();
+            let identity = identity_from_project(&project).unwrap();
+            assert_eq!(identity.full_name, expected);
+            assert_eq!(identity.branch, "main");
+        }
+    }
+
+    #[test]
+    fn bulk_edit_enrichment_fanout_stays_outside_the_exact_eight_cache_contract() {
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project = crate::projects::fetch_project(
+            &database,
+            "github:Sekiph82/Bulk-Edit@main",
+        )
+        .unwrap();
+        let identity = identity_from_project(&project).map(identity_from_view).unwrap();
+        let repository = format!(
+            "https://api.github.com/repos/{}/{}",
+            identity.owner, identity.repo
+        );
+        let pull_url = format!("{repository}/pulls?state=all&per_page={MAX_PULL_REQUESTS}");
+        let action_url = format!("{repository}/actions/runs?per_page={MAX_ACTION_RUNS}");
+        let pulls = (1..=10)
+            .map(|number| json!({"number": number, "title": format!("PR {number}"), "head": {"sha": format!("sha-{number}")}}))
+            .collect::<Vec<_>>();
+        let runs = (1..=5)
+            .map(|id| json!({"id": id, "name": format!("run-{id}")}))
+            .collect::<Vec<_>>();
+        let mut transport = FixtureTransport::default()
+            .response(&pull_url, 200, &serde_json::to_string(&pulls).unwrap())
+            .response(&action_url, 200, &json!({"workflow_runs": runs}).to_string());
+        for id in 1..=5 {
+            transport = transport.response(
+                &format!("{repository}/actions/runs/{id}/jobs?per_page={MAX_ACTION_JOBS}"),
+                200,
+                r#"{"jobs":[]}"#,
+            );
+        }
+        let resources = fetch_resources_with_transport(
+            &database,
+            &project,
+            &identity,
+            "2026-09-15T00:00:00Z",
+            &mut transport,
+        );
+        assert_eq!(resources.len(), 8 + MAX_SUBRESOURCE_REQUESTS);
+        assert_eq!(cache_status(&resources, "2026-09-15T00:00:01Z").resources.len(), 8);
+        assert_eq!(overall_health(&resources), "CURRENT");
     }
 
     #[test]

@@ -445,6 +445,49 @@ describe("M07.07 live-Registry / route-race boundary", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "fmcg-erp-system" })).toBeInTheDocument());
   });
 
+  it("registers_once_from_enter_and_surfaces_native_success", async () => {
+    liveRecords = records.slice(0, 2);
+    invoke.mockImplementation((command: string, args?: { projectId?: string; request?: { path?: string; name?: string | null } }) => {
+      if (command === "hiveai_project_register") {
+        liveRecords = [...liveRecords, records[2]];
+        return Promise.resolve(records[2]);
+      }
+      return defaultInvoke(command, args);
+    });
+    renderLive("/projects");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add project" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.change(screen.getByLabelText("Folder path"), { target: { value: "  C:\\Projects\\fmcg-erp-system  " } });
+    fireEvent.change(screen.getByLabelText(/Display name/), { target: { value: "  fmcg-erp-system  " } });
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form") as HTMLFormElement);
+    fireEvent.submit(screen.getByRole("dialog").querySelector("form") as HTMLFormElement);
+    await waitFor(() => expect(liveRecords).toHaveLength(3));
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_project_register")).toHaveLength(1);
+    expect(screen.getByRole("status")).toHaveTextContent("was registered and is now visible in Projects");
+    expect(screen.getByRole("heading", { name: "fmcg-erp-system" })).toBeInTheDocument();
+  });
+
+  it("keeps_add_project_open_and_shows_bounded_native_failure", async () => {
+    let rejectRegister: ((reason: Error) => void) | null = null;
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
+      if (command === "hiveai_project_register") {
+        return new Promise((_, reject) => { rejectRegister = reject; });
+      }
+      return defaultInvoke(command, args);
+    });
+    renderLive("/projects");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add project" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.change(screen.getByLabelText("Folder path"), { target: { value: "C:\\Projects\\missing" } });
+    fireEvent.click(screen.getByRole("button", { name: /Register folder/ }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Checking..." })).toBeDisabled());
+    expect(rejectRegister).not.toBeNull();
+    rejectRegister?.(new Error("selected project path does not exist"));
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeInTheDocument());
+    expect(screen.getByRole("alert")).toHaveTextContent("selected project path does not exist");
+    expect(screen.getByRole("button", { name: /Register folder/ })).toBeInTheDocument();
+  });
+
   it("sidebar_shortcuts_derive_from_live_registry_ids", async () => {
     renderLive();
     await waitFor(() =>

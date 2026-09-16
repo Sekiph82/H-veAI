@@ -602,6 +602,7 @@ export function Projects() {
   );
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
+  const [success, setSuccess] = React.useState<string | null>(null);
   const [dialog, setDialog] = React.useState<"register" | "repair" | null>(
     null,
   );
@@ -634,13 +635,14 @@ export function Projects() {
   React.useEffect(() => {
     load();
   }, [load]);
-  const act = async (operation: () => Promise<unknown>) => {
+  const act = async (operation: () => Promise<unknown>, rethrow = false) => {
     try {
       await operation();
       await refreshRegistry();
       setRefresh((value) => value + 1);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+      if (rethrow) throw caught;
     }
   };
   return (
@@ -653,10 +655,12 @@ export function Projects() {
           <button
             className="primary-button"
             type="button"
-            onClick={() => {
-              setSelected(null);
-              setDialog("register");
-            }}
+          onClick={() => {
+            setSelected(null);
+            setDialog("register");
+            setError(null);
+            setSuccess(null);
+          }}
           >
             <Plus size={16} />
             Add project
@@ -700,6 +704,7 @@ export function Projects() {
               {error}
             </div>
           ) : null}
+          {success ? <div className="safe-notice" role="status">{success}</div> : null}
           {loading ? (
             <LoadingState />
           ) : error && !records.length ? (
@@ -768,10 +773,17 @@ export function Projects() {
           project={selected}
           onClose={() => setDialog(null)}
           onSubmit={async (path, name) => {
-            if (dialog === "register")
-              await act(() => registerProject(path, name));
-            else if (selected)
-              await act(() => repairProjectPath(selected.id, path));
+            if (dialog === "register") {
+              const registered = await registerProject(path.trim(), name.trim());
+              await refreshRegistry();
+              setRecords((current) => [registered, ...current.filter((item) => item.id !== registered.id)]);
+              setError(null);
+              setSuccess(`${registered.name} was registered and is now visible in Projects.`);
+              selectProject(registered.id, true);
+              setRefresh((value) => value + 1);
+            } else if (selected) {
+              await act(() => repairProjectPath(selected.id, path), true);
+            }
             setDialog(null);
           }}
         />
@@ -794,6 +806,7 @@ function ProjectRegistryDialog({
   const [path, setPath] = React.useState(project?.originalPath ?? "");
   const [name, setName] = React.useState(project?.name ?? "");
   const [submitting, setSubmitting] = React.useState(false);
+  const submittingRef = React.useRef(false);
   const [error, setError] = React.useState<string | null>(null);
   const workspaceLabel = project?.status === "MISSING"
     ? "Repair local workspace"
@@ -802,13 +815,16 @@ function ProjectRegistryDialog({
       : "Attach local workspace";
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setSubmitting(true);
     setError(null);
     try {
-      await onSubmit(path, name);
+      await onSubmit(path.trim(), name.trim());
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   };

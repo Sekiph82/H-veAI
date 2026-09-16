@@ -7,6 +7,7 @@ import { WatcherStatusPanel } from "./components/WatcherStatusPanel";
 import { LoadingState, MetricCard, SectionHeader, formatPercent } from "./components/ui";
 import {
   getCommandCenterSnapshot,
+  getNextBestTaskSnapshot,
   listenForGitHubTrackingUpdate,
   previewSnapshot,
   registryFallback,
@@ -18,6 +19,21 @@ import { isTauriDesktop } from "./projectRegistry";
 import { useProjectRegistry } from "./registryContext";
 
 const count = (value: number | null | undefined) => value == null ? "-" : String(value);
+
+function NextBestTaskPanel({ data }: { data: CommandCenterSnapshot }) {
+  const m19 = data.m19;
+  if (!m19) return null;
+  const recommendation = m19.recommended;
+  return <section className="right-panel next-task-compact" aria-label="Next best task recommendation">
+    <SectionHeader title="Next Best Task" detail={`${m19.candidateCount} eligible`} />
+    {recommendation ? <>
+      <div className="brief-line"><ShieldCheck size={15} /><div><strong>{recommendation.projectName} · {recommendation.taskTitle}</strong><small>{recommendation.taskId} · score {recommendation.score} · factual state {recommendation.factualState}</small></div></div>
+      <p className="assistant-message">{recommendation.explanation}</p>
+      <details className="system-detail"><summary>Why this is recommended</summary><div className="brief-line"><div><strong>Eligibility</strong><small>{recommendation.eligibilityReason}</small></div></div>{recommendation.scoreComponents.map((component) => <div className="brief-line" key={component.key}><div><strong>{component.label}: {component.points > 0 ? "+" : ""}{component.points}</strong><small>{component.evidence}</small></div></div>)}<div className="brief-line"><div><strong>Evidence</strong><small>{recommendation.evidence.join(" | ")}</small></div></div>{recommendation.uncertainty.length ? <div className="brief-line"><div><strong>Uncertainty</strong><small>{recommendation.uncertainty.join(" | ")}</small></div></div> : null}</details>
+    </> : <div className="assistant-message">No eligible task can be recommended from current evidence.</div>}
+    {m19.unavailableInputs.length ? <div className="assistant-message">Unavailable inputs: {m19.unavailableInputs.join(" | ")}</div> : null}
+  </section>;
+}
 
 function Activity({ snapshot }: { snapshot: CommandCenterSnapshot }) {
   const [search, setSearch] = React.useState("");
@@ -41,19 +57,30 @@ export function CommandCenterLive() {
   const [snapshot, setSnapshot] = React.useState<CommandCenterSnapshot | null>(null);
   const [loading, setLoading] = React.useState(desktop);
   const [error, setError] = React.useState<string | null>(null);
+  const [m19, setM19] = React.useState<CommandCenterSnapshot["m19"]>(undefined);
   const generation = React.useRef(0);
   const refresh = React.useCallback(() => {
     const currentGeneration = ++generation.current;
     if (!desktop) {
       setSnapshot(previewSnapshot());
+      setM19(undefined);
       setLoading(false);
       return;
     }
     setLoading(true);
+    setM19(undefined);
     void getCommandCenterSnapshot().then((next) => {
       if (currentGeneration !== generation.current) return;
       setSnapshot(next && next.projects ? next : registryFallback(records));
       setError(null);
+      void getNextBestTaskSnapshot().then((nextBest) => {
+        if (currentGeneration !== generation.current) return;
+        if (nextBest && Array.isArray(nextBest.unavailableInputs) && Array.isArray(nextBest.attention)) {
+          setM19(nextBest);
+        }
+      }).catch(() => {
+        if (currentGeneration === generation.current) setM19(undefined);
+      });
     }).catch((caught) => {
       if (currentGeneration !== generation.current) return;
       setSnapshot(registryFallback(records));
@@ -72,7 +99,8 @@ export function CommandCenterLive() {
     void listenForGitHubTrackingUpdate(() => { if (active) refresh(); }).then((unlisten) => { if (active) cleanup = unlisten; else unlisten(); }).catch(() => undefined);
     return () => { active = false; cleanup?.(); };
   }, [desktop, refresh]);
-  const data = snapshot && snapshot.kpis && Array.isArray(snapshot.projects) ? snapshot : (desktop ? registryFallback(records) : previewSnapshot());
+  const baseData = snapshot && snapshot.kpis && Array.isArray(snapshot.projects) ? snapshot : (desktop ? registryFallback(records) : previewSnapshot());
+  const data = m19 ? { ...baseData, m19 } : baseData;
   const current = data.projects.find((project) => project.projectId === selectedProjectId) ?? data.projects[0] ?? null;
   const visibleProjects = data.projects;
   const currentName = current?.name ?? (!desktop ? "Preview / Native data unavailable" : null);
@@ -98,7 +126,7 @@ export function CommandCenterLive() {
     <div className="command-layout">
       <section className="command-projects panel"><SectionHeader title="Projects" detail={`${data.projects.length} registered workspace${data.projects.length === 1 ? "" : "s"}`} action={<Link className="text-link" to="/projects">All <ArrowUpRight size={13} /></Link>} /><div className="project-rail">{visibleProjects.map((project) => <button className={project.projectId === selectedProjectId ? "project-rail-row project-rail-row-selected" : "project-rail-row"} type="button" key={project.projectId} aria-pressed={project.projectId === selectedProjectId} title={project.name} onClick={() => selectProject(project.projectId, true)}><strong>{project.name}</strong></button>)}{loading ? <LoadingState /> : !data.projects.length ? <span className="rail-empty">{desktop ? "No registered projects yet." : "Native project data unavailable in browser preview."}</span> : null}</div><button className="rail-footer" type="button" onClick={() => navigate("/projects")}>View all projects <ArrowUpRight size={13} /></button></section>
       <CommandCenterProjectPanel project={current} snapshot={data} emptyName={currentName} onOpen={() => current && navigate(`/projects/${encodeURIComponent(current.projectId)}`)} />
-      <aside className="command-right-rail"><section className="right-panel brief-compact"><SectionHeader title="AI Engineering Brief" detail="Factual inputs" />{data.engineeringBrief.facts.map((fact) => <div className="brief-line" key={fact.label}><ShieldCheck size={15} /><div><strong>{fact.label}: {fact.value}</strong><small>{fact.source}{fact.provenance.sourcePath ? ` | ${fact.provenance.sourcePath}` : ` | ${fact.provenance.sourceClass}`}</small></div></div>)}{!data.engineeringBrief.facts.length ? <div className="brief-line">Native factual brief unavailable.</div> : null}</section><section className="right-panel assistant-compact" aria-label="Needs Your Attention"><SectionHeader title="Needs Your Attention" detail={`${data.attention.length} items`} />{data.attention.slice(0, 5).map((item) => <button className="attention-line" type="button" key={item.id} onClick={() => item.projectId && selectProject(item.projectId, true)}><strong>{item.projectName || "Portfolio evidence"}</strong><span>{item.state} | {item.title}</span></button>)}{!data.attention.length ? <div className="assistant-message">No attention items.</div> : null}</section><section className="right-panel queue-compact"><SectionHeader title="Active Work Queue" detail={`${data.workQueue.length} bounded items`} />{data.workQueue.slice(0, 5).map((item) => <div className="queue-mini-row" key={item.id}><strong>{item.projectName}</strong><span>{item.stage} | {item.task}</span></div>)}{!data.workQueue.length ? <div className="assistant-message">No active work evidence.</div> : null}</section><section className="right-panel system-compact"><SectionHeader title="System Status" detail="Native panels" /><div className="system-row"><span>Snapshot</span><b>{snapshot ? "Current" : "Unavailable"}</b></div><div className="system-row"><span>Warnings</span><b>{data.warnings.length}</b></div><details className="system-detail"><summary>Detailed health</summary><RuntimeStatusPanel /><DatabaseStatusPanel /><WatcherStatusPanel /></details></section></aside>
+      <aside className="command-right-rail"><section className="right-panel brief-compact"><SectionHeader title="AI Engineering Brief" detail="Factual inputs" />{data.engineeringBrief.facts.map((fact) => <div className="brief-line" key={fact.label}><ShieldCheck size={15} /><div><strong>{fact.label}: {fact.value}</strong><small>{fact.source}{fact.provenance.sourcePath ? ` | ${fact.provenance.sourcePath}` : ` | ${fact.provenance.sourceClass}`}</small></div></div>)}{!data.engineeringBrief.facts.length ? <div className="brief-line">Native factual brief unavailable.</div> : null}</section><NextBestTaskPanel data={data} /><section className="right-panel assistant-compact" aria-label="Needs Your Attention"><SectionHeader title="Needs Your Attention" detail={`${data.attention.length} items`} />{data.attention.slice(0, 5).map((item) => <button className="attention-line" type="button" key={item.id} onClick={() => item.projectId && selectProject(item.projectId, true)}><strong>{item.projectName || "Portfolio evidence"}</strong><span>{item.state} | {item.title}</span></button>)}{!data.attention.length ? <div className="assistant-message">No attention items.</div> : null}</section><section className="right-panel queue-compact"><SectionHeader title="Active Work Queue" detail={`${data.workQueue.length} bounded items`} />{data.workQueue.slice(0, 5).map((item) => <div className="queue-mini-row" key={item.id}><strong>{item.projectName}</strong><span>{item.stage} | {item.task}</span></div>)}{!data.workQueue.length ? <div className="assistant-message">No active work evidence.</div> : null}</section><section className="right-panel system-compact"><SectionHeader title="System Status" detail="Native panels" /><div className="system-row"><span>Snapshot</span><b>{snapshot ? "Current" : "Unavailable"}</b></div><div className="system-row"><span>Warnings</span><b>{data.warnings.length}</b></div><details className="system-detail"><summary>Detailed health</summary><RuntimeStatusPanel /><DatabaseStatusPanel /><WatcherStatusPanel /></details></section></aside>
     </div>
    </div>;
 }

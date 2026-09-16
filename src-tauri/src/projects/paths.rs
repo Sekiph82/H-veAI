@@ -14,15 +14,18 @@ pub fn validate_project_path(input: &str) -> Result<ValidatedPath, String> {
     }
 
     let selected = PathBuf::from(display_path);
-    if !selected.exists() {
-        return Err("selected project path does not exist".to_string());
-    }
-    if !selected.is_dir() {
+    let metadata = std::fs::metadata(&selected).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            "selected project path does not exist".to_string()
+        } else {
+            "selected project path is unreadable or inaccessible".to_string()
+        }
+    })?;
+    if !metadata.is_dir() {
         return Err("selected project path is not a directory".to_string());
     }
-
     let canonical_path = std::fs::canonicalize(&selected)
-        .map_err(|error| format!("canonicalize selected project path: {error}"))?;
+        .map_err(|_| "selected project path is unreadable or inaccessible".to_string())?;
     let normalized_path = normalize_path(&canonical_path);
     Ok(ValidatedPath {
         display_path: display_path.to_string(),

@@ -140,7 +140,6 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
     let connection = database.open_connection()?;
     let transaction = connection.unchecked_transaction().map_err(db_error)?;
     let now = utc_timestamp();
-    let mut target_project_ids = HashSet::new();
     for (_id, name, repository, branch) in TARGETS {
         let mut parts = repository.splitn(2, '/');
         let owner = parts.next().unwrap_or_default();
@@ -190,7 +189,6 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
             })
             .unwrap_or(target_id);
         let branch = branch.to_string();
-        target_project_ids.insert(project_id.clone());
         let existing = transaction
             .query_row("SELECT 1 FROM projects WHERE id=?1", [&project_id], |row| {
                 row.get::<_, i64>(0)
@@ -217,8 +215,10 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                 .map_err(db_error)?;
             transaction
                 .execute(
-                    "UPDATE projects SET name=?2, default_branch=?3, task_source_policy=?4, status=CASE WHEN status='ARCHIVED' THEN 'ACTIVE' ELSE status END, archived_at=NULL, updated_at=?5 WHERE id=?1",
-                    params![project_id, name, branch, GITHUB_TASKS_ONLY_POLICY, now],
+                    // Seed metadata is migration/bootstrap input only. Never
+                    // reactivate or rewrite the user-owned Registry identity.
+                    "UPDATE projects SET default_branch=COALESCE(default_branch, ?2), task_source_policy=?3, updated_at=?4 WHERE id=?1",
+                    params![project_id, branch, GITHUB_TASKS_ONLY_POLICY, now],
                 )
                 .map_err(db_error)?;
             let repository_updated = transaction
@@ -255,30 +255,9 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
             merge_duplicate_project(&transaction, &project_id, &duplicate_id, &now)?;
         }
     }
-    let stale_project_ids = transaction
-        .prepare("SELECT id FROM projects WHERE status <> 'ARCHIVED'")
-        .map_err(db_error)?
-        .query_map([], |row| row.get::<_, String>(0))
-        .map_err(db_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_error)?;
-    for stale_project_id in stale_project_ids {
-        if target_project_ids.contains(&stale_project_id) {
-            continue;
-        }
-        transaction
-            .execute(
-                "UPDATE projects SET status='ARCHIVED', archived_at=COALESCE(archived_at, ?2), updated_at=?2 WHERE id=?1",
-                params![stale_project_id, now],
-            )
-            .map_err(db_error)?;
-        transaction
-            .execute(
-                "DELETE FROM github_sync_state WHERE project_id=?1",
-                [&stale_project_id],
-            )
-            .map_err(db_error)?;
-    }
+    // The seed set is not a portfolio allow-list. Registered projects are
+    // owned by the Registry and remain visible until an explicit lifecycle
+    // operation archives or removes them.
     transaction
         .execute(
             // Preserve M18 resource caches. Only obsolete pre-M18 tracking
@@ -1727,7 +1706,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_portfolio_archives_non_portfolio_persisted_rows() {
+    fn ensure_portfolio_preserves_non_seed_projects_until_explicit_archive() {
         let database_dir = tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         ensure_portfolio(&database).unwrap();
@@ -1770,20 +1749,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(active.len(), 8);
-        assert!(!active.iter().any(|project| project.id == extra.id));
-        assert!(!active.iter().any(|project| {
-            project
-                .repository
-                .as_ref()
-                .and_then(|repository| repository.github_repo.as_deref())
-                == Some("AI-Commerce-HQ")
-        }));
+        assert_eq!(active.len(), 9);
+        assert!(active.iter().any(|project| project.id == extra.id));
         assert_eq!(
             crate::projects::fetch_project(&database, &extra.id)
                 .unwrap()
                 .status,
-            "ARCHIVED"
+            "ACTIVE"
         );
         assert_eq!(
             database
@@ -1797,6 +1769,88 @@ mod tests {
                 .unwrap(),
             0
         );
+
+        crate::projects::archive_project(&database, &extra.id).unwrap();
+        ensure_portfolio(&database).unwrap();
+        assert_eq!(
+            crate::projects::fetch_project(&database, &extra.id)
+                .unwrap()
+                .status,
+            "ARCHIVED"
+        );
+        assert_eq!(
+            list_projects(
+                &database,
+                ProjectListQuery {
+                    include_archived: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .len(),
+            8
+        );
+    }
+
+    #[test]
+    fn ensure_portfolio_keeps_ninth_and_tenth_projects_across_refresh_and_restart() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        ensure_portfolio(&database).unwrap();
+        let ninth_dir = tempdir().unwrap();
+        let tenth_dir = tempdir().unwrap();
+        let ninth = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: ninth_dir.path().to_string_lossy().into_owned(),
+                name: Some("Ninth project".into()),
+            },
+        )
+        .unwrap();
+        let tenth = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: tenth_dir.path().to_string_lossy().into_owned(),
+                name: Some("Tenth project".into()),
+            },
+        )
+        .unwrap();
+        assert!(register_project(
+            &database,
+            RegisterProjectRequest {
+                path: ninth_dir.path().to_string_lossy().into_owned(),
+                name: Some("Duplicate ninth project".into()),
+            },
+        )
+        .is_err());
+
+        ensure_portfolio(&database).unwrap();
+        let active = list_projects(
+            &database,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(active.len(), 10);
+        assert!(active.iter().any(|project| project.id == ninth.id));
+        assert!(active.iter().any(|project| project.id == tenth.id));
+
+        drop(database);
+        let restarted = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        ensure_portfolio(&restarted).unwrap();
+        let after_restart = list_projects(
+            &restarted,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(after_restart.len(), 10);
+        assert!(after_restart.iter().any(|project| project.id == ninth.id));
+        assert!(after_restart.iter().any(|project| project.id == tenth.id));
     }
 
     #[test]
