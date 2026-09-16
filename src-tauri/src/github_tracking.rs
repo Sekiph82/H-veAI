@@ -1960,14 +1960,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(register_project(
+        let duplicate = register_project(
             &database,
             RegisterProjectRequest {
                 path: ninth_dir.path().to_string_lossy().into_owned(),
                 name: Some("Duplicate ninth project".into()),
             },
-        )
-        .is_err());
+        ).unwrap();
+        assert_eq!(duplicate.id, ninth.id);
 
         ensure_portfolio(&database).unwrap();
         let active = list_projects(

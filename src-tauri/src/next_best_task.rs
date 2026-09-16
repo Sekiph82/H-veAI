@@ -18,6 +18,7 @@ pub const MAX_ATTENTION: usize = 64;
 pub const MAX_FACTS: usize = 32;
 const MAX_ROOT_TASK_BYTES: u64 = 2 * 1024 * 1024;
 const RECENT_FAILURE_WINDOW: Duration = Duration::days(7);
+const REMOTE_M19_MAX_AGE: Duration = Duration::minutes(5);
 const M19_FINGERPRINT_KEY: &str = "m19.engineering_brief.fingerprint";
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,8 +123,24 @@ pub struct CandidateInput {
     pub evidence_freshness: String,
     pub evidence_uncertainty: Vec<String>,
     pub verified_failure_urgency: i64,
+    pub failure_evidence: Vec<FailureEvidence>,
     pub context_switch_cost: i64,
     pub owner_focus_points: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FailureEvidence {
+    pub source: String,
+    pub result: String,
+    pub occurred_at: String,
+    pub age_seconds: i64,
+    pub freshness: String,
+}
+
+impl FailureEvidence {
+    fn summary(&self) -> String {
+        format!("{}={} at {} ({}; age={}s)", self.source, self.result, self.occurred_at, self.freshness, self.age_seconds)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,7 +233,7 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
         &attention,
         &actor_readiness,
     );
-    let (comparison, comparison_error) = compare_and_persist(database, &current_fingerprint);
+    let (comparison, comparison_error) = compare(database, &current_fingerprint);
     if let Some(error) = comparison_error {
         unavailable_inputs.push(format!(
             "M19 comparison persistence unavailable: {}",
@@ -259,7 +276,7 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
             label: "Change since previous snapshot".into(),
             value: comparison.state.clone(),
             source: "Persisted M19 factual fingerprint".into(),
-            freshness: if comparison.state == "UNAVAILABLE" {
+            freshness: if comparison.state.starts_with("UNAVAILABLE") {
                 "UNAVAILABLE"
             } else {
                 "CURRENT"
@@ -325,7 +342,7 @@ fn collect_local_inputs(
         }
     };
     // Parse the canonical source at decision time; persisted M09 snapshots are telemetry, not authority.
-    let parsed = match task_intelligence::parse(database, &project.id) {
+    let parsed = match task_intelligence::parse_exact_root_tasks(&project.id, &project.name, &root) {
         Ok(value) => value,
         Err(error) => {
             unavailable.push(format!(
@@ -412,34 +429,46 @@ fn collect_parsed_inputs(
     unavailable: &mut Vec<String>,
     root_hash: &str,
 ) {
-    let explicit_ids = tasks
+    let mut explicit_ids: HashMap<String, Vec<String>> = tasks
         .iter()
         .filter_map(|task| {
             task.explicit_task_id
                 .as_ref()
-                .map(|id| (id.to_ascii_lowercase(), task.id.clone()))
+                .map(|id| (id.trim().to_ascii_lowercase(), task.id.clone()))
         })
-        .collect::<HashMap<_, _>>();
+        .fold(HashMap::new(), |mut map, (key, value)| {
+            map.entry(key).or_default().push(value);
+            map
+        });
     for task in tasks {
         let dependencies = task.dependency_references.clone();
         let dependency_task_ids = dependencies
             .iter()
-            .filter_map(|dependency| explicit_ids.get(&dependency.to_ascii_lowercase()).cloned())
+            .filter_map(|dependency| {
+                let matches = explicit_ids.get(&dependency.trim().to_ascii_lowercase())?;
+                (matches.len() == 1).then(|| matches[0].clone())
+            })
             .collect::<Vec<_>>();
         let mut blockers = task.blockers.clone();
         let mut uncertainty = Vec::new();
         for dependency in &dependencies {
-            if !explicit_ids.contains_key(&dependency.to_ascii_lowercase()) {
+            let matches = explicit_ids.get(&dependency.trim().to_ascii_lowercase());
+            if matches.is_none() {
                 blockers.push(format!(
                     "dependency {dependency} is not evidenced in canonical TASKS.md"
                 ));
+            } else if matches.is_some_and(|matches| matches.len() != 1) {
+                blockers.push(format!(
+                    "dependency {dependency} is ambiguous in canonical TASKS.md"
+                ));
             }
         }
-        let (verified_failure_urgency, failure_error) =
-            match recent_failure_urgency(database, &project.id, &task.id) {
+        let (failure_evidence, failure_error) =
+            match recent_failure_evidence(database, &project.id, &task.id) {
                 Ok(value) => (value, None),
-                Err(error) => (0, Some(error)),
+                Err(error) => (Vec::new(), Some(error)),
             };
+        let verified_failure_urgency = if failure_evidence.iter().any(|item| item.freshness == "CURRENT" && matches!(item.result.as_str(), "FAIL" | "FAILED" | "ERROR")) { 100 } else { 0 };
         if let Some(error) = failure_error {
             uncertainty.push(format!(
                 "linked failure evidence unavailable: {}",
@@ -476,6 +505,7 @@ fn collect_parsed_inputs(
             evidence_freshness: "CURRENT".into(),
             evidence_uncertainty: uncertainty,
             verified_failure_urgency,
+            failure_evidence,
             context_switch_cost: if task.parsed_status.eq_ignore_ascii_case("IN_PROGRESS") {
                 0
             } else {
@@ -504,10 +534,26 @@ fn collect_remote_inputs(
         ));
         return;
     };
-    if remote.remote_health != "CURRENT" {
+    let registry_repository = project.repository.as_ref().and_then(|repository| {
+        Some(format!("{}/{}", repository.github_owner.as_deref()?, repository.github_repo.as_deref()?))
+    });
+    let expected_branch = project.repository.as_ref().and_then(|repository| repository.default_branch.as_deref().or(repository.current_branch.as_deref()));
+    let fetched_at = DateTime::parse_from_rfc3339(&remote.fetched_at).ok().map(|value| value.with_timezone(&Utc));
+    let now = DateTime::parse_from_rfc3339(&utc_timestamp()).ok().map(|value| value.with_timezone(&Utc));
+    let fresh = fetched_at.zip(now).is_some_and(|(fetched, now)| {
+        now.signed_duration_since(fetched) >= Duration::zero()
+            && now.signed_duration_since(fetched) <= REMOTE_M19_MAX_AGE
+    });
+    if remote.remote_health != "CURRENT"
+        || !registry_repository.as_deref().is_some_and(|expected| expected.eq_ignore_ascii_case(&remote.repository))
+        || !expected_branch.is_some_and(|expected| expected == remote.branch)
+        || !fresh
+        || remote.remote_head.as_deref().is_none_or(str::is_empty)
+        || remote.tasks_blob_sha.as_deref().is_none_or(str::is_empty)
+    {
         unavailable.push(format!(
-            "{} GitHub evidence is {}",
-            project.name, remote.remote_health
+            "{} GitHub evidence is UNAVAILABLE (identity, branch, HEAD, root hash, health, or freshness proof failed)",
+            project.name
         ));
         return;
     }
@@ -527,7 +573,7 @@ fn collect_remote_inputs(
         .collect::<HashSet<_>>();
     for task in remote.task_rows {
         let evidence = vec![format!(
-            "GitHub {}/{}:{} sha256:{} head:{}",
+            "GitHub {}/{}:{} {} head:{}",
             remote.repository,
             task.source_path,
             task.source_line,
@@ -562,6 +608,8 @@ fn collect_remote_inputs(
                 ));
             }
         }
+        let failure_evidence = recent_failure_evidence(database, &project.id, &task.id).unwrap_or_default();
+        let verified_failure_urgency = if failure_evidence.iter().any(|item| item.freshness == "CURRENT" && matches!(item.result.as_str(), "FAIL" | "FAILED" | "ERROR")) { 100 } else { 0 };
         inputs.push(CandidateInput {
             project_id: project.id.clone(),
             project_name: project.name.clone(),
@@ -578,7 +626,8 @@ fn collect_remote_inputs(
             evidence,
             evidence_freshness: "CURRENT".into(),
             evidence_uncertainty: Vec::new(),
-            verified_failure_urgency: 0,
+            verified_failure_urgency,
+            failure_evidence,
             context_switch_cost: if task.status.eq_ignore_ascii_case("IN_PROGRESS") {
                 0
             } else {
@@ -591,38 +640,41 @@ fn collect_remote_inputs(
 
 fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
     let mut set = CandidateSet::default();
-    let all_ids = inputs
-        .iter()
-        .map(|input| (input.project_id.clone(), input.task_id.clone()))
-        .collect::<HashSet<_>>();
+    let all_ids = inputs.iter().map(|input| {
+        ((input.project_id.clone(), input.task_id.to_ascii_lowercase()), input.factual_state.clone())
+    }).collect::<HashMap<_, _>>();
     let mut dependent_counts: HashMap<(String, String), HashSet<(String, String)>> = HashMap::new();
     for dependent in &inputs {
-        if is_completed(&dependent.factual_state) {
+        let has_independent_blocker = dependent.blockers.iter().any(|blocker| {
+            !blocker.to_ascii_lowercase().contains("depend")
+        });
+        if is_completed(&dependent.factual_state)
+            || has_independent_blocker
+            || dependent.external_wait.as_deref().is_some_and(|wait| !wait.trim().is_empty())
+            || !matches!(normalize_actor(dependent.required_actor.as_deref()).as_deref(), Some("CODEX") | Some("CLAUDE"))
+        {
             continue;
         }
-        for prerequisite in dependent
-            .dependency_task_ids
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>()
-        {
-            if all_ids.contains(&(dependent.project_id.clone(), prerequisite.clone())) {
-                dependent_counts
-                    .entry((dependent.project_id.clone(), prerequisite))
-                    .or_default()
-                    .insert((dependent.project_id.clone(), dependent.task_id.clone()));
-            }
+        let unmet = dependent.dependency_task_ids.iter().filter(|prerequisite| {
+            all_ids.get(&(dependent.project_id.clone(), prerequisite.to_ascii_lowercase()))
+                .is_some_and(|state| !is_completed(state))
+        }).collect::<HashSet<_>>();
+        if unmet.len() != 1 {
+            continue;
         }
+        let prerequisite = unmet.into_iter().next().unwrap();
+        dependent_counts
+            .entry((dependent.project_id.clone(), prerequisite.to_ascii_lowercase()))
+            .or_default()
+            .insert((dependent.project_id.clone(), dependent.task_id.to_ascii_lowercase()));
     }
     for input in inputs {
         if is_completed(&input.factual_state) {
             continue;
         }
+        let key = (input.project_id.clone(), input.task_id.to_ascii_lowercase());
         let candidate = Candidate {
-            unblocks: dependent_counts
-                .get(&(input.project_id.clone(), input.task_id.clone()))
-                .map(|items| items.len() as i64)
-                .unwrap_or_default(),
+            unblocks: dependent_counts.get(&key).map(|items| items.len() as i64).unwrap_or_default(),
             actor_readiness: normalize_actor(input.required_actor.as_deref())
                 .unwrap_or_else(|| "UNKNOWN".into()),
             uncertainty: input.evidence_uncertainty.clone(),
@@ -776,7 +828,11 @@ fn score_candidates(candidates: Vec<Candidate>) -> Vec<ScoredCandidate> {
                     key: "verified_failure".into(),
                     label: "Fresh verified failure".into(),
                     points: input.verified_failure_urgency.clamp(0, 100),
-                    evidence: "Latest linked audit/test evidence within seven days".into(),
+                    evidence: if input.failure_evidence.is_empty() {
+                        "No linked audit/test evidence for this task".into()
+                    } else {
+                        input.failure_evidence.iter().map(FailureEvidence::summary).collect::<Vec<_>>().join(" | ")
+                    },
                 },
                 M19ScoreComponent {
                     key: "actor_readiness".into(),
@@ -916,16 +972,16 @@ fn normalize_actor(value: Option<&str>) -> Option<String> {
     }
 }
 
-fn recent_failure_urgency(
+fn recent_failure_evidence(
     database: &DatabaseState,
     project_id: &str,
     task_id: &str,
-) -> Result<i64, String> {
+) -> Result<Vec<FailureEvidence>, String> {
     let connection = database.open_connection()?;
     let now = DateTime::parse_from_rfc3339(&utc_timestamp())
         .map_err(|error| format!("invalid current timestamp: {error}"))?
         .with_timezone(&Utc);
-    let mut urgency = 0;
+    let mut evidence = Vec::new();
     for (table, timestamp) in [
         ("audits", "created_at"),
         ("test_runs", "COALESCE(finished_at, started_at)"),
@@ -938,22 +994,22 @@ fn recent_failure_urgency(
             .optional()
             .map_err(|error| format!("{table} failure evidence query failed: {error}"))?;
         let Some((result, at)) = latest else { continue };
-        if !matches!(
-            result.trim().to_ascii_uppercase().as_str(),
-            "FAIL" | "FAILED" | "ERROR"
-        ) {
-            continue;
-        }
         let at = at.ok_or_else(|| format!("{table} failure timestamp is missing"))?;
         let parsed = DateTime::parse_from_rfc3339(&at)
             .map_err(|error| format!("{table} failure timestamp is malformed: {error}"))?
             .with_timezone(&Utc);
         let age = now.signed_duration_since(parsed);
-        if age >= Duration::zero() && age <= RECENT_FAILURE_WINDOW {
-            urgency = urgency.max(100);
-        }
+        let result = result.trim().to_ascii_uppercase();
+        let freshness = if age >= Duration::zero() && age <= RECENT_FAILURE_WINDOW { "CURRENT" } else { "HISTORICAL" };
+        evidence.push(FailureEvidence {
+            source: table.into(),
+            result,
+            occurred_at: at,
+            age_seconds: age.num_seconds().max(0),
+            freshness: freshness.into(),
+        });
     }
-    Ok(urgency)
+    Ok(evidence)
 }
 
 fn is_exact_root_task(task: &ParsedTask) -> bool {
@@ -988,7 +1044,7 @@ fn read_root_tasks(path: &Path) -> Result<(String, String), String> {
     Ok((hash, text))
 }
 
-fn compare_and_persist(
+fn compare(
     database: &DatabaseState,
     current: &M19Fingerprint,
 ) -> (M19Comparison, Option<String>) {
@@ -1025,30 +1081,18 @@ fn compare_and_persist(
             )
         }
     };
-    let now = current.generated_at.clone();
-    let current_json = match serde_json::to_string(current) {
-        Ok(value) => value,
-        Err(error) => {
-            return (
-                M19Comparison {
-                    state: "UNAVAILABLE".into(),
-                    previous_generated_at: None,
-                    changed: Vec::new(),
-                },
-                Some(format!("serialize fingerprint failed: {error}")),
-            )
-        }
-    };
-    let comparison = match previous
-        .as_deref()
-        .and_then(|value| serde_json::from_str::<M19Fingerprint>(value).ok())
-    {
+    let comparison = match previous.as_deref() {
         None => M19Comparison {
             state: "UNAVAILABLE_FIRST_SNAPSHOT".into(),
             previous_generated_at: None,
             changed: Vec::new(),
         },
-        Some(previous) => {
+        Some(value) => {
+            let previous = match serde_json::from_str::<M19Fingerprint>(value) {
+                Ok(previous) if previous.schema == 1 => previous,
+                Ok(previous) => return (M19Comparison { state: "UNAVAILABLE_INCOMPATIBLE_SCHEMA".into(), previous_generated_at: Some(previous.generated_at), changed: Vec::new() }, None),
+                Err(_) => return (M19Comparison { state: "UNAVAILABLE_INCOMPATIBLE_SCHEMA".into(), previous_generated_at: None, changed: Vec::new() }, None),
+            };
             let mut changed = Vec::new();
             if previous.recommendation != current.recommendation {
                 changed.push("recommendation identity".into());
@@ -1078,18 +1122,25 @@ fn compare_and_persist(
             }
         }
     };
-    let result = connection.execute("INSERT INTO settings (key,value_json,scope,created_at,updated_at) VALUES (?1,?2,'WORKSPACE',?3,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", params![M19_FINGERPRINT_KEY, current_json, now]);
-    match result {
-        Ok(_) => (comparison, None),
-        Err(error) => (
-            M19Comparison {
-                state: "UNAVAILABLE".into(),
-                previous_generated_at: comparison.previous_generated_at,
-                changed: Vec::new(),
-            },
-            Some(format!("persist fingerprint failed: {error}")),
-        ),
-    }
+    (comparison, None)
+}
+
+/// Explicit history mutation, kept separate from observational snapshots.
+pub fn record_history(database: &DatabaseState, snapshot: &M19Snapshot) -> Result<(), String> {
+    let fingerprint = M19Fingerprint {
+        schema: 1,
+        generated_at: snapshot.generated_at.clone(),
+        active_projects: snapshot.active_projects,
+        candidate_count: snapshot.candidate_count,
+        recommendation: snapshot.recommended.as_ref().map(|item| format!("{}:{}", item.project_id, item.task_id)),
+        attention: snapshot.attention.iter().map(|item| format!("{}:{}:{}:{}", item.project_id, item.task_id.as_deref().unwrap_or(""), item.category, item.detail)).collect(),
+        actors: snapshot.actor_readiness.iter().map(|item| format!("{}:{}:{}", item.actor, item.state, item.available)).collect(),
+        fresh_failure_tasks: snapshot.recommended.iter().chain(snapshot.alternatives.iter()).filter(|item| item.score_components.iter().any(|component| component.key == "verified_failure" && component.points > 0)).map(|item| format!("{}:{}", item.project_id, item.task_id)).collect(),
+    };
+    let json = serde_json::to_string(&fingerprint).map_err(|error| format!("serialize fingerprint: {error}"))?;
+    let connection = database.open_connection()?;
+    connection.execute("INSERT INTO settings (key,value_json,scope,created_at,updated_at) VALUES (?1,?2,'WORKSPACE',?3,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", params![M19_FINGERPRINT_KEY, json, snapshot.generated_at]).map_err(|error| format!("persist fingerprint failed: {error}"))?;
+    Ok(())
 }
 
 fn fingerprint(
@@ -1200,6 +1251,7 @@ mod tests {
             evidence_freshness: "CURRENT".into(),
             evidence_uncertainty: Vec::new(),
             verified_failure_urgency: 0,
+            failure_evidence: Vec::new(),
             context_switch_cost: 0,
             owner_focus_points: 0,
         }
@@ -1356,9 +1408,24 @@ mod tests {
         )
         .unwrap();
         let first = snapshot(&database).unwrap();
+        record_history(&database, &first).unwrap();
         let second = snapshot(&database).unwrap();
         assert_eq!(first.comparison.state, "UNAVAILABLE_FIRST_SNAPSHOT");
         assert_eq!(second.comparison.state, "NO_COMPARABLE_CHANGE");
+    }
+
+    #[test]
+    fn m19_snapshot_is_observational_until_history_is_explicitly_recorded() {
+        let db_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        fs::write(project_dir.path().join("TASKS.md"), "- [ ] TASK-1 — Observe\n  Owner: Codex\n").unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        register_project(&database, RegisterProjectRequest { path: project_dir.path().to_string_lossy().into(), name: Some("Pure".into()) }).unwrap();
+        let before = database.open_connection().unwrap().query_row("SELECT (SELECT COUNT(*) FROM settings)+(SELECT COUNT(*) FROM task_events)+(SELECT COUNT(*) FROM task_sources)", [], |row| row.get::<_, i64>(0)).unwrap();
+        let _ = snapshot(&database).unwrap();
+        let _ = snapshot(&database).unwrap();
+        let after = database.open_connection().unwrap().query_row("SELECT (SELECT COUNT(*) FROM settings)+(SELECT COUNT(*) FROM task_events)+(SELECT COUNT(*) FROM task_sources)", [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(before, after);
     }
 
     #[test]

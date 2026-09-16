@@ -201,6 +201,59 @@ pub fn parse(
     Ok(snapshot)
 }
 
+/// Pure decision-time parser for M19. It reads only the registered root
+/// TASKS.md and deliberately does not persist the derived M09 projection.
+pub fn parse_exact_root_tasks(
+    project_id: &str,
+    project_name: &str,
+    root: &Path,
+) -> Result<TaskIntelligenceSnapshot, String> {
+    let root = fs::canonicalize(root).map_err(|error| format!("canonicalize TASKS root: {error}"))?;
+    let path = root.join("TASKS.md");
+    let (text, hash) = read_bounded_text(&path)
+        .map_err(|(_, message)| format!("read canonical TASKS.md: {message}"))?;
+    if text.trim().is_empty() {
+        return Err("TASKS.md is empty".into());
+    }
+    let source = DiscoveredProjectSource {
+        id: format!("m19-exact-root:{project_id}"),
+        project_id: project_id.into(),
+        relative_path: "TASKS.md".into(),
+        absolute_path: path.to_string_lossy().into_owned(),
+        source_kind: "TASKS".into(),
+        origin: "M19_DECISION_TIME".into(),
+        status: "AVAILABLE".into(),
+        authority_class: "TASK".into(),
+        priority: 0,
+        size_bytes: Some(text.len() as u64),
+        modified_at: None,
+        discovered_at: crate::time::utc_timestamp(),
+        content_hash: Some(hash.clone()),
+        depth: 0,
+        warnings: Vec::new(),
+        schema_version: 1,
+        owner: "M08_TASK_SOURCE_DISCOVERY".into(),
+        source_order: Some(0),
+    };
+    let adapter = adapter_for(project_name);
+    let (tasks, handoff, warnings) = parse_document(&source, &text, &hash, &adapter, MAX_TASKS);
+    let mut snapshot = TaskIntelligenceSnapshot {
+        project_id: project_id.into(),
+        parsed_at: crate::time::utc_timestamp(),
+        adapter,
+        tasks,
+        handoff,
+        warnings,
+    };
+    snapshot.adapter.convention_matched = snapshot.tasks.iter().any(|task| {
+        task.confidence.reasons.iter().any(|reason| {
+            reason == "evidenced repo-specific adapter convention"
+        })
+    });
+    resolve_dependencies(&mut snapshot);
+    Ok(snapshot)
+}
+
 pub fn list(
     database: &DatabaseState,
     project_id: &str,

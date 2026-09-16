@@ -18,6 +18,8 @@ use std::thread;
 use std::time::Duration;
 #[cfg(not(test))]
 use std::time::Instant;
+#[cfg(not(test))]
+use std::sync::{Mutex, OnceLock};
 
 const CACHE_SCHEMA_VERSION: u32 = 2;
 const MAX_BRANCHES: usize = 25;
@@ -42,6 +44,10 @@ const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const CACHE_MAX_AGE_SECONDS: i64 = 30;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const HTTP_STATUS_MARKER: &str = "__HIVEAI_HTTP_STATUS__";
+#[cfg(not(test))]
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(90);
+#[cfg(not(test))]
+static PORTFOLIO_RATE_LIMIT_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
 const RESOURCE_REPOSITORY: &str = "GITHUB_REPOSITORY";
 const RESOURCE_BRANCHES: &str = "GITHUB_BRANCHES";
@@ -371,17 +377,19 @@ trait GitHubReadTransport {
 
 struct RequestBudget {
     remaining: usize,
+    rate_limit_open: bool,
 }
 
 impl RequestBudget {
     fn new() -> Self {
         Self {
             remaining: MAX_SUBRESOURCE_REQUESTS,
+            rate_limit_open: false,
         }
     }
 
     fn take(&mut self) -> bool {
-        if self.remaining == 0 {
+        if self.remaining == 0 || self.rate_limit_open {
             return false;
         }
         self.remaining -= 1;
@@ -490,10 +498,7 @@ fn snapshot_with_transport<T: GitHubReadTransport>(
         &remote_health,
     );
     let cache = cache_status(&resources, &now);
-    let mut warnings = resources
-        .iter()
-        .filter_map(|resource| resource.error.clone())
-        .collect::<Vec<_>>();
+    let mut warnings = grouped_warnings(&resources);
     if local.error.is_some() {
         warnings.push(
             "Local Git Engine evidence is unavailable; remote integration remains observational."
@@ -663,21 +668,20 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
             format!("{repository_path}/tags?per_page={MAX_TAGS}"),
         ),
     ];
-    let mut resources = specs
-        .into_iter()
-        .map(|(kind, url)| {
-            load_or_fetch(
-                database,
-                project,
-                &identity.full_name,
-                &identity.branch,
-                kind,
-                &url,
-                now,
-                transport,
-            )
-        })
-        .collect::<Vec<_>>();
+    let mut primary_circuit_open = portfolio_rate_limit_open();
+    let mut resources = Vec::with_capacity(PRIMARY_RESOURCE_KINDS.len());
+    for (kind, url) in specs {
+        let resource = if primary_circuit_open {
+            cached_after_rate_limit(database, project, &identity.full_name, &identity.branch, kind)
+        } else {
+            load_or_fetch(database, project, &identity.full_name, &identity.branch, kind, &url, now, transport)
+        };
+        if resource.state == "RATE_LIMITED" {
+            primary_circuit_open = true;
+            open_portfolio_rate_limit_circuit();
+        }
+        resources.push(resource);
+    }
     let mut budget = RequestBudget::new();
     let selected_prs = parse_pull_requests(resource_value(&resources, RESOURCE_PULL_REQUESTS));
     for pr in selected_prs.iter().take(MAX_PR_ENRICHED) {
@@ -817,7 +821,9 @@ fn acquire_enrichment<T: GitHubReadTransport>(
     transport: &mut T,
 ) -> ResourceResult {
     if budget.take() {
-        load_or_fetch(database, project, repository, branch, kind, url, now, transport)
+        let result = load_or_fetch(database, project, repository, branch, kind, url, now, transport);
+        if result.state == "RATE_LIMITED" { budget.rate_limit_open = true; }
+        result
     } else {
         bounded_resource(kind)
     }
@@ -835,7 +841,9 @@ fn acquire_enrichment_text<T: GitHubReadTransport>(
     transport: &mut T,
 ) -> ResourceResult {
     if budget.take() {
-        load_or_fetch_text(database, project, repository, branch, kind, url, now, transport)
+        let result = load_or_fetch_text(database, project, repository, branch, kind, url, now, transport);
+        if result.state == "RATE_LIMITED" { budget.rate_limit_open = true; }
+        result
     } else {
         bounded_resource(kind)
     }
@@ -849,6 +857,73 @@ fn bounded_resource(kind: &str) -> ResourceResult {
         fetched_at: None,
         last_known_good_at: None,
         error: Some("GITHUB_SUBRESOURCE_REQUEST_BOUND".into()),
+    }
+}
+
+#[cfg(not(test))]
+fn portfolio_rate_limit_open() -> bool {
+    let lock = PORTFOLIO_RATE_LIMIT_UNTIL.get_or_init(|| Mutex::new(None));
+    let mut until = lock.lock().expect("rate limit circuit mutex poisoned");
+    match *until {
+        Some(deadline) if Instant::now() < deadline => true,
+        Some(_) => { *until = None; false }
+        None => false,
+    }
+}
+
+#[cfg(not(test))]
+fn open_portfolio_rate_limit_circuit() {
+    let lock = PORTFOLIO_RATE_LIMIT_UNTIL.get_or_init(|| Mutex::new(None));
+    *lock.lock().expect("rate limit circuit mutex poisoned") = Some(Instant::now() + RATE_LIMIT_BACKOFF);
+}
+
+#[cfg(test)]
+fn portfolio_rate_limit_open() -> bool { false }
+
+#[cfg(test)]
+fn open_portfolio_rate_limit_circuit() {}
+
+fn grouped_warnings(resources: &[ResourceResult]) -> Vec<String> {
+    let rate_limited = resources.iter().filter(|resource| {
+        resource.state == "RATE_LIMITED" || resource.error.as_deref().is_some_and(|error| classify_failure(error) == "RATE_LIMITED" || error == "GITHUB_RATE_LIMIT_CIRCUIT_OPEN")
+    }).map(|resource| resource.kind.clone()).collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    if !rate_limited.is_empty() {
+        warnings.push(format!(
+            "GitHub API rate limit reached; network acquisition stopped and last-known-good data is STALE for {} resource(s): {}.",
+            rate_limited.len(), rate_limited.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    for error in resources.iter().filter_map(|resource| resource.error.as_deref()) {
+        if classify_failure(error) == "RATE_LIMITED" || error == "GITHUB_RATE_LIMIT_CIRCUIT_OPEN" {
+            continue;
+        }
+        let sanitized = sanitize_error(error);
+        if !sanitized.is_empty() && !warnings.contains(&sanitized) {
+            warnings.push(sanitized);
+        }
+    }
+    warnings
+}
+
+fn cached_after_rate_limit(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    repository: &str,
+    branch: &str,
+    kind: &str,
+) -> ResourceResult {
+    match load_cache(database, &project.id, kind, repository, branch) {
+        Ok(Some(cache)) => ResourceResult {
+            kind: kind.into(), value: Some(cache.payload), state: "STALE".into(),
+            fetched_at: Some(cache.fetched_at), last_known_good_at: Some(cache.last_known_good_at),
+            error: Some("GITHUB_RATE_LIMIT_CIRCUIT_OPEN".into()),
+        },
+        _ => ResourceResult {
+            kind: kind.into(), value: None, state: "RATE_LIMITED".into(),
+            fetched_at: None, last_known_good_at: None,
+            error: Some("GITHUB_RATE_LIMIT_CIRCUIT_OPEN".into()),
+        },
     }
 }
 
@@ -2810,6 +2885,21 @@ mod tests {
         assert!(error.contains("GITHUB_HTTP_429_RATE_LIMITED"));
         assert!(!error.contains("do-not-log"));
         assert_eq!(classify_failure(&error), "RATE_LIMITED");
+    }
+
+    #[test]
+    fn rate_limit_circuit_stops_primary_fanout_and_groups_warning() {
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let first = "https://api.github.com/repos/Sekiph82/H-veAI";
+        let mut transport = FixtureTransport::default().response(first, 403, r#"{"message":"API rate limit exceeded"}"#);
+        let snapshot = snapshot_with_transport(&database, &project, &mut transport).unwrap();
+        assert_eq!(transport.requests.len(), 1, "primary acquisition must stop after first rate-limit response");
+        assert_eq!(snapshot.remote_health, "RATE_LIMITED");
+        assert_eq!(snapshot.warnings.iter().filter(|warning| warning.contains("rate limit reached")).count(), 1);
+        assert!(snapshot.warnings.iter().all(|warning| !warning.contains("API rate limit exceeded")));
     }
 
     #[test]

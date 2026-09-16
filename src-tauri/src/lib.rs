@@ -199,6 +199,15 @@ mod app_commands {
     }
 
     #[tauri::command]
+    fn hiveai_next_best_task_record_history(
+        database: tauri::State<'_, DatabaseState>,
+    ) -> Result<(), String> {
+        github_tracking::ensure_portfolio(&database)?;
+        let snapshot = next_best_task::snapshot(&database)?;
+        next_best_task::record_history(&database, &snapshot)
+    }
+
+    #[tauri::command]
     fn hiveai_github_tracking_select_project(
         manager: tauri::State<'_, GitHubTrackingManager>,
         project_id: Option<String>,
@@ -834,6 +843,7 @@ mod app_commands {
                 hiveai_database_status,
                 hiveai_command_center_snapshot,
                 hiveai_next_best_task_snapshot,
+                hiveai_next_best_task_record_history,
                 hiveai_github_tracking_select_project,
                 hiveai_github_tracking_refresh,
                 hiveai_github_integration_snapshot,

@@ -775,15 +775,20 @@ export function Projects() {
           onSubmit={async (path, name) => {
             if (dialog === "register") {
               const registered = await registerProject(path.trim(), name.trim());
+              const existing = records.find((item) => item.id === registered.id);
               await refreshRegistry();
               setRecords((current) => [registered, ...current.filter((item) => item.id !== registered.id)]);
               setError(null);
               const githubIdentity = registered.repository?.githubOwner && registered.repository.githubRepo
                 ? `${registered.repository.githubOwner}/${registered.repository.githubRepo}`
                 : null;
-              setSuccess(githubIdentity
-                ? `${registered.name} was registered with GitHub identity ${githubIdentity} and is now visible in Projects.`
-                : `${registered.name} was registered locally; GitHub identity is unavailable or not applicable.`);
+              setSuccess(existing?.status === "ARCHIVED"
+                ? `${registered.name} was already registered and has been restored with its existing identity.`
+                : existing
+                  ? `${registered.name} is already registered and remains visible with its existing identity.`
+                  : githubIdentity
+                    ? `${registered.name} was registered with GitHub identity ${githubIdentity} and is now visible in Projects.`
+                    : `${registered.name} was registered locally; GitHub identity is unavailable or not applicable.`);
               selectProject(registered.id, true);
               setRefresh((value) => value + 1);
             } else if (selected) {

@@ -1,14 +1,19 @@
 import { Archive, GitBranch, GitFork, MapPin, MoreHorizontal, Trash2 } from 'lucide-react';
 import type { ProjectRecord } from '../projectRegistry';
+import '../registry-card.css';
 
 function statusLabel(status: ProjectRecord['status']) {
   return status === 'ACTIVE' ? 'Active' : status === 'MISSING' ? 'Path missing' : 'Archived';
 }
 
 function workspaceAction(project: ProjectRecord) {
-  if (project.status === 'MISSING') return { label: 'Repair local workspace', title: 'Repair local workspace' };
-  if (project.normalizedPath.trim()) return { label: 'Change local workspace', title: 'Change local workspace' };
-  return { label: 'Attach local workspace', title: 'Attach local workspace' };
+  const title = project.status === 'MISSING'
+    ? 'Repair local workspace'
+    : project.normalizedPath.trim() ? 'Change local workspace' : 'Attach local workspace';
+  const accessibleLabel = project.status === 'MISSING'
+    ? 'Repair local workspace'
+    : project.normalizedPath.trim() ? 'Change local workspace' : 'Attach local workspace';
+  return { label: 'Local workspace', title, accessibleLabel };
 }
 
 export function ProjectRegistryCard({ project, onOpen, onArchive, onRemove, onRepair, onPriority }: {
@@ -27,6 +32,6 @@ export function ProjectRegistryCard({ project, onOpen, onArchive, onRemove, onRe
     <div className="registry-meta-grid"><div><span>Repository</span><strong>{repository?.isGitRepository ? <><GitFork size={13} />Git repository</> : 'Non-Git folder'}</strong></div><div><span>Branch</span><strong>{repository?.currentBranch ? <><GitBranch size={13} />{repository.currentBranch}</> : 'Not detected'}</strong></div><div><span>Priority</span><select aria-label={`Priority for ${project.name}`} value={project.priority} onChange={event => onPriority(Number(event.target.value))}><option value={0}>Normal</option><option value={1}>High</option><option value={2}>Critical</option></select></div></div>
     <div className="registry-remote">{repository?.preferredRemoteUrl ? <><GitFork size={13} /><span title={repository.preferredRemoteUrl}>{repository.githubOwner && repository.githubRepo ? `${repository.githubOwner}/${repository.githubRepo}` : repository.preferredRemoteUrl}</span></> : <><span className="registry-dot" />No remote detected</>}</div>
     <div className="registry-settings"><span>Builder <b>{project.preferredBuilder ?? 'Unassigned'}</b></span><span>Auditor <b>{project.preferredAuditor ?? 'Unassigned'}</b></span></div>
-    <div className="registry-card-foot"><button className="secondary-button" type="button" onClick={onOpen}>Open cockpit</button><div className="registry-icon-actions">{project.status !== 'ARCHIVED' ? <button className="secondary-button registry-workspace-action" type="button" onClick={onRepair} aria-label={`${localWorkspace.label} for ${project.name}`} title={localWorkspace.title}><MapPin size={15} />{localWorkspace.label}</button> : null}{project.status !== 'ARCHIVED' ? <button className="icon-button" type="button" onClick={onArchive} aria-label={`Archive ${project.name}`} title="Archive"><Archive size={15} /></button> : null}<button className="icon-button registry-danger" type="button" onClick={onRemove} aria-label={`Remove ${project.name} from registry`} title="Remove from registry"><Trash2 size={15} /></button></div></div>
+    <div className="registry-card-foot"><button className="secondary-button" type="button" onClick={onOpen}>Open cockpit</button><div className="registry-icon-actions"><button className="secondary-button registry-workspace-action" type="button" onClick={onRepair} aria-label={`${localWorkspace.accessibleLabel} for ${project.name}`} title={localWorkspace.title}><MapPin size={15} />{localWorkspace.label}</button>{project.status !== 'ARCHIVED' ? <button className="icon-button" type="button" onClick={onArchive} aria-label={`Archive ${project.name}`} title="Archive"><Archive size={15} /></button> : null}<button className="icon-button registry-danger" type="button" onClick={onRemove} aria-label={`Remove ${project.name} from registry`} title="Remove from registry"><Trash2 size={15} /></button></div></div>
   </article>;
 }

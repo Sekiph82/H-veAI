@@ -124,6 +124,30 @@ pub fn register_project(
     let validated = validate_project_path(&request.path)?;
     let git = detect_git_metadata(&validated.canonical_path);
     let connection = database.open_connection()?;
+    let existing_ids = connection
+        .prepare("SELECT id FROM projects WHERE normalized_path=?1 ORDER BY id")
+        .map_err(db_error)?
+        .query_map([validated.normalized_path.as_str()], |row| row.get::<_, String>(0))
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    if existing_ids.len() > 1 {
+        return Err("multiple registered projects share this normalized path; recovery is fail-closed".into());
+    }
+    if let Some(existing_id) = existing_ids.first() {
+        let now = timestamp();
+        let tx = connection.unchecked_transaction().map_err(db_error)?;
+        tx.execute(
+            "UPDATE projects SET local_path=?2, original_path=?3, normalized_path=?4, status='ACTIVE', archived_at=NULL, last_validated_at=?5, updated_at=?5 WHERE id=?1",
+            params![existing_id, validated.canonical_path.to_string_lossy(), validated.display_path, validated.normalized_path, now],
+        ).map_err(db_error)?;
+        if let (Some(owner), Some(repo), Some(branch)) = (git.github_owner.as_deref(), git.github_repo.as_deref(), git.default_branch.as_deref()) {
+            tx.execute("DELETE FROM github_project_exclusions WHERE lower(repository)=lower(?1) AND branch=?2", params![format!("{owner}/{repo}"), branch]).map_err(db_error)?;
+        }
+        crate::control_plane::mark_truth_dirty_tx(&tx, existing_id, "PROJECT_EXPLICIT_RECOVERY")?;
+        tx.commit().map_err(db_error)?;
+        return fetch_project(database, existing_id);
+    }
     ensure_no_duplicate(&connection, &validated.normalized_path, None)?;
     let now = timestamp();
     let project_id = Uuid::new_v4().to_string();
@@ -588,7 +612,8 @@ mod tests {
                 .map(|repo| repo.is_git_repository),
             Some(false)
         );
-        assert!(register_project(&database, request).is_err());
+        let duplicate = register_project(&database, request).unwrap();
+        assert_eq!(duplicate.id, project.id);
     }
 
     #[test]
@@ -1178,5 +1203,33 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn explicit_add_recovers_archived_identity_and_preserves_settings() {
+        let (_db_dir, database) = database();
+        let project_dir = tempdir().unwrap();
+        let original = register_project(&database, RegisterProjectRequest {
+            path: project_dir.path().to_string_lossy().into_owned(), name: Some("Beach Cocktails".into()),
+        }).unwrap();
+        update_project_settings(&database, UpdateProjectSettingsRequest {
+            project_id: original.id.clone(), priority: Some(2), preferred_builder: Some("Codex".into()),
+            preferred_auditor: Some("Claude".into()), task_source_policy: None, preferred_agent_provider: None,
+        }).unwrap();
+        archive_project(&database, &original.id).unwrap();
+        assert!(list_projects(&database, ProjectListQuery::default()).unwrap().is_empty());
+        let recovered = register_project(&database, RegisterProjectRequest {
+            path: project_dir.path().to_string_lossy().into_owned(), name: Some("Renamed input".into()),
+        }).unwrap();
+        assert_eq!(recovered.id, original.id);
+        assert_eq!(recovered.status, "ACTIVE");
+        assert_eq!(recovered.priority, 2);
+        assert_eq!(recovered.preferred_builder.as_deref(), Some("Codex"));
+        assert_eq!(list_projects(&database, ProjectListQuery::default()).unwrap().len(), 1);
+        let duplicate = register_project(&database, RegisterProjectRequest {
+            path: project_dir.path().to_string_lossy().into_owned(), name: Some("Again".into()),
+        }).unwrap();
+        assert_eq!(duplicate.id, original.id);
+        assert_eq!(list_projects(&database, ProjectListQuery { include_archived: Some(true), ..Default::default() }).unwrap().len(), 1);
     }
 }

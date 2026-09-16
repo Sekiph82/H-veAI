@@ -21,13 +21,21 @@ const count = (value: number | null | undefined) => value == null ? "-" : String
 
 function NextBestTaskPanel({ data }: { data: CommandCenterSnapshot }) {
   const m19 = data.engineeringBrief.m19 ?? data.m19;
-  if (!m19) return null;
-  const recommendation = m19.recommended;
-  const legacyAttentionKeys = new Set(data.attention.map((item) => `${item.projectId}:${item.taskId ?? ""}:${item.category}`));
-  const m19Attention = m19.attention.filter((item) => !legacyAttentionKeys.has(`${item.projectId}:${item.taskId ?? ""}:${item.category}`));
+  const recommendation = m19?.recommended;
+  const semanticKey = (item: { projectId?: string; taskId?: string | null; category?: string; state?: string; title?: string }) => {
+    const family = `${item.category ?? ""} ${item.state ?? ""}`.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+      .replace(/rate limit|rate limited|github 403|github 429/g, "rate_limit")
+      .replace(/blocked|blocker|dependency/g, "blocker")
+      .replace(/wait|waiting|human/g, "wait");
+    return `${item.projectId ?? ""}:${item.taskId ?? ""}:${family}:${(item.title ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`;
+  };
+  const seen = new Set<string>();
+  const legacyAttention = data.attention.filter((item) => { const key = semanticKey(item); if (seen.has(key)) return false; seen.add(key); return true; });
+  const m19Attention = (m19?.attention ?? []).filter((item) => { const key = semanticKey(item); if (seen.has(key)) return false; seen.add(key); return true; });
   return <section className="right-panel next-task-compact" aria-label="M19 Engineering Brief">
-    <SectionHeader title="M19 Engineering Brief" detail={`${m19.candidateCount} eligible`} />
-    <div className="brief-line"><ShieldCheck size={15} /><div><strong>Portfolio state</strong><small>{m19.activeProjects} active projects · comparison {m19.comparison.state}</small></div></div>
+    <SectionHeader title="M19 Engineering Brief" detail={m19 ? `${m19.candidateCount} eligible` : "Native factual inputs"} />
+    {data.engineeringBrief.facts.map((fact) => <div className="brief-line" key={`fact-${fact.label}`}><ShieldCheck size={15} /><div><strong>{fact.label}: {fact.value}</strong><small>{fact.source}{fact.provenance.sourcePath ? ` | ${fact.provenance.sourcePath}` : ` | ${fact.provenance.sourceClass}`}</small></div></div>)}
+    {m19 ? <><div className="brief-line"><ShieldCheck size={15} /><div><strong>Portfolio state</strong><small>{m19.activeProjects} active projects · comparison {m19.comparison.state}</small></div></div>
     {recommendation ? <>
       <div className="brief-line"><ShieldCheck size={15} /><div><strong>{recommendation.projectName} · {recommendation.taskTitle}</strong><small>{recommendation.taskId} · rank {recommendation.rank} · score {recommendation.score} · factual state {recommendation.factualState}</small></div></div>
       <p className="assistant-message">{recommendation.explanation}</p>
@@ -35,7 +43,8 @@ function NextBestTaskPanel({ data }: { data: CommandCenterSnapshot }) {
     </> : <div className="assistant-message">No eligible task can be recommended from current evidence.</div>}
     {m19.alternatives.length ? <details className="system-detail"><summary>Lower-ranked alternatives</summary>{m19.alternatives.map((alternative) => <div className="brief-line" key={`${alternative.projectId}:${alternative.taskId}`}><div><strong>#{alternative.rank} {alternative.projectName} · {alternative.taskTitle}</strong><small>{alternative.explanation}</small></div></div>)}</details> : null}
     {m19Attention.length ? <details className="system-detail" open><summary>M19 attention</summary>{m19Attention.slice(0, 8).map((item) => <div className="brief-line" key={`${item.projectId}:${item.taskId}:${item.category}`}><div><strong>{item.projectName} · {item.title}</strong><small>{item.category} · {item.detail} · {item.evidence.join(" | ")}</small></div></div>)}</details> : null}
-    {m19.unavailableInputs.length ? <div className="assistant-message">Unavailable inputs: {m19.unavailableInputs.join(" | ")}</div> : null}
+    {m19.unavailableInputs.length ? <div className="assistant-message">Unavailable inputs: {m19.unavailableInputs.join(" | ")}</div> : null}</> : <div className="assistant-message">M19 decision inputs unavailable; only native factual inputs are currently available.</div>}
+    {legacyAttention.length ? <details className="system-detail"><summary>Portfolio attention</summary>{legacyAttention.slice(0, 8).map((item) => <div className="brief-line" key={item.id}><div><strong>{item.projectName || "Portfolio evidence"} · {item.title}</strong><small>{item.state} · {item.category}</small></div></div>)}</details> : null}
   </section>;
 }
 
@@ -124,7 +133,7 @@ export function CommandCenterLive() {
     <div className="command-layout">
       <section className="command-projects panel"><SectionHeader title="Projects" detail={`${data.projects.length} registered workspace${data.projects.length === 1 ? "" : "s"}`} action={<Link className="text-link" to="/projects">All <ArrowUpRight size={13} /></Link>} /><div className="project-rail">{visibleProjects.map((project) => <button className={project.projectId === selectedProjectId ? "project-rail-row project-rail-row-selected" : "project-rail-row"} type="button" key={project.projectId} aria-pressed={project.projectId === selectedProjectId} title={project.name} onClick={() => selectProject(project.projectId, true)}><strong>{project.name}</strong></button>)}{loading ? <LoadingState /> : !data.projects.length ? <span className="rail-empty">{desktop ? "No registered projects yet." : "Native project data unavailable in browser preview."}</span> : null}</div><button className="rail-footer" type="button" onClick={() => navigate("/projects")}>View all projects <ArrowUpRight size={13} /></button></section>
       <CommandCenterProjectPanel project={current} snapshot={data} emptyName={currentName} onOpen={() => current && navigate(`/projects/${encodeURIComponent(current.projectId)}`)} />
-      <aside className="command-right-rail"><section className="right-panel brief-compact"><SectionHeader title="AI Engineering Brief" detail="Factual inputs" />{data.engineeringBrief.facts.map((fact) => <div className="brief-line" key={fact.label}><ShieldCheck size={15} /><div><strong>{fact.label}: {fact.value}</strong><small>{fact.source}{fact.provenance.sourcePath ? ` | ${fact.provenance.sourcePath}` : ` | ${fact.provenance.sourceClass}`}</small></div></div>)}{!data.engineeringBrief.facts.length ? <div className="brief-line">Native factual brief unavailable.</div> : null}</section><NextBestTaskPanel data={data} /><section className="right-panel assistant-compact" aria-label="Needs Your Attention"><SectionHeader title="Needs Your Attention" detail={`${data.attention.length} items`} />{data.attention.slice(0, 5).map((item) => <button className="attention-line" type="button" key={item.id} onClick={() => item.projectId && selectProject(item.projectId, true)}><strong>{item.projectName || "Portfolio evidence"}</strong><span>{item.state} | {item.title}</span></button>)}{!data.attention.length ? <div className="assistant-message">No attention items.</div> : null}</section><section className="right-panel queue-compact"><SectionHeader title="Active Work Queue" detail={`${data.workQueue.length} bounded items`} />{data.workQueue.slice(0, 5).map((item) => <div className="queue-mini-row" key={item.id}><strong>{item.projectName}</strong><span>{item.stage} | {item.task}</span></div>)}{!data.workQueue.length ? <div className="assistant-message">No active work evidence.</div> : null}</section><section className="right-panel system-compact"><SectionHeader title="System Status" detail="Native panels" /><div className="system-row"><span>Snapshot</span><b>{snapshot ? "Current" : "Unavailable"}</b></div><div className="system-row"><span>Warnings</span><b>{data.warnings.length}</b></div><details className="system-detail"><summary>Detailed health</summary><RuntimeStatusPanel /><DatabaseStatusPanel /><WatcherStatusPanel /></details></section></aside>
+      <aside className="command-right-rail"><NextBestTaskPanel data={data} /><section className="right-panel queue-compact"><SectionHeader title="Active Work Queue" detail={`${data.workQueue.length} bounded items`} />{data.workQueue.slice(0, 5).map((item) => <div className="queue-mini-row" key={item.id}><strong>{item.projectName}</strong><span>{item.stage} | {item.task}</span></div>)}{!data.workQueue.length ? <div className="assistant-message">No active work evidence.</div> : null}</section><section className="right-panel system-compact"><SectionHeader title="System Status" detail="Native panels" /><div className="system-row"><span>Snapshot</span><b>{snapshot ? "Current" : "Unavailable"}</b></div><div className="system-row"><span>Warnings</span><b>{data.warnings.length}</b></div><details className="system-detail"><summary>Detailed health</summary><RuntimeStatusPanel /><DatabaseStatusPanel /><WatcherStatusPanel /></details></section></aside>
     </div>
    </div>;
 }

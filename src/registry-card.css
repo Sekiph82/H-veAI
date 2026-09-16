@@ -1,0 +1,48 @@
+.registry-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.registry-card {
+  min-width: 0;
+}
+
+.registry-card-foot {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.registry-card-foot > .secondary-button:first-child {
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+.registry-icon-actions {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.registry-workspace-action {
+  flex: 1 1 145px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.registry-card-foot .icon-button {
+  flex: 0 0 31px;
+}
+
+@media (max-width: 1050px) {
+  .registry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 720px) {
+  .registry-grid { grid-template-columns: 1fr; }
+}
