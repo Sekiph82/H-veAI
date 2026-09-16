@@ -43,6 +43,8 @@ pub struct ParsedTask {
     pub source_path: String,
     pub source_kind: String,
     pub title: String,
+    #[serde(default)]
+    pub priority: Option<i64>,
     pub parsed_status: String,
     pub storage_state: String,
     pub explicit_task_id: Option<String>,
@@ -122,6 +124,7 @@ struct Fields {
     external_wait: Option<String>,
     acceptance: Vec<String>,
     actor: Option<String>,
+    priority: Option<i64>,
     end_line: usize,
 }
 
@@ -539,6 +542,7 @@ fn parse_document(
             }),
             milestone: bounded_context.last().cloned(),
             required_actor: fields.actor,
+            priority: fields.priority,
             blockers: bounded_values(
                 fields.blockers,
                 "blocker",
@@ -686,6 +690,16 @@ fn add_field(
         }
         "next" | "next step" => fields.next_step = Some(content),
         "owner" | "actor" | "required actor" => fields.actor = normalize_actor(&content),
+        "priority" | "task priority" => {
+            fields.priority = content.parse::<i64>().ok();
+            if fields.priority.is_none() {
+                warnings.push(warning(
+                    "MALFORMED_PRIORITY",
+                    format!("task priority '{content}' is not an integer"),
+                    Some(path),
+                ));
+            }
+        }
         "owner gate" | "owner decision" | "decision gate" | "gate" => {
             fields.owner_gate = Some(content)
         }

@@ -2436,12 +2436,14 @@ mod tests {
                 status: "IN_PROGRESS".into(),
                 source_path: "TASKS.md".into(),
                 source_line: 1,
+                ..Default::default()
             }, crate::github_tracking::RemoteTaskRow {
                 id: "TASK-42".into(),
                 title: "Next task".into(),
                 status: "PLANNED".into(),
                 source_path: "TASKS.md".into(),
                 source_line: 2,
+                ..Default::default()
             }],
         }
     }
@@ -3053,7 +3055,7 @@ mod tests {
         foreign_tracking.project_key = "github:Sekiph82/FormuLab@main".into();
         foreign_tracking.repository = "Sekiph82/FormuLab".into();
         foreign_tracking.task_rows = vec![crate::github_tracking::RemoteTaskRow {
-            id: "TASK-FORMULAB-01".into(), title: "Foreign task".into(), status: "PLANNED".into(), source_path: "TASKS.md".into(), source_line: 1,
+            id: "TASK-FORMULAB-01".into(), title: "Foreign task".into(), status: "PLANNED".into(), source_path: "TASKS.md".into(), source_line: 1, ..Default::default()
         }];
         database.open_connection().unwrap().execute(
             "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, 'GITHUB_TASKS_REMOTE', 'foreign-head', ?3, ?4)",

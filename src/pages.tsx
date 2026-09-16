@@ -778,7 +778,12 @@ export function Projects() {
               await refreshRegistry();
               setRecords((current) => [registered, ...current.filter((item) => item.id !== registered.id)]);
               setError(null);
-              setSuccess(`${registered.name} was registered and is now visible in Projects.`);
+              const githubIdentity = registered.repository?.githubOwner && registered.repository.githubRepo
+                ? `${registered.repository.githubOwner}/${registered.repository.githubRepo}`
+                : null;
+              setSuccess(githubIdentity
+                ? `${registered.name} was registered with GitHub identity ${githubIdentity} and is now visible in Projects.`
+                : `${registered.name} was registered locally; GitHub identity is unavailable or not applicable.`);
               selectProject(registered.id, true);
               setRefresh((value) => value + 1);
             } else if (selected) {

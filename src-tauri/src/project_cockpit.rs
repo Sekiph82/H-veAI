@@ -970,6 +970,7 @@ mod tests {
                         status: "IN_PROGRESS".into(),
                         source_path: "TASKS.md".into(),
                         source_line: 10,
+                        ..Default::default()
                     },
                     1 => RemoteTaskRow {
                         id: "PAG-M04-099".into(),
@@ -977,6 +978,7 @@ mod tests {
                         status: "TASK_COMPLETE".into(),
                         source_path: "TASKS.md".into(),
                         source_line: 9,
+                        ..Default::default()
                     },
                     index => RemoteTaskRow {
                         id: format!("PAG-M05-{index:03}"),
@@ -984,6 +986,7 @@ mod tests {
                         status: "BACKLOG".into(),
                         source_path: "TASKS.md".into(),
                         source_line: 10 + index,
+                        ..Default::default()
                     },
                 })
                 .collect(),

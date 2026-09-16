@@ -3,6 +3,7 @@ use crate::db::DatabaseState;
 use crate::github_tracking::{self, RemoteTrackingSnapshot};
 use crate::project_dashboard::{self, ProjectDashboardResolution, TaskAuthorityState};
 use crate::projects::{list_projects, ProjectListQuery, ProjectRecord};
+use crate::next_best_task;
 use crate::task_intelligence::{self, ParsedTask, TaskIntelligenceSnapshot};
 use crate::watcher::{read_task_refresh_health, TaskRefreshHealth};
 use crate::workflow::{self, WorkflowState, WorkflowTask};
@@ -29,6 +30,8 @@ pub struct CommandCenterSnapshot {
     pub work_queue: Vec<WorkQueueItem>,
     pub recent_activity: Vec<ActivityItem>,
     pub engineering_brief: EngineeringBrief,
+    #[serde(default)]
+    pub m19: Option<next_best_task::M19Snapshot>,
     pub warnings: Vec<String>,
 }
 
@@ -169,6 +172,16 @@ pub struct BriefProvenance {
 pub struct EngineeringBrief {
     pub facts: Vec<BriefFact>,
     pub recommendation: Option<String>,
+    #[serde(default)]
+    pub m19: Option<next_best_task::M19Snapshot>,
+    #[serde(default)]
+    pub changes_since_last: Option<next_best_task::M19Comparison>,
+    #[serde(default)]
+    pub attention: Vec<next_best_task::M19Attention>,
+    #[serde(default)]
+    pub unavailable_inputs: Vec<String>,
+    #[serde(default)]
+    pub actor_readiness: Vec<next_best_task::M19ActorReadiness>,
 }
 
 pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, String> {
@@ -434,7 +447,30 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
             });
         }
     }
-    facts.truncate(8);
+    let m19 = match next_best_task::snapshot(database) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            push_portfolio_warning(&mut warnings, format!("M19 Engineering Brief unavailable: {error}"));
+            None
+        }
+    };
+    if let Some(m19_snapshot) = &m19 {
+        for fact in m19_snapshot.facts.iter().take(24) {
+            facts.push(BriefFact {
+                label: format!("M19 — {}", fact.label),
+                value: fact.value.clone(),
+                source: fact.source.clone(),
+                provenance: BriefProvenance {
+                    source_class: "M19_ENGINEERING_BRIEF".into(),
+                    project_id: None,
+                    source_path: Some("TASKS.md / Registry / native M19 evidence".into()),
+                    evidence_type: Some(fact.freshness.clone()),
+                    evidence_id: Some(fact.label.clone()),
+                },
+            });
+        }
+    }
+    facts.truncate(32);
     let project_count = summaries.len();
     Ok(CommandCenterSnapshot {
         generated_at: crate::time::utc_timestamp(),
@@ -459,8 +495,14 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
         recent_activity: activity,
         engineering_brief: EngineeringBrief {
             facts,
-            recommendation: None,
+            recommendation: m19.as_ref().and_then(|value| value.recommended.as_ref()).map(|value| format!("Rank 1: {} / {} (score {})", value.project_name, value.task_title, value.score)),
+            changes_since_last: m19.as_ref().map(|value| value.comparison.clone()),
+            attention: m19.as_ref().map(|value| value.attention.clone()).unwrap_or_default(),
+            unavailable_inputs: m19.as_ref().map(|value| value.unavailable_inputs.clone()).unwrap_or_default(),
+            actor_readiness: m19.as_ref().map(|value| value.actor_readiness.clone()).unwrap_or_default(),
+            m19: m19.clone(),
         },
+        m19,
         warnings,
     })
 }

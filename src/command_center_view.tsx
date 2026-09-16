@@ -7,7 +7,6 @@ import { WatcherStatusPanel } from "./components/WatcherStatusPanel";
 import { LoadingState, MetricCard, SectionHeader, formatPercent } from "./components/ui";
 import {
   getCommandCenterSnapshot,
-  getNextBestTaskSnapshot,
   listenForGitHubTrackingUpdate,
   previewSnapshot,
   registryFallback,
@@ -21,16 +20,21 @@ import { useProjectRegistry } from "./registryContext";
 const count = (value: number | null | undefined) => value == null ? "-" : String(value);
 
 function NextBestTaskPanel({ data }: { data: CommandCenterSnapshot }) {
-  const m19 = data.m19;
+  const m19 = data.engineeringBrief.m19 ?? data.m19;
   if (!m19) return null;
   const recommendation = m19.recommended;
-  return <section className="right-panel next-task-compact" aria-label="Next best task recommendation">
-    <SectionHeader title="Next Best Task" detail={`${m19.candidateCount} eligible`} />
+  const legacyAttentionKeys = new Set(data.attention.map((item) => `${item.projectId}:${item.taskId ?? ""}:${item.category}`));
+  const m19Attention = m19.attention.filter((item) => !legacyAttentionKeys.has(`${item.projectId}:${item.taskId ?? ""}:${item.category}`));
+  return <section className="right-panel next-task-compact" aria-label="M19 Engineering Brief">
+    <SectionHeader title="M19 Engineering Brief" detail={`${m19.candidateCount} eligible`} />
+    <div className="brief-line"><ShieldCheck size={15} /><div><strong>Portfolio state</strong><small>{m19.activeProjects} active projects · comparison {m19.comparison.state}</small></div></div>
     {recommendation ? <>
-      <div className="brief-line"><ShieldCheck size={15} /><div><strong>{recommendation.projectName} · {recommendation.taskTitle}</strong><small>{recommendation.taskId} · score {recommendation.score} · factual state {recommendation.factualState}</small></div></div>
+      <div className="brief-line"><ShieldCheck size={15} /><div><strong>{recommendation.projectName} · {recommendation.taskTitle}</strong><small>{recommendation.taskId} · rank {recommendation.rank} · score {recommendation.score} · factual state {recommendation.factualState}</small></div></div>
       <p className="assistant-message">{recommendation.explanation}</p>
       <details className="system-detail"><summary>Why this is recommended</summary><div className="brief-line"><div><strong>Eligibility</strong><small>{recommendation.eligibilityReason}</small></div></div>{recommendation.scoreComponents.map((component) => <div className="brief-line" key={component.key}><div><strong>{component.label}: {component.points > 0 ? "+" : ""}{component.points}</strong><small>{component.evidence}</small></div></div>)}<div className="brief-line"><div><strong>Evidence</strong><small>{recommendation.evidence.join(" | ")}</small></div></div>{recommendation.uncertainty.length ? <div className="brief-line"><div><strong>Uncertainty</strong><small>{recommendation.uncertainty.join(" | ")}</small></div></div> : null}</details>
     </> : <div className="assistant-message">No eligible task can be recommended from current evidence.</div>}
+    {m19.alternatives.length ? <details className="system-detail"><summary>Lower-ranked alternatives</summary>{m19.alternatives.map((alternative) => <div className="brief-line" key={`${alternative.projectId}:${alternative.taskId}`}><div><strong>#{alternative.rank} {alternative.projectName} · {alternative.taskTitle}</strong><small>{alternative.explanation}</small></div></div>)}</details> : null}
+    {m19Attention.length ? <details className="system-detail" open><summary>M19 attention</summary>{m19Attention.slice(0, 8).map((item) => <div className="brief-line" key={`${item.projectId}:${item.taskId}:${item.category}`}><div><strong>{item.projectName} · {item.title}</strong><small>{item.category} · {item.detail} · {item.evidence.join(" | ")}</small></div></div>)}</details> : null}
     {m19.unavailableInputs.length ? <div className="assistant-message">Unavailable inputs: {m19.unavailableInputs.join(" | ")}</div> : null}
   </section>;
 }
@@ -73,14 +77,8 @@ export function CommandCenterLive() {
       if (currentGeneration !== generation.current) return;
       setSnapshot(next && next.projects ? next : registryFallback(records));
       setError(null);
-      void getNextBestTaskSnapshot().then((nextBest) => {
-        if (currentGeneration !== generation.current) return;
-        if (nextBest && Array.isArray(nextBest.unavailableInputs) && Array.isArray(nextBest.attention)) {
-          setM19(nextBest);
-        }
-      }).catch(() => {
-        if (currentGeneration === generation.current) setM19(undefined);
-      });
+      const nextBest = next?.engineeringBrief?.m19 ?? next?.m19;
+      setM19(nextBest && Array.isArray(nextBest.unavailableInputs) && Array.isArray(nextBest.attention) ? nextBest : undefined);
     }).catch((caught) => {
       if (currentGeneration !== generation.current) return;
       setSnapshot(registryFallback(records));

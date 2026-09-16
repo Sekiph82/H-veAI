@@ -2,17 +2,23 @@ use crate::agent_session_center::ProviderReadiness;
 use crate::db::DatabaseState;
 use crate::github_tracking;
 use crate::projects::{list_projects, ProjectListQuery, ProjectRecord};
-use crate::task_intelligence::{self, TaskIntelligenceSnapshot};
+use crate::task_intelligence::{self, ParsedTask, TaskIntelligenceSnapshot};
 use crate::time::utc_timestamp;
 use chrono::{DateTime, Duration, Utc};
-use rusqlite::OptionalExtension;
-use serde::Serialize;
+use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Read;
+use std::path::Path;
 
 pub const MAX_CANDIDATES: usize = 128;
 pub const MAX_ATTENTION: usize = 64;
 pub const MAX_FACTS: usize = 32;
+const MAX_ROOT_TASK_BYTES: u64 = 2 * 1024 * 1024;
 const RECENT_FAILURE_WINDOW: Duration = Duration::days(7);
+const M19_FINGERPRINT_KEY: &str = "m19.engineering_brief.fingerprint";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,11 +31,32 @@ pub struct M19Snapshot {
     pub attention: Vec<M19Attention>,
     pub facts: Vec<M19Fact>,
     pub unavailable_inputs: Vec<String>,
+    pub comparison: M19Comparison,
+    pub actor_readiness: Vec<M19ActorReadiness>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct M19Comparison {
+    pub state: String,
+    pub previous_generated_at: Option<String>,
+    pub changed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct M19ActorReadiness {
+    pub actor: String,
+    pub state: String,
+    pub available: bool,
+    pub evidence: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct M19Recommendation {
+    pub rank: usize,
+    pub score_difference_from_top: i64,
     pub project_id: String,
     pub project_name: String,
     pub task_id: String,
@@ -85,13 +112,18 @@ pub struct CandidateInput {
     pub task_id: String,
     pub task_title: String,
     pub factual_state: String,
+    pub task_priority: Option<i64>,
     pub dependencies: Vec<String>,
+    pub dependency_task_ids: Vec<String>,
     pub blockers: Vec<String>,
     pub required_actor: Option<String>,
     pub external_wait: Option<String>,
     pub evidence: Vec<String>,
     pub evidence_freshness: String,
+    pub evidence_uncertainty: Vec<String>,
     pub verified_failure_urgency: i64,
+    pub context_switch_cost: i64,
+    pub owner_focus_points: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +148,18 @@ struct ScoredCandidate {
     components: Vec<M19ScoreComponent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct M19Fingerprint {
+    schema: u32,
+    generated_at: String,
+    active_projects: usize,
+    candidate_count: usize,
+    recommendation: Option<String>,
+    attention: Vec<String>,
+    actors: Vec<String>,
+    fresh_failure_tasks: Vec<String>,
+}
+
 pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
     let projects = list_projects(
         database,
@@ -125,10 +169,10 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
         },
     )?;
     let readiness = crate::agent_session_center::readiness();
+    let actor_readiness = actor_readiness_matrix(&readiness);
     let mut inputs = Vec::new();
     let mut attention = Vec::new();
     let mut unavailable_inputs = Vec::new();
-
     for project in projects.iter().filter(|project| project.status == "ACTIVE") {
         if github_tracking::is_github_tasks_project(project) {
             collect_remote_inputs(
@@ -153,10 +197,10 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
     let scored = score_candidates(candidates.eligible);
     attention.extend(candidates.attention);
     attention.sort_by(|left, right| {
-        left.project_name
-            .to_ascii_lowercase()
-            .cmp(&right.project_name.to_ascii_lowercase())
+        left.project_id
+            .cmp(&right.project_id)
             .then(left.task_id.cmp(&right.task_id))
+            .then(left.category.cmp(&right.category))
             .then(left.title.cmp(&right.title))
     });
     attention.truncate(MAX_ATTENTION);
@@ -164,25 +208,45 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
     unavailable_inputs.sort();
     unavailable_inputs.dedup();
     unavailable_inputs.truncate(MAX_FACTS);
-
-    let recommendations = scored.iter().map(to_recommendation).collect::<Vec<_>>();
+    let generated_at = utc_timestamp();
+    let current_fingerprint = fingerprint(
+        &generated_at,
+        &projects,
+        &scored,
+        &attention,
+        &actor_readiness,
+    );
+    let (comparison, comparison_error) = compare_and_persist(database, &current_fingerprint);
+    if let Some(error) = comparison_error {
+        unavailable_inputs.push(format!(
+            "M19 comparison persistence unavailable: {}",
+            bounded(&error)
+        ));
+    }
+    let top_score = scored.first().map(|candidate| candidate.score).unwrap_or(0);
+    let recommendations = scored
+        .iter()
+        .take(MAX_CANDIDATES)
+        .enumerate()
+        .map(|(index, candidate)| to_recommendation(candidate, index + 1, top_score))
+        .collect::<Vec<_>>();
     let recommended = recommendations.first().cloned();
-    let alternatives = recommendations.into_iter().skip(1).take(3).collect();
+    let alternatives = recommendations.iter().skip(1).take(3).cloned().collect();
+    let active_projects = projects
+        .iter()
+        .filter(|project| project.status == "ACTIVE")
+        .count();
     let mut facts = vec![
         M19Fact {
             label: "Active projects".into(),
-            value: projects
-                .iter()
-                .filter(|project| project.status == "ACTIVE")
-                .count()
-                .to_string(),
+            value: active_projects.to_string(),
             source: "Registry projects.status".into(),
             freshness: "CURRENT".into(),
         },
         M19Fact {
             label: "Eligible task candidates".into(),
             value: scored.len().to_string(),
-            source: "M19 deterministic candidate builder".into(),
+            source: "M19 full canonical graph after scoring".into(),
             freshness: "CURRENT".into(),
         },
         M19Fact {
@@ -191,7 +255,26 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
             source: "M19 eligibility boundary".into(),
             freshness: "CURRENT".into(),
         },
+        M19Fact {
+            label: "Change since previous snapshot".into(),
+            value: comparison.state.clone(),
+            source: "Persisted M19 factual fingerprint".into(),
+            freshness: if comparison.state == "UNAVAILABLE" {
+                "UNAVAILABLE"
+            } else {
+                "CURRENT"
+            }
+            .into(),
+        },
     ];
+    for actor in &actor_readiness {
+        facts.push(M19Fact {
+            label: format!("{} readiness", actor.actor),
+            value: actor.state.clone(),
+            source: actor.evidence.clone(),
+            freshness: "CURRENT".into(),
+        });
+    }
     for value in &unavailable_inputs {
         facts.push(M19Fact {
             label: "Unavailable input".into(),
@@ -201,19 +284,17 @@ pub fn snapshot(database: &DatabaseState) -> Result<M19Snapshot, String> {
         });
     }
     facts.truncate(MAX_FACTS);
-
     Ok(M19Snapshot {
-        generated_at: utc_timestamp(),
-        active_projects: projects
-            .iter()
-            .filter(|project| project.status == "ACTIVE")
-            .count(),
+        generated_at,
+        active_projects,
         candidate_count: scored.len(),
         recommended,
         alternatives,
         attention,
         facts,
         unavailable_inputs,
+        comparison,
+        actor_readiness,
     })
 }
 
@@ -224,52 +305,161 @@ fn collect_local_inputs(
     attention: &mut Vec<M19Attention>,
     unavailable: &mut Vec<String>,
 ) {
-    let intelligence = task_intelligence::list(database, &project.id)
-        .or_else(|_| task_intelligence::parse(database, &project.id));
-    match intelligence {
-        Ok(snapshot) => collect_parsed_inputs(database, project, &snapshot, inputs, attention),
+    let root = match fs::canonicalize(Path::new(&project.normalized_path)) {
+        Ok(root) => root,
         Err(error) => {
-            unavailable.push(format!("{} TASKS truth: {}", project.name, bounded(&error)))
+            unavailable.push(format!(
+                "{} TASKS root unavailable: {}",
+                project.name,
+                bounded(&error.to_string())
+            ));
+            return;
         }
+    };
+    let tasks_path = root.join("TASKS.md");
+    let (before_hash, _) = match read_root_tasks(&tasks_path) {
+        Ok(value) => value,
+        Err(error) => {
+            unavailable.push(format!("{} TASKS.md {}", project.name, bounded(&error)));
+            return;
+        }
+    };
+    // Parse the canonical source at decision time; persisted M09 snapshots are telemetry, not authority.
+    let parsed = match task_intelligence::parse(database, &project.id) {
+        Ok(value) => value,
+        Err(error) => {
+            unavailable.push(format!(
+                "{} TASKS truth unavailable: {}",
+                project.name,
+                bounded(&error)
+            ));
+            return;
+        }
+    };
+    let (after_hash, _) = match read_root_tasks(&tasks_path) {
+        Ok(value) => value,
+        Err(error) => {
+            unavailable.push(format!(
+                "{} TASKS.md changed or became unreadable: {}",
+                project.name,
+                bounded(&error)
+            ));
+            return;
+        }
+    };
+    if before_hash != after_hash {
+        unavailable.push(format!(
+            "{} TASKS.md is STALE: changed during M19 decision",
+            project.name
+        ));
+        return;
     }
+    let root_tasks = parsed
+        .tasks
+        .iter()
+        .filter(|task| is_exact_root_task(task) && task.evidence.content_hash == after_hash)
+        .cloned()
+        .collect::<Vec<_>>();
+    if parsed
+        .tasks
+        .iter()
+        .any(|task| is_exact_root_task(task) && task.evidence.content_hash != after_hash)
+    {
+        unavailable.push(format!(
+            "{} TASKS.md is STALE: parsed evidence hash does not match current root",
+            project.name
+        ));
+        return;
+    }
+    if parsed.warnings.iter().any(|warning| {
+        warning
+            .source_path
+            .as_deref()
+            .is_some_and(is_exact_root_path)
+            && matches!(
+                warning.code.as_str(),
+                "SOURCE_READ_FAILED"
+                    | "SOURCE_CHANGED_DURING_PARSE"
+                    | "INVALID_UTF8"
+                    | "MALFORMED_PRIORITY"
+            )
+    }) {
+        unavailable.push(format!(
+            "{} TASKS.md is MALFORMED or unreadable",
+            project.name
+        ));
+        return;
+    }
+    collect_parsed_inputs(
+        database,
+        project,
+        &root_tasks,
+        &parsed,
+        inputs,
+        attention,
+        unavailable,
+        &after_hash,
+    );
 }
 
 fn collect_parsed_inputs(
     database: &DatabaseState,
     project: &ProjectRecord,
-    snapshot: &TaskIntelligenceSnapshot,
+    tasks: &[ParsedTask],
+    _snapshot: &TaskIntelligenceSnapshot,
     inputs: &mut Vec<CandidateInput>,
-    attention: &mut Vec<M19Attention>,
+    _attention: &mut Vec<M19Attention>,
+    unavailable: &mut Vec<String>,
+    root_hash: &str,
 ) {
-    let task_ids = snapshot
-        .tasks
+    let explicit_ids = tasks
         .iter()
-        .map(|task| task.id.clone())
-        .collect::<HashSet<_>>();
-    let completed = snapshot
-        .tasks
-        .iter()
-        .filter(|task| is_completed(&task.parsed_status))
-        .map(|task| task.id.clone())
-        .collect::<HashSet<_>>();
-    for task in &snapshot.tasks {
+        .filter_map(|task| {
+            task.explicit_task_id
+                .as_ref()
+                .map(|id| (id.to_ascii_lowercase(), task.id.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    for task in tasks {
         let dependencies = task.dependency_references.clone();
+        let dependency_task_ids = dependencies
+            .iter()
+            .filter_map(|dependency| explicit_ids.get(&dependency.to_ascii_lowercase()).cloned())
+            .collect::<Vec<_>>();
         let mut blockers = task.blockers.clone();
+        let mut uncertainty = Vec::new();
         for dependency in &dependencies {
-            if !task_ids.contains(dependency) || !completed.contains(dependency) {
+            if !explicit_ids.contains_key(&dependency.to_ascii_lowercase()) {
                 blockers.push(format!(
-                    "dependency {dependency} is not complete or unavailable"
+                    "dependency {dependency} is not evidenced in canonical TASKS.md"
                 ));
             }
         }
-        let mut input = CandidateInput {
+        let (verified_failure_urgency, failure_error) =
+            match recent_failure_urgency(database, &project.id, &task.id) {
+                Ok(value) => (value, None),
+                Err(error) => (0, Some(error)),
+            };
+        if let Some(error) = failure_error {
+            uncertainty.push(format!(
+                "linked failure evidence unavailable: {}",
+                bounded(&error)
+            ));
+            unavailable.push(format!(
+                "{} {} failure evidence unavailable",
+                project.name, task.id
+            ));
+        }
+        let input = CandidateInput {
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             project_priority: project.priority,
             task_id: task.id.clone(),
             task_title: task.title.clone(),
             factual_state: task.parsed_status.clone(),
+            task_priority: task.priority,
             dependencies,
+            dependency_task_ids,
             blockers,
             required_actor: task.required_actor.clone(),
             external_wait: task
@@ -277,15 +467,23 @@ fn collect_parsed_inputs(
                 .clone()
                 .or_else(|| task.owner_gate.clone()),
             evidence: vec![format!(
-                "{}:{}-{}",
-                task.evidence.source_path, task.evidence.start_line, task.evidence.end_line
+                "{}:{}-{} sha256:{}",
+                task.evidence.source_path,
+                task.evidence.start_line,
+                task.evidence.end_line,
+                root_hash
             )],
             evidence_freshness: "CURRENT".into(),
-            verified_failure_urgency: recent_failure_urgency(database, &project.id, &task.id),
+            evidence_uncertainty: uncertainty,
+            verified_failure_urgency,
+            context_switch_cost: if task.parsed_status.eq_ignore_ascii_case("IN_PROGRESS") {
+                0
+            } else {
+                5
+            },
+            owner_focus_points: 0,
         };
-        input.blockers.sort();
-        input.blockers.dedup();
-        add_or_defer(input, inputs, attention);
+        inputs.push(input);
     }
 }
 
@@ -296,12 +494,12 @@ fn collect_remote_inputs(
     attention: &mut Vec<M19Attention>,
     unavailable: &mut Vec<String>,
 ) {
-    let snapshot = github_tracking::cached_snapshot(database, project)
+    let remote = github_tracking::cached_snapshot(database, project)
         .ok()
         .flatten();
-    let Some(remote) = snapshot else {
+    let Some(remote) = remote else {
         unavailable.push(format!(
-            "{} GitHub TASKS snapshot is unavailable",
+            "{} GitHub TASKS snapshot is UNAVAILABLE",
             project.name
         ));
         return;
@@ -316,68 +514,142 @@ fn collect_remote_inputs(
     if remote.task_rows.is_empty() {
         if remote.total_tasks != Some(0) {
             unavailable.push(format!(
-                "{} GitHub TASKS rows are unavailable",
+                "{} GitHub TASKS rows are UNAVAILABLE",
                 project.name
             ));
         }
         return;
     }
-    let completed = remote
+    let known_ids = remote
         .task_rows
         .iter()
-        .filter(|task| is_completed(&task.status))
-        .map(|task| task.id.clone())
+        .map(|task| task.id.to_ascii_lowercase())
         .collect::<HashSet<_>>();
     for task in remote.task_rows {
-        let blockers = if remote.current_task_id.as_deref() == Some(task.id.as_str()) {
-            remote.blockers.clone()
-        } else {
-            Vec::new()
-        };
-        let input = CandidateInput {
+        let evidence = vec![format!(
+            "GitHub {}/{}:{} sha256:{} head:{}",
+            remote.repository,
+            task.source_path,
+            task.source_line,
+            task.content_hash.as_deref().unwrap_or("unavailable"),
+            remote.remote_head.as_deref().unwrap_or("unavailable")
+        )];
+        if !task.metadata_complete
+            || task.content_hash.as_deref() != remote.tasks_blob_sha.as_deref()
+        {
+            unavailable.push(format!(
+                "{} task {} per-task TASKS evidence is incomplete or stale",
+                project.name, task.id
+            ));
+            attention.push(M19Attention {
+                project_id: project.id.clone(),
+                project_name: project.name.clone(),
+                task_id: Some(task.id.clone()),
+                title: task.title.clone(),
+                category: "REMOTE_TASK_EVIDENCE_UNAVAILABLE".into(),
+                detail:
+                    "Per-task actor/dependency/blocker/owner evidence or root hash is unavailable."
+                        .into(),
+                evidence,
+            });
+            continue;
+        }
+        let mut blockers = task.blockers.clone();
+        for dependency in &task.dependencies {
+            if !known_ids.contains(&dependency.to_ascii_lowercase()) {
+                blockers.push(format!(
+                    "dependency {dependency} is not evidenced in canonical TASKS.md"
+                ));
+            }
+        }
+        inputs.push(CandidateInput {
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             project_priority: project.priority,
             task_id: task.id.clone(),
-            task_title: task.title,
+            task_title: task.title.clone(),
             factual_state: task.status.clone(),
-            dependencies: Vec::new(),
+            task_priority: task.priority,
+            dependencies: task.dependencies.clone(),
+            dependency_task_ids: task.dependencies.clone(),
             blockers,
-            required_actor: remote.required_actor.clone(),
-            external_wait: None,
-            evidence: vec![format!(
-                "GitHub {}/TASKS.md@{}",
-                remote.repository,
-                remote.remote_head.as_deref().unwrap_or("HEAD unavailable")
-            )],
+            required_actor: task.required_actor.clone(),
+            external_wait: task.external_wait.clone().or(task.owner_gate.clone()),
+            evidence,
             evidence_freshness: "CURRENT".into(),
+            evidence_uncertainty: Vec::new(),
             verified_failure_urgency: 0,
-        };
-        if completed.contains(&input.task_id) {
-            continue;
-        }
-        add_or_defer(input, inputs, attention);
+            context_switch_cost: if task.status.eq_ignore_ascii_case("IN_PROGRESS") {
+                0
+            } else {
+                5
+            },
+            owner_focus_points: 0,
+        });
     }
 }
 
-fn add_or_defer(
-    input: CandidateInput,
-    inputs: &mut Vec<CandidateInput>,
-    attention: &mut Vec<M19Attention>,
-) {
-    if is_completed(&input.factual_state) {
+fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
+    let mut set = CandidateSet::default();
+    let all_ids = inputs
+        .iter()
+        .map(|input| (input.project_id.clone(), input.task_id.clone()))
+        .collect::<HashSet<_>>();
+    let mut dependent_counts: HashMap<(String, String), HashSet<(String, String)>> = HashMap::new();
+    for dependent in &inputs {
+        if is_completed(&dependent.factual_state) {
+            continue;
+        }
+        for prerequisite in dependent
+            .dependency_task_ids
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>()
+        {
+            if all_ids.contains(&(dependent.project_id.clone(), prerequisite.clone())) {
+                dependent_counts
+                    .entry((dependent.project_id.clone(), prerequisite))
+                    .or_default()
+                    .insert((dependent.project_id.clone(), dependent.task_id.clone()));
+            }
+        }
+    }
+    for input in inputs {
+        if is_completed(&input.factual_state) {
+            continue;
+        }
+        let candidate = Candidate {
+            unblocks: dependent_counts
+                .get(&(input.project_id.clone(), input.task_id.clone()))
+                .map(|items| items.len() as i64)
+                .unwrap_or_default(),
+            actor_readiness: normalize_actor(input.required_actor.as_deref())
+                .unwrap_or_else(|| "UNKNOWN".into()),
+            uncertainty: input.evidence_uncertainty.clone(),
+            input,
+        };
+        defer_or_retain(candidate, &mut set);
+    }
+    set
+}
+
+fn defer_or_retain(candidate: Candidate, set: &mut CandidateSet) {
+    let input = &candidate.input;
+    if !candidate.uncertainty.is_empty() || input.evidence_freshness != "CURRENT" {
+        let mut detail = candidate.uncertainty.join("; ");
+        if input.evidence_freshness != "CURRENT" {
+            detail.push_str(&format!(" evidence is {}", input.evidence_freshness));
+        }
+        set.attention
+            .push(attention_for(&candidate, "EVIDENCE_UNCERTAIN", detail));
         return;
     }
     if !input.blockers.is_empty() {
-        attention.push(M19Attention {
-            project_id: input.project_id,
-            project_name: input.project_name,
-            task_id: Some(input.task_id),
-            title: input.task_title,
-            category: "BLOCKED_OR_DEPENDENCY".into(),
-            detail: input.blockers.join("; "),
-            evidence: input.evidence,
-        });
+        set.attention.push(attention_for(
+            &candidate,
+            "BLOCKED_OR_DEPENDENCY",
+            input.blockers.join("; "),
+        ));
         return;
     }
     if let Some(wait) = input
@@ -385,94 +657,49 @@ fn add_or_defer(
         .as_deref()
         .filter(|value| !value.trim().is_empty())
     {
-        attention.push(M19Attention {
-            project_id: input.project_id,
-            project_name: input.project_name,
-            task_id: Some(input.task_id),
-            title: input.task_title,
-            category: "HUMAN_OR_EXTERNAL_WAIT".into(),
-            detail: bounded(wait),
-            evidence: input.evidence,
-        });
+        set.attention.push(attention_for(
+            &candidate,
+            "HUMAN_OR_EXTERNAL_WAIT",
+            bounded(wait),
+        ));
         return;
     }
-    if matches!(
-        input
-            .required_actor
-            .as_deref()
-            .map(|value| value.to_ascii_uppercase())
-            .as_deref(),
-        Some("HUMAN") | Some("EXTERNAL")
-    ) {
-        attention.push(M19Attention {
-            project_id: input.project_id,
-            project_name: input.project_name,
-            task_id: Some(input.task_id),
-            title: input.task_title,
-            category: "HUMAN_OR_EXTERNAL_WAIT".into(),
-            detail: format!(
+    match normalize_actor(input.required_actor.as_deref()).as_deref() {
+        Some("HUMAN") | Some("EXTERNAL") => set.attention.push(attention_for(
+            &candidate,
+            "HUMAN_OR_EXTERNAL_WAIT",
+            format!(
                 "required actor: {}",
                 input.required_actor.as_deref().unwrap_or("unknown")
             ),
-            evidence: input.evidence,
-        });
-        return;
+        )),
+        Some("CI") | Some("GPT_AUDIT") => set.attention.push(attention_for(
+            &candidate,
+            "NON_EXECUTABLE_ACTOR",
+            format!(
+                "required actor {} is not an immediate builder",
+                input.required_actor.as_deref().unwrap_or("unknown")
+            ),
+        )),
+        Some("CODEX") | Some("CLAUDE") => set.eligible.push(candidate),
+        _ => set.attention.push(attention_for(
+            &candidate,
+            "ACTOR_UNKNOWN",
+            "required actor is unavailable or unknown".into(),
+        )),
     }
-    inputs.push(input);
 }
 
-fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
-    let mut set = CandidateSet::default();
-    let mut task_ids = HashSet::new();
-    for input in &inputs {
-        task_ids.insert((input.project_id.clone(), input.task_id.clone()));
+fn attention_for(candidate: &Candidate, category: &str, detail: String) -> M19Attention {
+    M19Attention {
+        project_id: candidate.input.project_id.clone(),
+        project_name: candidate.input.project_name.clone(),
+        task_id: Some(candidate.input.task_id.clone()),
+        title: candidate.input.task_title.clone(),
+        category: category.into(),
+        detail,
+        evidence: candidate.input.evidence.clone(),
     }
-    for input in inputs {
-        if is_completed(&input.factual_state) {
-            continue;
-        }
-        let mut uncertainty = Vec::new();
-        if input.evidence_freshness != "CURRENT" {
-            uncertainty.push(format!("evidence is {}", input.evidence_freshness));
-        }
-        let actor_readiness = match input
-            .required_actor
-            .as_deref()
-            .map(|value| value.to_ascii_uppercase())
-        {
-            Some(actor) => actor,
-            None => {
-                uncertainty.push("required actor is unavailable".into());
-                "UNKNOWN".into()
-            }
-        };
-        set.eligible.push(Candidate {
-            input,
-            uncertainty,
-            actor_readiness,
-            unblocks: 0,
-        });
-    }
-    let clone = set
-        .eligible
-        .iter()
-        .map(|candidate| candidate.input.clone())
-        .collect::<Vec<_>>();
-    for candidate in &mut set.eligible {
-        candidate.unblocks = clone
-            .iter()
-            .filter(|other| {
-                other.project_id == candidate.input.project_id
-                    && other.dependencies.contains(&candidate.input.task_id)
-                    && task_ids.contains(&(
-                        candidate.input.project_id.clone(),
-                        candidate.input.task_id.clone(),
-                    ))
-            })
-            .count() as i64;
-    }
-    set.eligible.truncate(MAX_CANDIDATES);
-    set
 }
 
 fn apply_readiness(set: &mut CandidateSet, readiness: &[ProviderReadiness]) {
@@ -482,38 +709,34 @@ fn apply_readiness(set: &mut CandidateSet, readiness: &[ProviderReadiness]) {
         .collect::<HashMap<_, _>>();
     let mut keep = Vec::new();
     for mut candidate in set.eligible.drain(..) {
-        let actor = candidate
-            .input
-            .required_actor
-            .as_deref()
-            .unwrap_or("UNKNOWN")
-            .to_ascii_uppercase();
-        if matches!(actor.as_str(), "CODEX" | "CLAUDE") {
-            match states.get(&actor) {
+        let actor = normalize_actor(candidate.input.required_actor.as_deref())
+            .unwrap_or_else(|| "UNKNOWN".into());
+        match actor.as_str() {
+            "CODEX" | "CLAUDE" => match states.get(actor.as_str()) {
                 Some(provider) if provider.available => {
-                    candidate.actor_readiness = format!("{} / AVAILABLE", actor)
+                    candidate.actor_readiness = format!("{} / AVAILABLE", actor);
+                    keep.push(candidate);
                 }
-                Some(provider) => {
-                    set.attention.push(M19Attention {
-                        project_id: candidate.input.project_id.clone(),
-                        project_name: candidate.input.project_name.clone(),
-                        task_id: Some(candidate.input.task_id.clone()),
-                        title: candidate.input.task_title.clone(),
-                        category: "ACTOR_UNAVAILABLE".into(),
-                        detail: provider
-                            .diagnostic_message
-                            .clone()
-                            .unwrap_or_else(|| format!("{actor} is {}", provider.readiness_state)),
-                        evidence: candidate.input.evidence.clone(),
-                    });
-                    continue;
-                }
-                None => candidate
-                    .uncertainty
-                    .push(format!("{actor} readiness is unavailable")),
-            }
+                Some(provider) => set.attention.push(attention_for(
+                    &candidate,
+                    "ACTOR_UNAVAILABLE",
+                    provider
+                        .diagnostic_message
+                        .clone()
+                        .unwrap_or_else(|| format!("{actor} is {}", provider.readiness_state)),
+                )),
+                None => set.attention.push(attention_for(
+                    &candidate,
+                    "ACTOR_UNAVAILABLE",
+                    format!("{actor} readiness is unavailable"),
+                )),
+            },
+            _ => set.attention.push(attention_for(
+                &candidate,
+                "ACTOR_UNKNOWN",
+                "actor is not executable by the selected builder path".into(),
+            )),
         }
-        keep.push(candidate);
     }
     set.eligible = keep;
 }
@@ -523,6 +746,7 @@ fn score_candidates(candidates: Vec<Candidate>) -> Vec<ScoredCandidate> {
         .into_iter()
         .map(|candidate| {
             let input = &candidate.input;
+            let task_priority_points = input.task_priority.unwrap_or_default().clamp(-100, 100) * 5;
             let components = vec![
                 M19ScoreComponent {
                     key: "project_priority".into(),
@@ -531,26 +755,50 @@ fn score_candidates(candidates: Vec<Candidate>) -> Vec<ScoredCandidate> {
                     evidence: "Registry priority".into(),
                 },
                 M19ScoreComponent {
+                    key: "task_priority".into(),
+                    label: "Authoritative task priority".into(),
+                    points: task_priority_points,
+                    evidence: input
+                        .task_priority
+                        .map(|_| "Canonical TASKS.md priority".into())
+                        .unwrap_or_else(|| "No authoritative task priority".into()),
+                },
+                M19ScoreComponent {
                     key: "dependency_unlock".into(),
                     label: "Dependency unlock".into(),
                     points: candidate.unblocks.clamp(0, 20) * 15,
-                    evidence: "Canonical task dependency references".into(),
+                    evidence: format!(
+                        "{} unique unfinished canonical dependents",
+                        candidate.unblocks
+                    ),
                 },
                 M19ScoreComponent {
                     key: "verified_failure".into(),
                     label: "Fresh verified failure".into(),
                     points: input.verified_failure_urgency.clamp(0, 100),
-                    evidence: "Latest linked audit/test evidence".into(),
+                    evidence: "Latest linked audit/test evidence within seven days".into(),
                 },
                 M19ScoreComponent {
                     key: "actor_readiness".into(),
                     label: "Required actor readiness".into(),
-                    points: if candidate.actor_readiness.ends_with("AVAILABLE") {
+                    points: if input.required_actor.is_some() {
                         20
                     } else {
                         0
                     },
                     evidence: candidate.actor_readiness.clone(),
+                },
+                M19ScoreComponent {
+                    key: "context_switch_cost".into(),
+                    label: "Bounded context-switch cost".into(),
+                    points: -input.context_switch_cost.clamp(0, 20),
+                    evidence: "Factual task state; IN_PROGRESS has zero switch cost".into(),
+                },
+                M19ScoreComponent {
+                    key: "owner_focus".into(),
+                    label: "Authoritative owner focus".into(),
+                    points: input.owner_focus_points.clamp(-100, 100),
+                    evidence: "No owner-focus setting is configured".into(),
                 },
                 M19ScoreComponent {
                     key: "uncertainty_penalty".into(),
@@ -575,13 +823,7 @@ fn score_candidates(candidates: Vec<Candidate>) -> Vec<ScoredCandidate> {
         right
             .score
             .cmp(&left.score)
-            .then(
-                left.candidate
-                    .input
-                    .project_name
-                    .to_ascii_lowercase()
-                    .cmp(&right.candidate.input.project_name.to_ascii_lowercase()),
-            )
+            .then(tie_key(&left.candidate).cmp(&tie_key(&right.candidate)))
             .then(
                 left.candidate
                     .input
@@ -598,74 +840,311 @@ fn score_candidates(candidates: Vec<Candidate>) -> Vec<ScoredCandidate> {
     scored
 }
 
-fn to_recommendation(scored: &ScoredCandidate) -> M19Recommendation {
+fn to_recommendation(scored: &ScoredCandidate, rank: usize, top_score: i64) -> M19Recommendation {
     let input = &scored.candidate.input;
+    let difference = top_score.saturating_sub(scored.score);
     let positive = scored
         .components
         .iter()
         .filter(|component| component.points > 0)
         .map(|component| format!("{} +{}", component.label, component.points))
         .collect::<Vec<_>>();
-    M19Recommendation {
-        project_id: input.project_id.clone(),
-        project_name: input.project_name.clone(),
-        task_id: input.task_id.clone(),
-        task_title: input.task_title.clone(),
-        factual_state: input.factual_state.clone(),
-        eligibility_reason:
-            "ACTIVE task with no verified blocker, dependency, or human/external wait".into(),
-        score: scored.score,
-        score_components: scored.components.clone(),
-        dependencies: input.dependencies.clone(),
-        blockers: input.blockers.clone(),
-        required_actor: input.required_actor.clone(),
-        actor_readiness: scored.candidate.actor_readiness.clone(),
-        evidence: input.evidence.clone(),
-        uncertainty: scored.candidate.uncertainty.clone(),
-        explanation: if positive.is_empty() {
+    let explanation = if rank == 1 {
+        if positive.is_empty() {
             "Ranked first among the currently eligible candidates; no favorable evidence inputs were available.".into()
         } else {
             format!(
                 "Ranked first from the same factual score object: {}.",
                 positive.join(", ")
             )
-        },
+        }
+    } else if difference == 0 {
+        format!(
+            "Ranked #{rank}; tied with rank 1 at score {} from the same factual score object.",
+            scored.score
+        )
+    } else {
+        format!(
+            "Ranked #{rank}, {} points below rank 1 from the same factual score object: {}.",
+            difference,
+            positive.join(", ")
+        )
+    };
+    M19Recommendation { rank, score_difference_from_top: difference, project_id: input.project_id.clone(), project_name: input.project_name.clone(), task_id: input.task_id.clone(), task_title: input.task_title.clone(), factual_state: input.factual_state.clone(), eligibility_reason: "ACTIVE canonical TASKS task with no evidenced blocker, dependency, human/external wait, or unavailable actor".into(), score: scored.score, score_components: scored.components.clone(), dependencies: input.dependencies.clone(), blockers: input.blockers.clone(), required_actor: input.required_actor.clone(), actor_readiness: scored.candidate.actor_readiness.clone(), evidence: input.evidence.clone(), uncertainty: scored.candidate.uncertainty.clone(), explanation }
+}
+
+fn actor_readiness_matrix(readiness: &[ProviderReadiness]) -> Vec<M19ActorReadiness> {
+    let mut out = readiness
+        .iter()
+        .map(|provider| M19ActorReadiness {
+            actor: provider.provider.clone(),
+            state: if provider.available {
+                "AVAILABLE"
+            } else {
+                provider.readiness_state.as_str()
+            }
+            .into(),
+            available: provider.available,
+            evidence: provider
+                .diagnostic_message
+                .clone()
+                .unwrap_or_else(|| "Native provider readiness probe".into()),
+        })
+        .collect::<Vec<_>>();
+    for actor in ["HUMAN", "CI", "GPT_AUDIT", "EXTERNAL", "UNKNOWN"] {
+        out.push(M19ActorReadiness {
+            actor: actor.into(),
+            state: "NON_EXECUTABLE_OR_UNAVAILABLE".into(),
+            available: false,
+            evidence: "Canonical actor semantics; not an immediate builder provider".into(),
+        });
+    }
+    out
+}
+
+fn normalize_actor(value: Option<&str>) -> Option<String> {
+    let value = value?.trim().to_ascii_uppercase().replace(' ', "_");
+    match value.as_str() {
+        "CODEX" | "CLAUDE" | "HUMAN" | "CI" | "GPT_AUDIT" | "GPTAUDIT" | "EXTERNAL" => {
+            Some(if value == "GPTAUDIT" {
+                "GPT_AUDIT".into()
+            } else {
+                value
+            })
+        }
+        _ => None,
     }
 }
 
-fn recent_failure_urgency(database: &DatabaseState, project_id: &str, task_id: &str) -> i64 {
-    let Ok(connection) = database.open_connection() else {
-        return 0;
-    };
+fn recent_failure_urgency(
+    database: &DatabaseState,
+    project_id: &str,
+    task_id: &str,
+) -> Result<i64, String> {
+    let connection = database.open_connection()?;
     let now = DateTime::parse_from_rfc3339(&utc_timestamp())
-        .ok()
-        .map(|value| value.with_timezone(&Utc));
-    let latest = [
-        ("audits", "created_at", "created_at"),
-        ("test_runs", "COALESCE(finished_at, started_at)", "COALESCE(finished_at, started_at)"),
-    ].iter().filter_map(|(table, timestamp, order)| {
-        let sql = format!("SELECT result, {timestamp} FROM {table} WHERE project_id=?1 AND task_id=?2 ORDER BY {order} DESC LIMIT 1");
-        connection.query_row(&sql, rusqlite::params![project_id, task_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).optional().ok().flatten()
-    }).collect::<Vec<_>>();
-    latest
-        .into_iter()
-        .filter_map(|(result, at)| {
-            if !matches!(
-                result.to_ascii_uppercase().as_str(),
-                "FAIL" | "FAILED" | "ERROR"
-            ) {
-                return None;
-            }
-            let current = now?;
-            let parsed = DateTime::parse_from_rfc3339(at.as_deref()?)
-                .ok()?
-                .with_timezone(&Utc);
-            (current.signed_duration_since(parsed) <= RECENT_FAILURE_WINDOW).then_some(100)
-        })
-        .max()
-        .unwrap_or(0)
+        .map_err(|error| format!("invalid current timestamp: {error}"))?
+        .with_timezone(&Utc);
+    let mut urgency = 0;
+    for (table, timestamp) in [
+        ("audits", "created_at"),
+        ("test_runs", "COALESCE(finished_at, started_at)"),
+    ] {
+        let sql = format!("SELECT result, {timestamp} FROM {table} WHERE project_id=?1 AND task_id=?2 ORDER BY {timestamp} DESC LIMIT 1");
+        let latest: Option<(String, Option<String>)> = connection
+            .query_row(&sql, params![project_id, task_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+            .map_err(|error| format!("{table} failure evidence query failed: {error}"))?;
+        let Some((result, at)) = latest else { continue };
+        if !matches!(
+            result.trim().to_ascii_uppercase().as_str(),
+            "FAIL" | "FAILED" | "ERROR"
+        ) {
+            continue;
+        }
+        let at = at.ok_or_else(|| format!("{table} failure timestamp is missing"))?;
+        let parsed = DateTime::parse_from_rfc3339(&at)
+            .map_err(|error| format!("{table} failure timestamp is malformed: {error}"))?
+            .with_timezone(&Utc);
+        let age = now.signed_duration_since(parsed);
+        if age >= Duration::zero() && age <= RECENT_FAILURE_WINDOW {
+            urgency = urgency.max(100);
+        }
+    }
+    Ok(urgency)
 }
 
+fn is_exact_root_task(task: &ParsedTask) -> bool {
+    task.source_kind.eq_ignore_ascii_case("TASKS") && is_exact_root_path(&task.source_path)
+}
+fn is_exact_root_path(path: &str) -> bool {
+    path.replace('\\', "/").eq_ignore_ascii_case("TASKS.md")
+}
+
+fn read_root_tasks(path: &Path) -> Result<(String, String), String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("is unavailable: {error}"))?;
+    if !metadata.is_file() {
+        return Err("is not a regular file".into());
+    }
+    if metadata.len() > MAX_ROOT_TASK_BYTES {
+        return Err("exceeds the canonical source size bound".into());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|error| format!("cannot be read: {error}"))?
+        .take(MAX_ROOT_TASK_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot be read: {error}"))?;
+    if bytes.len() as u64 > MAX_ROOT_TASK_BYTES {
+        return Err("exceeds the canonical source size bound".into());
+    }
+    let hash = hex_digest(&bytes);
+    let text = String::from_utf8(bytes).map_err(|_| "contains invalid UTF-8".to_string())?;
+    if text.trim().is_empty() {
+        return Err("is empty".into());
+    }
+    Ok((hash, text))
+}
+
+fn compare_and_persist(
+    database: &DatabaseState,
+    current: &M19Fingerprint,
+) -> (M19Comparison, Option<String>) {
+    let connection = match database.open_connection() {
+        Ok(connection) => connection,
+        Err(error) => {
+            return (
+                M19Comparison {
+                    state: "UNAVAILABLE".into(),
+                    previous_generated_at: None,
+                    changed: Vec::new(),
+                },
+                Some(error),
+            )
+        }
+    };
+    let previous: Option<String> = match connection
+        .query_row(
+            "SELECT value_json FROM settings WHERE key=?1 AND scope='WORKSPACE'",
+            [M19_FINGERPRINT_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+    {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                M19Comparison {
+                    state: "UNAVAILABLE".into(),
+                    previous_generated_at: None,
+                    changed: Vec::new(),
+                },
+                Some(format!("read persisted fingerprint failed: {error}")),
+            )
+        }
+    };
+    let now = current.generated_at.clone();
+    let current_json = match serde_json::to_string(current) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                M19Comparison {
+                    state: "UNAVAILABLE".into(),
+                    previous_generated_at: None,
+                    changed: Vec::new(),
+                },
+                Some(format!("serialize fingerprint failed: {error}")),
+            )
+        }
+    };
+    let comparison = match previous
+        .as_deref()
+        .and_then(|value| serde_json::from_str::<M19Fingerprint>(value).ok())
+    {
+        None => M19Comparison {
+            state: "UNAVAILABLE_FIRST_SNAPSHOT".into(),
+            previous_generated_at: None,
+            changed: Vec::new(),
+        },
+        Some(previous) => {
+            let mut changed = Vec::new();
+            if previous.recommendation != current.recommendation {
+                changed.push("recommendation identity".into());
+            }
+            if previous.attention != current.attention {
+                changed.push("attention set/state".into());
+            }
+            if previous.active_projects != current.active_projects
+                || previous.candidate_count != current.candidate_count
+            {
+                changed.push("portfolio counts".into());
+            }
+            if previous.actors != current.actors {
+                changed.push("provider/actor state".into());
+            }
+            if previous.fresh_failure_tasks != current.fresh_failure_tasks {
+                changed.push("fresh failure identities".into());
+            }
+            M19Comparison {
+                state: if changed.is_empty() {
+                    "NO_COMPARABLE_CHANGE".into()
+                } else {
+                    "CHANGED".into()
+                },
+                previous_generated_at: Some(previous.generated_at),
+                changed,
+            }
+        }
+    };
+    let result = connection.execute("INSERT INTO settings (key,value_json,scope,created_at,updated_at) VALUES (?1,?2,'WORKSPACE',?3,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", params![M19_FINGERPRINT_KEY, current_json, now]);
+    match result {
+        Ok(_) => (comparison, None),
+        Err(error) => (
+            M19Comparison {
+                state: "UNAVAILABLE".into(),
+                previous_generated_at: comparison.previous_generated_at,
+                changed: Vec::new(),
+            },
+            Some(format!("persist fingerprint failed: {error}")),
+        ),
+    }
+}
+
+fn fingerprint(
+    generated_at: &str,
+    projects: &[ProjectRecord],
+    scored: &[ScoredCandidate],
+    attention: &[M19Attention],
+    actors: &[M19ActorReadiness],
+) -> M19Fingerprint {
+    M19Fingerprint {
+        schema: 1,
+        generated_at: generated_at.into(),
+        active_projects: projects
+            .iter()
+            .filter(|project| project.status == "ACTIVE")
+            .count(),
+        candidate_count: scored.len(),
+        recommendation: scored.first().map(|candidate| {
+            format!(
+                "{}:{}",
+                candidate.candidate.input.project_id, candidate.candidate.input.task_id
+            )
+        }),
+        attention: attention
+            .iter()
+            .map(|item| {
+                format!(
+                    "{}:{}:{}:{}",
+                    item.project_id,
+                    item.task_id.as_deref().unwrap_or(""),
+                    item.category,
+                    item.detail
+                )
+            })
+            .collect(),
+        actors: actors
+            .iter()
+            .map(|actor| format!("{}:{}:{}", actor.actor, actor.state, actor.available))
+            .collect(),
+        fresh_failure_tasks: scored
+            .iter()
+            .filter(|candidate| candidate.candidate.input.verified_failure_urgency > 0)
+            .map(|candidate| {
+                format!(
+                    "{}:{}",
+                    candidate.candidate.input.project_id, candidate.candidate.input.task_id
+                )
+            })
+            .collect(),
+    }
+}
+
+fn tie_key(candidate: &Candidate) -> String {
+    hex_digest(format!("{}|{}", candidate.input.project_id, candidate.input.task_id).as_bytes())
+}
 fn is_completed(status: &str) -> bool {
     matches!(
         status.trim().to_ascii_uppercase().as_str(),
@@ -676,11 +1155,17 @@ fn is_completed(status: &str) -> bool {
             | "PASS"
             | "PASSED"
             | "CANCELLED"
+            | "TASK_COMPLETE"
             | "[X]"
             | "X"
     )
 }
-
+fn hex_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 fn bounded(value: &str) -> String {
     value
         .chars()
@@ -692,6 +1177,10 @@ fn bounded(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projects::{register_project, RegisterProjectRequest};
+    use crate::task_intelligence::{ParserAdapterIdentity, TaskConfidence, TaskEvidenceLocator};
+    use std::fs;
+    use tempfile::tempdir;
 
     fn input(project: &str, task: &str) -> CandidateInput {
         CandidateInput {
@@ -701,63 +1190,209 @@ mod tests {
             task_id: task.into(),
             task_title: format!("{task} title"),
             factual_state: "PLANNED".into(),
+            task_priority: None,
             dependencies: Vec::new(),
+            dependency_task_ids: Vec::new(),
             blockers: Vec::new(),
             required_actor: Some("CODEX".into()),
             external_wait: None,
             evidence: vec!["TASKS.md:1".into()],
             evidence_freshness: "CURRENT".into(),
+            evidence_uncertainty: Vec::new(),
             verified_failure_urgency: 0,
+            context_switch_cost: 0,
+            owner_focus_points: 0,
+        }
+    }
+
+    fn parsed(project: &str, path: &str, kind: &str, id: &str, hash: &str) -> ParsedTask {
+        ParsedTask {
+            id: format!("internal-{id}"),
+            project_id: project.into(),
+            source_id: "source".into(),
+            source_path: path.into(),
+            source_kind: kind.into(),
+            title: id.into(),
+            priority: None,
+            parsed_status: "OPEN".into(),
+            storage_state: "BACKLOG".into(),
+            explicit_task_id: Some(id.into()),
+            milestone: None,
+            required_actor: Some("Codex".into()),
+            blockers: Vec::new(),
+            dependency_references: Vec::new(),
+            next_step: None,
+            owner_gate: None,
+            external_wait: None,
+            acceptance_criteria: Vec::new(),
+            confidence: TaskConfidence {
+                score: 1.0,
+                reasons: Vec::new(),
+            },
+            evidence: TaskEvidenceLocator {
+                source_path: path.into(),
+                content_hash: hash.into(),
+                start_line: 1,
+                end_line: 1,
+                heading_path: Vec::new(),
+                locator_text: None,
+            },
+            adapter_id: "generic".into(),
+            warnings: Vec::new(),
         }
     }
 
     #[test]
-    fn non_seed_projects_are_eligible_and_completed_tasks_are_excluded() {
-        let mut completed = input("seed", "done");
-        completed.factual_state = "COMPLETED".into();
-        let set = build_candidate_set(vec![input("project-9", "M19.01"), completed]);
-        assert_eq!(set.eligible.len(), 1);
-        assert_eq!(set.eligible[0].input.project_id, "project-9");
-    }
-
-    #[test]
-    fn blockers_and_human_waits_are_separate_attention_items() {
-        let mut blocked = input("project-9", "blocked");
-        blocked.blockers.push("dependency unfinished".into());
-        let mut waiting = input("project-10", "wait");
-        waiting.required_actor = Some("HUMAN".into());
-        let mut set = CandidateSet::default();
-        let mut inputs = Vec::new();
-        let mut attention = Vec::new();
-        add_or_defer(blocked, &mut inputs, &mut attention);
-        add_or_defer(waiting, &mut inputs, &mut attention);
-        set.eligible = build_candidate_set(inputs).eligible;
-        set.attention = attention;
-        assert!(set.eligible.is_empty());
-        assert_eq!(set.attention.len(), 2);
-        assert!(set
-            .attention
+    fn root_filter_ignores_roadmap_handoff_and_custom_tasks() {
+        let snapshot = TaskIntelligenceSnapshot {
+            project_id: "p".into(),
+            parsed_at: "now".into(),
+            adapter: ParserAdapterIdentity {
+                id: "generic".into(),
+                evidence: "test".into(),
+                convention_matched: false,
+            },
+            tasks: vec![
+                parsed("p", "TASKS.md", "TASKS", "ROOT", "hash"),
+                parsed("p", "ROADMAP.md", "ROADMAP", "ROADMAP", "hash"),
+                parsed("p", "HANDOFF.md", "HANDOFF", "HANDOFF", "hash"),
+                parsed("p", "custom.md", "CUSTOM", "CUSTOM", "hash"),
+            ],
+            handoff: None,
+            warnings: Vec::new(),
+        };
+        let root = snapshot
+            .tasks
             .iter()
-            .any(|item| item.category == "HUMAN_OR_EXTERNAL_WAIT"));
+            .filter(|task| is_exact_root_task(task) && task.evidence.content_hash == "hash")
+            .collect::<Vec<_>>();
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].explicit_task_id.as_deref(), Some("ROOT"));
     }
 
     #[test]
-    fn scoring_and_tie_breaking_are_deterministic() {
-        let mut high = input("z-project", "task");
-        high.verified_failure_urgency = 100;
-        let candidates = build_candidate_set(vec![input("a-project", "task"), high]).eligible;
-        let scored = score_candidates(candidates);
-        assert_eq!(scored[0].candidate.input.project_id, "z-project");
-        assert_eq!(
-            scored[0].score,
-            scored[0]
-                .components
-                .iter()
-                .map(|component| component.points)
-                .sum::<i64>()
-        );
-        assert!(to_recommendation(&scored[0])
-            .explanation
-            .contains("Fresh verified failure"));
+    fn full_graph_scores_real_prerequisite_and_keeps_dependent_attention() {
+        let prerequisite = input("project", "A");
+        let mut dependent = input("project", "B");
+        dependent.dependencies = vec!["A".into()];
+        dependent.dependency_task_ids = vec!["A".into()];
+        dependent.blockers.push("dependency unfinished".into());
+        let set = build_candidate_set(vec![prerequisite, dependent]);
+        assert_eq!(set.eligible.len(), 1);
+        assert_eq!(set.eligible[0].unblocks, 1);
+        assert_eq!(set.attention.len(), 1);
+        let mut duplicate = input("project", "B");
+        duplicate.dependency_task_ids = vec!["A".into(), "A".into()];
+        duplicate.blockers.push("dependency unfinished".into());
+        let deduped = build_candidate_set(vec![input("project", "A"), duplicate]);
+        assert_eq!(deduped.eligible[0].unblocks, 1);
+    }
+
+    #[test]
+    fn more_than_128_candidates_are_scored_fairly_across_projects() {
+        let mut values = (0..140)
+            .map(|index| input("early-project", &format!("task-{index:03}")))
+            .collect::<Vec<_>>();
+        let mut late = input("zz-late-project", "highest");
+        late.task_priority = Some(100);
+        values.push(late);
+        let set = build_candidate_set(values);
+        let scored = score_candidates(set.eligible);
+        assert_eq!(scored.len(), 141);
+        assert_eq!(scored[0].candidate.input.project_id, "zz-late-project");
+        assert!(scored
+            .iter()
+            .any(|candidate| candidate.candidate.input.project_id == "early-project"));
+    }
+
+    #[test]
+    fn rank_explanations_use_actual_rank_and_score_difference() {
+        let mut second = input("b", "task");
+        second.project_priority = 0;
+        let scored =
+            score_candidates(build_candidate_set(vec![input("a", "task"), second]).eligible);
+        let first = to_recommendation(&scored[0], 1, scored[0].score);
+        let alternative = to_recommendation(&scored[1], 2, scored[0].score);
+        assert!(first.explanation.contains("Ranked first"));
+        assert!(alternative.explanation.contains("Ranked #2"));
+        assert!(!alternative.explanation.starts_with("Ranked first"));
+    }
+
+    #[test]
+    fn unknown_ci_audit_human_external_actors_fail_closed_to_attention() {
+        let mut values = Vec::new();
+        for actor in [
+            Some("HUMAN"),
+            Some("CI"),
+            Some("GPT_AUDIT"),
+            Some("EXTERNAL"),
+            None,
+        ] {
+            let mut value = input("project", actor.unwrap_or("unknown"));
+            value.required_actor = actor.map(str::to_string);
+            values.push(value);
+        }
+        let set = build_candidate_set(values);
+        assert!(set.eligible.is_empty());
+        assert_eq!(set.attention.len(), 5);
+    }
+
+    #[test]
+    fn snapshot_persists_truthful_first_and_unchanged_comparison() {
+        let db_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        fs::write(
+            project_dir.path().join("TASKS.md"),
+            "# Work\n- [ ] TASK-1 — Build\n  Owner: Codex\n",
+        )
+        .unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into(),
+                name: Some("Local".into()),
+            },
+        )
+        .unwrap();
+        let first = snapshot(&database).unwrap();
+        let second = snapshot(&database).unwrap();
+        assert_eq!(first.comparison.state, "UNAVAILABLE_FIRST_SNAPSHOT");
+        assert_eq!(second.comparison.state, "NO_COMPARABLE_CHANGE");
+    }
+
+    #[test]
+    fn missing_and_malformed_root_tasks_fail_closed() {
+        let db_dir = tempdir().unwrap();
+        let missing_dir = tempdir().unwrap();
+        let malformed_dir = tempdir().unwrap();
+        fs::write(malformed_dir.path().join("TASKS.md"), [0xff, 0xfe, 0xfd]).unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: missing_dir.path().to_string_lossy().into(),
+                name: Some("Missing root".into()),
+            },
+        )
+        .unwrap();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: malformed_dir.path().to_string_lossy().into(),
+                name: Some("Malformed root".into()),
+            },
+        )
+        .unwrap();
+        let result = snapshot(&database).unwrap();
+        assert!(result.recommended.is_none());
+        assert!(result.unavailable_inputs.iter().any(
+            |value| value.contains("Missing root") && value.contains("TASKS.md is unavailable")
+        ));
+        assert!(result
+            .unavailable_inputs
+            .iter()
+            .any(|value| value.contains("Malformed root")
+                && value.contains("contains invalid UTF-8")));
     }
 }

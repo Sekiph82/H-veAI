@@ -115,6 +115,8 @@ export type WorkQueueItem = { id: string; projectId: string; projectName: string
 export type ActivityItem = { id: string; projectId: string; projectName: string; kind: string; event: string; state: string | null; actor: string | null; occurredAt: string };
 export type BriefFact = { label: string; value: string; source: string; provenance: { sourceClass: string; projectId: string | null; sourcePath: string | null; evidenceType: string | null; evidenceId: string | null } };
 export type M19Recommendation = {
+  rank: number;
+  scoreDifferenceFromTop: number;
   projectId: string;
   projectName: string;
   taskId: string;
@@ -131,6 +133,8 @@ export type M19Recommendation = {
   uncertainty: string[];
   explanation: string;
 };
+export type M19Comparison = { state: string; previousGeneratedAt: string | null; changed: string[] };
+export type M19ActorReadiness = { actor: string; state: string; available: boolean; evidence: string };
 export type M19Snapshot = {
   generatedAt: string;
   activeProjects: number;
@@ -140,6 +144,8 @@ export type M19Snapshot = {
   attention: Array<{ projectId: string; projectName: string; taskId: string | null; title: string; category: string; detail: string; evidence: string[] }>;
   facts: Array<{ label: string; value: string; source: string; freshness: string }>;
   unavailableInputs: string[];
+  comparison: M19Comparison;
+  actorReadiness: M19ActorReadiness[];
 };
 export type CommandCenterSnapshot = {
   generatedAt: string;
@@ -148,7 +154,7 @@ export type CommandCenterSnapshot = {
   attention: AttentionItem[];
   workQueue: WorkQueueItem[];
   recentActivity: ActivityItem[];
-  engineeringBrief: { facts: BriefFact[]; recommendation: string | null };
+  engineeringBrief: { facts: BriefFact[]; recommendation: string | null; m19?: M19Snapshot; changesSinceLast?: M19Comparison | null; attention?: M19Snapshot['attention']; unavailableInputs?: string[]; actorReadiness?: M19ActorReadiness[] };
   m19?: M19Snapshot;
   warnings: string[];
 };
@@ -173,7 +179,7 @@ export function registryFallback(records: ProjectRecord[]): CommandCenterSnapsho
     canonicalTaskSource: null, currentTask: null, currentState: null, currentMilestone: null, lastAction: null, nextAction: null, requiredActor: null, blockers: [], allowedActors: [],
     totalTasks: null, activeTasks: null, completedTasks: null, progressPercent: null, progressScope: null, authoritySource: "UNAVAILABLE", provenance: [], reconciliationState: "NEEDS_RECONCILIATION", warnings: ["Live Command Center snapshot is unavailable; showing Registry identity only."], refreshStatus: "UNAVAILABLE", refreshAt: null, refreshError: null,
   }));
-  return { generatedAt: new Date().toISOString(), projects, kpis: { projects: records.length, activeTasks: null, needsAttention: null, running: null, completedTasks: null, healthy: 0, healthDetail: `${records.length} registered`, authorityDetail: "Task evidence unavailable" }, attention: [], workQueue: [], recentActivity: [], engineeringBrief: { facts: [], recommendation: null }, warnings: ["Live Command Center snapshot is unavailable; showing Registry identity only."] };
+  return { generatedAt: new Date().toISOString(), projects, kpis: { projects: records.length, activeTasks: null, needsAttention: null, running: null, completedTasks: null, healthy: 0, healthDetail: `${records.length} registered`, authorityDetail: "Task evidence unavailable" }, attention: [], workQueue: [], recentActivity: [], engineeringBrief: { facts: [], recommendation: null, attention: [], unavailableInputs: [], actorReadiness: [], changesSinceLast: null }, warnings: ["Live Command Center snapshot is unavailable; showing Registry identity only."] };
 }
 
 export function previewSnapshot(): CommandCenterSnapshot {
@@ -182,7 +188,7 @@ export function previewSnapshot(): CommandCenterSnapshot {
     projects: [],
     kpis: { projects: 0, activeTasks: null, needsAttention: null, running: null, completedTasks: null, healthy: 0, healthDetail: "Native data unavailable", authorityDetail: "Native data unavailable" },
     attention: [], workQueue: [], recentActivity: [],
-    engineeringBrief: { facts: [], recommendation: null },
+    engineeringBrief: { facts: [], recommendation: null, attention: [], unavailableInputs: [], actorReadiness: [], changesSinceLast: null },
     warnings: ["Browser preview does not have access to the native Project Registry or local task evidence."],
   };
 }

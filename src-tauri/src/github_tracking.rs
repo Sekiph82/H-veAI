@@ -106,7 +106,7 @@ pub struct RemoteTrackingEvent {
     pub commit_sha: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteTaskRow {
     pub id: String,
@@ -114,6 +114,26 @@ pub struct RemoteTaskRow {
     pub status: String,
     pub source_path: String,
     pub source_line: usize,
+    #[serde(default)]
+    pub required_actor: Option<String>,
+    #[serde(default)]
+    pub dependencies: Vec<String>,
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    #[serde(default)]
+    pub owner_gate: Option<String>,
+    #[serde(default)]
+    pub external_wait: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub content_hash: Option<String>,
+    #[serde(default = "default_remote_metadata_complete")]
+    pub metadata_complete: bool,
+}
+
+fn default_remote_metadata_complete() -> bool {
+    false
 }
 
 pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
@@ -205,25 +225,17 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                 params![format!("{project_id}:repository"), project_id, format!("https://github.com/{repository}.git"), owner, repo, branch, now],
             ).map_err(db_error)?;
         } else {
-            let previous_branch: Option<String> = transaction
-                .query_row(
-                    "SELECT default_branch FROM repositories WHERE project_id=?1 LIMIT 1",
-                    [&project_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(db_error)?;
             transaction
                 .execute(
                     // Seed metadata is migration/bootstrap input only. Never
                     // reactivate or rewrite the user-owned Registry identity.
-                    "UPDATE projects SET default_branch=COALESCE(default_branch, ?2), task_source_policy=?3, updated_at=?4 WHERE id=?1",
+                    "UPDATE projects SET default_branch=COALESCE(default_branch, ?2), task_source_policy=COALESCE(task_source_policy, ?3), updated_at=?4 WHERE id=?1",
                     params![project_id, branch, GITHUB_TASKS_ONLY_POLICY, now],
                 )
                 .map_err(db_error)?;
             let repository_updated = transaction
                 .execute(
-                    "UPDATE repositories SET remote_url=?2, github_owner=?3, github_repo=?4, default_branch=?5, is_git_repository=1, updated_at=?6 WHERE project_id=?1",
+                    "UPDATE repositories SET remote_url=COALESCE(remote_url, ?2), github_owner=COALESCE(github_owner, ?3), github_repo=COALESCE(github_repo, ?4), default_branch=COALESCE(default_branch, ?5), updated_at=?6 WHERE project_id=?1",
                     params![project_id, format!("https://github.com/{repository}.git"), owner, repo, branch, now],
                 )
                 .map_err(db_error)?;
@@ -232,14 +244,6 @@ pub fn ensure_portfolio(database: &DatabaseState) -> Result<(), String> {
                     .execute(
                         "INSERT INTO repositories (id,project_id,remote_url,github_owner,github_repo,default_branch,created_at,updated_at,is_git_repository) VALUES (?1,?2,?3,?4,?5,?6,?7,?7,1)",
                         params![format!("{project_id}:repository"), project_id, format!("https://github.com/{repository}.git"), owner, repo, branch, now],
-                    )
-                    .map_err(db_error)?;
-            }
-            if previous_branch.as_deref() != Some(branch.as_str()) {
-                transaction
-                    .execute(
-                        "DELETE FROM github_sync_state WHERE project_id=?1 AND resource_kind=?2",
-                        params![project_id, REMOTE_TASKS_RESOURCE_KIND],
                     )
                     .map_err(db_error)?;
             }
@@ -784,6 +788,96 @@ fn task_row(line: &str) -> Option<(char, String, String)> {
     Some((status, id, title))
 }
 
+#[derive(Debug, Default)]
+struct RemoteTaskMetadata {
+    required_actor: Option<String>,
+    dependencies: Vec<String>,
+    blockers: Vec<String>,
+    owner_gate: Option<String>,
+    external_wait: Option<String>,
+    priority: Option<i64>,
+    complete: bool,
+}
+
+fn remote_task_metadata(lines: &[&str], start: usize, end: usize) -> RemoteTaskMetadata {
+    let mut metadata = RemoteTaskMetadata {
+        complete: true,
+        ..Default::default()
+    };
+    let mut active_label: Option<String> = None;
+    for raw in lines.iter().skip(start + 1).take(end.saturating_sub(start + 1)) {
+        let trimmed = raw.trim();
+        if trimmed.starts_with('#') || task_row(trimmed).is_some() {
+            break;
+        }
+        let indented = raw.chars().next().is_some_and(char::is_whitespace);
+        let value = trimmed.trim_start_matches('-').trim();
+        if let Some((label, content)) = value.split_once(':') {
+            let label = label.trim().to_ascii_lowercase();
+            let content = content.trim().trim_matches('`').to_string();
+            if content.is_empty() {
+                active_label = Some(label);
+                continue;
+            }
+            active_label = None;
+            remote_add_metadata(&mut metadata, &label, content);
+        } else if indented && active_label.is_some() && !value.is_empty() {
+            remote_add_metadata(
+                &mut metadata,
+                active_label.as_deref().unwrap_or_default(),
+                value.to_string(),
+            );
+        } else if !indented {
+            active_label = None;
+        }
+    }
+    metadata
+}
+
+fn remote_add_metadata(metadata: &mut RemoteTaskMetadata, label: &str, content: String) {
+    match label {
+        "owner" | "actor" | "required actor" => {
+            metadata.required_actor = normalize_remote_actor(&content);
+            if metadata.required_actor.is_none() {
+                metadata.complete = false;
+            }
+        }
+        "depends on" | "dependency" | "dependencies" => {
+            metadata.dependencies.extend(split_remote_values(&content));
+        }
+        "blocker" | "blockers" | "blocked by" => {
+            metadata.blockers.extend(split_remote_values(&content));
+        }
+        "owner gate" | "owner decision" | "decision gate" | "gate" => {
+            metadata.owner_gate = Some(content);
+        }
+        "waiting for" | "external" | "external wait" => {
+            metadata.external_wait = Some(content);
+        }
+        "priority" | "task priority" => match content.parse::<i64>() {
+            Ok(value) => metadata.priority = Some(value.clamp(-100, 100)),
+            Err(_) => metadata.complete = false,
+        },
+        _ => {}
+    }
+}
+
+fn normalize_remote_actor(value: &str) -> Option<String> {
+    ["Human", "Codex", "Claude", "GPT Audit", "CI", "External"]
+        .iter()
+        .find(|actor| actor.eq_ignore_ascii_case(value.trim()))
+        .map(|actor| (*actor).into())
+}
+
+fn split_remote_values(value: &str) -> Vec<String> {
+    value
+        .split([',', ';'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"))
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn parse_root_tasks(
     raw: &RootTasksRemote,
     repository: &str,
@@ -829,7 +923,14 @@ fn parse_root_tasks(
     let mut completed = 0_u64;
     let mut last_completed = None;
     let mut task_rows = Vec::new();
-    for (line_index, line) in raw.tasks.lines().enumerate() {
+    let lines = raw.tasks.lines().collect::<Vec<_>>();
+    let task_positions = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| task_row(line).map(|_| index))
+        .collect::<Vec<_>>();
+    for (position, line_index) in task_positions.iter().enumerate() {
+        let line = lines[*line_index];
         if let Some((status, id, title)) = task_row(line) {
             total += 1;
             if matches!(status, 'x' | 'X') {
@@ -843,12 +944,28 @@ fn parse_root_tasks(
                     '!' => "BLOCKED",
                     _ => "BACKLOG",
                 };
+                let metadata = remote_task_metadata(
+                    &lines,
+                    *line_index,
+                    task_positions
+                        .get(position + 1)
+                        .copied()
+                        .unwrap_or(lines.len()),
+                );
                 task_rows.push(RemoteTaskRow {
                     id,
                     title,
                     status: normalized_status.into(),
                     source_path: "TASKS.md".into(),
-                    source_line: line_index + 1,
+                    source_line: *line_index + 1,
+                    required_actor: metadata.required_actor,
+                    dependencies: metadata.dependencies,
+                    blockers: metadata.blockers,
+                    owner_gate: metadata.owner_gate,
+                    external_wait: metadata.external_wait,
+                    priority: metadata.priority,
+                    content_hash: Some(raw.tasks_blob_sha.clone()),
+                    metadata_complete: metadata.complete,
                 });
             }
         }
@@ -1295,14 +1412,14 @@ fn emit_update(app_handle: &tauri::AppHandle, project_id: &str, snapshot: &Remot
 mod tests {
     use super::*;
     use crate::db::DatabaseState;
-    use crate::projects::{register_project, RegisterProjectRequest};
+    use crate::projects::{archive_project, register_project, remove_project, RegisterProjectRequest};
     use tempfile::tempdir;
 
     #[test]
     fn root_tasks_parser_materializes_current_state_and_exact_counts() {
         let raw = RootTasksRemote {
             head: "0123456789012345678901234567890123456789".into(),
-            tasks: "# Demo\n\n## Project Status\n- Current Milestone: M2\n- Current Sprint: M2-S1\n- Current Task: TASK-2 — Current work\n- Current Task Status: IN_PROGRESS\n- Next Task/Action: TASK-3 — Next work\n- Required Actor: CODEX\n\n## Tasks\n- [x] TASK-1 — Done\n- [~] TASK-2 — Current work\n- [ ] TASK-3 — Next work\n".into(),
+            tasks: "# Demo\n\n## Project Status\n- Current Milestone: M2\n- Current Sprint: M2-S1\n- Current Task: TASK-2 — Current work\n- Current Task Status: IN_PROGRESS\n- Next Task/Action: TASK-3 — Next work\n- Required Actor: CODEX\n\n## Tasks\n- [x] TASK-1 — Done\n  Owner: CODEX\n- [~] TASK-2 — Current work\n  Owner: CLAUDE\n  Depends on: TASK-1\n  Priority: 7\n- [ ] TASK-3 — Next work\n  Owner: HUMAN\n  Waiting for: approval\n".into(),
             tasks_blob_sha: "sha256:test".into(),
             latest_commit_message: Some("update tracker".into()),
             latest_commit_author: Some("owner".into()),
@@ -1318,11 +1435,39 @@ mod tests {
         assert_eq!(snapshot.task_rows[1].id, "TASK-2");
         assert_eq!(snapshot.task_rows[1].status, "IN_PROGRESS");
         assert_eq!(snapshot.task_rows[1].source_path, "TASKS.md");
+        assert_eq!(snapshot.task_rows[1].required_actor.as_deref(), Some("Claude"));
+        assert_eq!(snapshot.task_rows[1].dependencies, vec!["TASK-1"]);
+        assert_eq!(snapshot.task_rows[1].priority, Some(7));
+        assert_eq!(snapshot.task_rows[2].required_actor.as_deref(), Some("Human"));
+        assert_eq!(snapshot.task_rows[2].external_wait.as_deref(), Some("approval"));
+        assert!(snapshot.task_rows.iter().all(|row| row.metadata_complete));
         assert!((snapshot.progress_percent.unwrap() - 33.333333333333336).abs() < 0.0001);
         assert_eq!(
             snapshot.latest_commit_message.as_deref(),
             Some("update tracker")
         );
+    }
+
+    #[test]
+    fn remote_task_metadata_is_per_task_and_malformed_fails_closed() {
+        let raw = RootTasksRemote {
+            head: "0123456789012345678901234567890123456789".into(),
+            tasks: "# Remote\n- Required Actor: CODEX\n\n## Tasks\n- [ ] TASK-A — prerequisite\n  Owner: CODEX\n- [ ] TASK-B — blocked dependent\n  Owner: CLAUDE\n  Depends on: TASK-A\n  Blocker: waiting on TASK-A\n  Waiting for: review\n- [ ] TASK-C — malformed metadata\n  Owner: CODEX\n  Priority: high\n".into(),
+            tasks_blob_sha: "sha256:remote".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let snapshot = parse_root_tasks(&raw, "Sekiph82/Bulk-Edit", "main", "now".into()).unwrap();
+        assert_eq!(snapshot.task_rows.len(), 3);
+        assert_eq!(snapshot.task_rows[0].required_actor.as_deref(), Some("Codex"));
+        assert_eq!(snapshot.task_rows[1].required_actor.as_deref(), Some("Claude"));
+        assert_eq!(snapshot.task_rows[1].dependencies, vec!["TASK-A"]);
+        assert_eq!(snapshot.task_rows[1].blockers, vec!["waiting on TASK-A"]);
+        assert_eq!(snapshot.task_rows[1].external_wait.as_deref(), Some("review"));
+        assert_eq!(snapshot.task_rows[2].required_actor.as_deref(), Some("Codex"));
+        assert!(!snapshot.task_rows[2].metadata_complete);
+        assert!(snapshot.task_rows.iter().all(|row| row.content_hash.as_deref() == Some("sha256:remote")));
     }
 
     #[test]
@@ -1387,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_portfolio_migrates_formulab_branch_without_duplicate_or_cache_reuse() {
+    fn ensure_portfolio_preserves_existing_formulab_identity_and_cache() {
         let database_dir = tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         let local_dir = tempdir().unwrap();
@@ -1476,11 +1621,11 @@ mod tests {
                 .unwrap()
                 .default_branch
                 .as_deref(),
-            Some("main")
+            Some(old_branch)
         );
         assert_eq!(formulab[0].normalized_path, persisted.normalized_path);
         assert_eq!(formulab[0].original_path, persisted.original_path);
-        assert!(cached_snapshot(&database, formulab[0]).unwrap().is_none());
+        assert!(cached_snapshot(&database, formulab[0]).unwrap().is_some());
 
         let other_repositories = [
             "H-veAI",
@@ -1878,5 +2023,46 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn ensure_portfolio_preserves_seed_settings_identity_archive_and_remove() {
+        let database_dir = tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        ensure_portfolio(&database).unwrap();
+        let connection = database.open_connection().unwrap();
+        connection
+            .execute(
+                "UPDATE projects SET task_source_policy='REGISTRY_CUSTOM', default_branch='release' WHERE id='github:Sekiph82/H-veAI@main'",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE repositories SET remote_url='https://example.invalid/owner/project.git', github_owner='owner', github_repo='project', default_branch='release', is_git_repository=0 WHERE project_id='github:Sekiph82/H-veAI@main'",
+                [],
+            )
+            .unwrap();
+        ensure_portfolio(&database).unwrap();
+        let preserved = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        assert_eq!(preserved.task_source_policy.as_deref(), Some("REGISTRY_CUSTOM"));
+        assert_eq!(preserved.repository.as_ref().and_then(|repo| repo.github_owner.as_deref()), Some("owner"));
+        assert_eq!(preserved.repository.as_ref().and_then(|repo| repo.github_repo.as_deref()), Some("project"));
+        assert_eq!(preserved.repository.as_ref().and_then(|repo| repo.default_branch.as_deref()), Some("release"));
+        assert!(!preserved.repository.as_ref().unwrap().is_git_repository);
+
+        archive_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        ensure_portfolio(&database).unwrap();
+        assert_eq!(crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap().status, "ARCHIVED");
+
+        remove_project(&database, "github:Sekiph82/Bulk-Edit@main").unwrap();
+        ensure_portfolio(&database).unwrap();
+        assert!(crate::projects::fetch_project(&database, "github:Sekiph82/Bulk-Edit@main").is_err());
+        let exclusion: i64 = database.open_connection().unwrap().query_row(
+            "SELECT COUNT(*) FROM github_project_exclusions WHERE lower(repository)=lower('Sekiph82/Bulk-Edit') AND branch='main'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(exclusion, 1);
     }
 }

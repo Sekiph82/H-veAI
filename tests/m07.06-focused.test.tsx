@@ -463,8 +463,27 @@ describe("M07.07 live-Registry / route-race boundary", () => {
     fireEvent.submit(screen.getByRole("dialog").querySelector("form") as HTMLFormElement);
     await waitFor(() => expect(liveRecords).toHaveLength(3));
     expect(invoke.mock.calls.filter(([command]) => command === "hiveai_project_register")).toHaveLength(1);
-    expect(screen.getByRole("status")).toHaveTextContent("was registered and is now visible in Projects");
+    expect(screen.getByRole("status")).toHaveTextContent("was registered locally; GitHub identity is unavailable or not applicable");
     expect(screen.getByRole("heading", { name: "fmcg-erp-system" })).toBeInTheDocument();
+  });
+
+  it("distinguishes_github_linked_registration_success", async () => {
+    const githubRecord = { ...records[2], repository: { id: "repo-3", isGitRepository: true, repositoryRoot: "C:\\Projects\\fmcg-erp-system", currentBranch: "main", headSha: "abc", preferredRemoteUrl: "https://github.com/example/repo.git", defaultBranch: "main", githubOwner: "example", githubRepo: "repo", remotes: [] } };
+    liveRecords = records.slice(0, 2);
+    invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
+      if (command === "hiveai_project_register") {
+        liveRecords = [...liveRecords, githubRecord];
+        return Promise.resolve(githubRecord);
+      }
+      return defaultInvoke(command, args);
+    });
+    renderLive("/projects");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add project" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+    fireEvent.change(screen.getByLabelText("Folder path"), { target: { value: "C:\\Projects\\fmcg-erp-system" } });
+    fireEvent.change(screen.getByLabelText(/Display name/), { target: { value: "fmcg-erp-system" } });
+    fireEvent.click(screen.getByRole("button", { name: /Register folder/ }));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("with GitHub identity example/repo"));
   });
 
   it("keeps_add_project_open_and_shows_bounded_native_failure", async () => {
