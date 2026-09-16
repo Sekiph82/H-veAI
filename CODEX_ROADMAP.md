@@ -8,7 +8,7 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 
 ## Current status
 
-- M00-M17: PASS/CLOSED.
+- M00-M18: PASS/CLOSED.
 - M09 Task Intelligence Parser: PASS/CLOSED after the independent M09D final strict audit.
 - Pre-M10 Native UX Hotfix X01/X02: PASS/CLOSED after independent source audit plus user native acceptance.
 - M10 original strict audit: historical FAIL with 5 MAJOR findings.
@@ -18,8 +18,8 @@ User-facing roadmap denominator remains **20**. `M00` is the historical rebuild/
 - M12 = PASS/CLOSED, including M12A R26 and M12B route remediation, on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E are PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E are PASS/CLOSED on accepted strict and native evidence. M15 is PASS/CLOSED on accepted strict and user native evidence. M16 is PASS/CLOSED after independent strict audit and final owner-native acceptance. M17 V01 through V04 remain historical strict-audit CHANGES_REQUIRED records; V05 passed independent source re-audit and owner-native acceptance, so M17 is PASS/CLOSED.
 - Pre-M18 X03 readiness-route truth hotfix and X04 TASKS-only authority hotfix are PASS/CLOSED after independent source audits and owner-native acceptance. They do not change the numbered roadmap denominator.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository is retained for preservation and has not been deleted.
-- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. M17 is PASS/CLOSED. M18 V03 independent strict audit = CHANGES_REQUIRED with 0 BLOCKER / 5 MAJOR; M18 remains ACTIVE and V04 strict remediation now also includes owner-directed M18.10 Prompt Engine/Agent Sessions UX consolidation under `M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`; M19-M20 remain planned/blocked by dependency order.
-- Strict completed progress is **18/20 = 90%**. M18 remains the active numbered milestone; M19-M20 remain blocked.
+- M16T V11 Codex-only audit provider structured-output subset and readiness diagnostic parity remediation is validated complete. M17 is PASS/CLOSED. M18 V07 independent strict source re-audit = PASS and final owner-native multi-project GitHub re-acceptance = PASS; `F-M18-V06-NATIVE-001` is closed and bounded GitHub panel failures no longer collapse the full application surface. M18 is PASS/CLOSED. M19 is ACTIVE/READY; M20 remains planned/blocked by dependency order.
+- Strict completed progress is **19/20 = 95%**. M19 is the active numbered milestone; M20 remains blocked.
 
 ---
 
@@ -544,7 +544,7 @@ Packages:
 
 Exit: H!veAI understands remote GitHub state without silently overwriting local work, and prompt creation/session execution form one coherent owner-accepted workspace without weakening M14/M15 provenance or provider safety.
 
-Status: ACTIVE / V03 CHANGES_REQUIRED / V04 STRICT REMEDIATION + OWNER UX ADDENDUM READY. The independent V03 strict audit found 0 BLOCKER / 5 MAJOR findings. V04 is limited to F-M18-V03-001 through F-M18-V03-005 plus M18.10.01 through M18.10.05 and must stop for independent re-audit before required owner-native acceptance. Execute only `docs/H!veAI/prompts/M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`. Canonical tracker files remain read-only for Codex. M19 remains blocked.
+Status: PASS/CLOSED after the V07 independent strict source re-audit and final owner-native multi-project GitHub re-acceptance. `F-M18-V06-NATIVE-001` is closed at source/test-contract and native levels. GitHub data may render normally or fail as a bounded panel-local unavailable/error state without collapsing the full React/WebView surface. M19 is unblocked and ACTIVE/READY.
 
 ---
 
@@ -564,7 +564,7 @@ Packages:
 
 Exit: H!veAI can recommend what to do next and explain why.
 
-Status: PLANNED/BLOCKED until M18.
+Status: ACTIVE / READY after M18 PASS/CLOSED. Execute M19 as one bounded milestone under normal builder, regression, publication, and independent-audit governance. M20 remains blocked until M19 closes.
 
 ---
 
