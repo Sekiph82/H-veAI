@@ -20,7 +20,8 @@ import { useProjectRegistry } from "./registryContext";
 
 const count = (value: number | null | undefined) => value == null ? "-" : String(value);
 
-export function semanticAttentionKey(item: { projectId?: string; taskId?: string | null; category?: string; state?: string; title?: string; detail?: string; evidence?: string[] }) {
+export function semanticAttentionKey(item: { projectId?: string; taskId?: string | null; category?: string; state?: string; title?: string; detail?: string; evidence?: string[]; issueKey?: string }) {
+  if (item.issueKey?.trim()) return item.issueKey.trim().toLowerCase();
   const signal = `${item.category ?? ""} ${item.state ?? ""} ${item.detail ?? ""}`.toLowerCase();
   const family = item.evidence?.length || item.detail?.trim() ? "evidence" : signal.includes("rate limit") || signal.includes("github 403") || signal.includes("github 429")
     ? "rate_limit" : signal.includes("blocked") || signal.includes("blocker") || signal.includes("dependency")

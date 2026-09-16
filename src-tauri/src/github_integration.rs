@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-#[cfg(not(test))]
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
-#[cfg(not(test))]
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 #[cfg(not(test))]
 use std::io::Read;
@@ -21,7 +19,6 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(not(test))]
 use std::thread;
 use std::time::Duration;
-#[cfg(not(test))]
 use std::time::Instant;
 
 const CACHE_SCHEMA_VERSION: u32 = 2;
@@ -46,39 +43,121 @@ const MAX_BODY_CHARS: usize = 512;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const CACHE_MAX_AGE_SECONDS: i64 = 30;
 const PROCESS_REQUESTS_PER_HOUR: usize = 48;
-const COALESCE_WAIT_ATTEMPTS: usize = 20;
+const PRIMARY_REQUESTS_PER_HOUR: usize = 40;
+const OPTIONAL_REQUESTS_PER_HOUR: usize = PROCESS_REQUESTS_PER_HOUR - PRIMARY_REQUESTS_PER_HOUR;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const HTTP_STATUS_MARKER: &str = "__HIVEAI_HTTP_STATUS__";
-#[cfg(not(test))]
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(90);
-#[cfg(not(test))]
 static PORTFOLIO_RATE_LIMIT_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-#[cfg(not(test))]
 static PORTFOLIO_REQUEST_GOVERNOR: OnceLock<Mutex<ProcessRequestGovernor>> = OnceLock::new();
+#[cfg(test)]
+static TEST_GITHUB_COORDINATOR: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[cfg(not(test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcquisitionIntent {
+    Idle,
+    Selected,
+    Navigation,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortfolioAcquisitionPlan {
+    project_count: usize,
+    primary_calls: usize,
+    optional_calls: usize,
+    remote_tracking_calls: usize,
+}
+
+fn portfolio_acquisition_plan(
+    project_count: usize,
+    intent: AcquisitionIntent,
+) -> PortfolioAcquisitionPlan {
+    let projects = project_count.max(1);
+    match intent {
+        AcquisitionIntent::Idle => PortfolioAcquisitionPlan {
+            project_count: projects,
+            primary_calls: 0,
+            optional_calls: 0,
+            remote_tracking_calls: projects,
+        },
+        AcquisitionIntent::Selected | AcquisitionIntent::Manual => PortfolioAcquisitionPlan {
+            project_count: projects,
+            primary_calls: PRIMARY_RESOURCE_KINDS.len(),
+            optional_calls: OPTIONAL_REQUESTS_PER_HOUR,
+            remote_tracking_calls: 1,
+        },
+        AcquisitionIntent::Navigation => {
+            let per_project =
+                (PRIMARY_REQUESTS_PER_HOUR / projects).clamp(1, PRIMARY_RESOURCE_KINDS.len());
+            PortfolioAcquisitionPlan {
+                project_count: projects,
+                primary_calls: per_project * projects,
+                optional_calls: OPTIONAL_REQUESTS_PER_HOUR,
+                remote_tracking_calls: projects,
+            }
+        }
+    }
+}
+
+/// Round-robin schedule used by portfolio navigation/background orchestration.
+/// It is deterministic, bounded by the primary quota, and rotates the first
+/// resource kind per project so the first project cannot monopolize the window.
+fn fair_primary_schedule(project_count: usize) -> Vec<(usize, &'static str)> {
+    let plan = portfolio_acquisition_plan(project_count, AcquisitionIntent::Navigation);
+    let per_project = plan.primary_calls / plan.project_count;
+    let mut schedule = Vec::with_capacity(plan.primary_calls);
+    for round in 0..per_project {
+        for project_index in 0..plan.project_count {
+            let kind =
+                PRIMARY_RESOURCE_KINDS[(project_index + round) % PRIMARY_RESOURCE_KINDS.len()];
+            schedule.push((project_index, kind));
+        }
+    }
+    schedule
+}
+
 #[derive(Debug)]
 struct ProcessRequestGovernor {
     window_started: Instant,
     requests: usize,
+    primary_requests: usize,
+    optional_requests: usize,
     in_flight: HashSet<u64>,
+    completions: HashMap<u64, std::sync::Arc<InFlightResult>>,
 }
 
-#[cfg(not(test))]
 impl Default for ProcessRequestGovernor {
     fn default() -> Self {
         Self {
             window_started: Instant::now(),
             requests: 0,
+            primary_requests: 0,
+            optional_requests: 0,
             in_flight: HashSet::new(),
+            completions: HashMap::new(),
         }
     }
 }
 
-#[cfg(not(test))]
+#[derive(Debug)]
+struct InFlightResult {
+    result: Mutex<Option<ResourceResult>>,
+    completed: std::sync::Condvar,
+}
+
+impl InFlightResult {
+    fn new() -> Self {
+        Self {
+            result: Mutex::new(None),
+            completed: std::sync::Condvar::new(),
+        }
+    }
+}
+
 enum RequestAdmission {
-    Owner(u64),
-    Coalesced,
+    Owner(u64, std::sync::Arc<InFlightResult>),
+    Coalesced(std::sync::Arc<InFlightResult>),
     BudgetExhausted,
 }
 
@@ -415,8 +494,9 @@ struct RequestBudget {
 
 impl RequestBudget {
     fn new() -> Self {
+        let plan = portfolio_acquisition_plan(1, AcquisitionIntent::Selected);
         Self {
-            remaining: MAX_SUBRESOURCE_REQUESTS,
+            remaining: plan.optional_calls,
             rate_limit_open: false,
         }
     }
@@ -663,6 +743,15 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
     now: &str,
     transport: &mut T,
 ) -> Vec<ResourceResult> {
+    #[cfg(test)]
+    let _test_path_guard = {
+        let guard = TEST_GITHUB_COORDINATOR
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test GitHub path mutex poisoned");
+        reset_process_request_state_for_test();
+        guard
+    };
     let repository_path = format!(
         "https://api.github.com/repos/{}/{}",
         identity.owner, identity.repo
@@ -722,13 +811,14 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 transport,
             )
         };
-        if resource.state == "RATE_LIMITED" {
+        if resource_is_rate_limited(&resource) {
             primary_circuit_open = true;
             open_portfolio_rate_limit_circuit();
         }
         resources.push(resource);
     }
     let mut budget = RequestBudget::new();
+    budget.rate_limit_open = primary_circuit_open;
     let selected_prs = parse_pull_requests(resource_value(&resources, RESOURCE_PULL_REQUESTS));
     for pr in selected_prs.iter().take(MAX_PR_ENRICHED) {
         let base = format!("{repository_path}/pulls/{}", pr.number);
@@ -878,7 +968,7 @@ fn acquire_enrichment<T: GitHubReadTransport>(
         let result = load_or_fetch(
             database, project, repository, branch, kind, url, now, transport,
         );
-        if result.state == "RATE_LIMITED" {
+        if resource_is_rate_limited(&result) {
             budget.rate_limit_open = true;
         }
         result
@@ -902,7 +992,7 @@ fn acquire_enrichment_text<T: GitHubReadTransport>(
         let result = load_or_fetch_text(
             database, project, repository, branch, kind, url, now, transport,
         );
-        if result.state == "RATE_LIMITED" {
+        if resource_is_rate_limited(&result) {
             budget.rate_limit_open = true;
         }
         result
@@ -922,7 +1012,14 @@ fn bounded_resource(kind: &str) -> ResourceResult {
     }
 }
 
-#[cfg(not(test))]
+fn resource_is_rate_limited(resource: &ResourceResult) -> bool {
+    resource.state == "RATE_LIMITED"
+        || resource
+            .error
+            .as_deref()
+            .is_some_and(|error| classify_failure(error) == "RATE_LIMITED")
+}
+
 fn portfolio_rate_limit_open() -> bool {
     let lock = PORTFOLIO_RATE_LIMIT_UNTIL.get_or_init(|| Mutex::new(None));
     let mut until = lock.lock().expect("rate limit circuit mutex poisoned");
@@ -936,22 +1033,12 @@ fn portfolio_rate_limit_open() -> bool {
     }
 }
 
-#[cfg(not(test))]
 fn open_portfolio_rate_limit_circuit() {
     let lock = PORTFOLIO_RATE_LIMIT_UNTIL.get_or_init(|| Mutex::new(None));
     *lock.lock().expect("rate limit circuit mutex poisoned") =
         Some(Instant::now() + RATE_LIMIT_BACKOFF);
 }
 
-#[cfg(test)]
-fn portfolio_rate_limit_open() -> bool {
-    false
-}
-
-#[cfg(test)]
-fn open_portfolio_rate_limit_circuit() {}
-
-#[cfg(not(test))]
 fn request_key(project_id: &str, repository: &str, branch: &str, kind: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     project_id.hash(&mut hasher);
@@ -961,38 +1048,68 @@ fn request_key(project_id: &str, repository: &str, branch: &str, kind: &str) -> 
     hasher.finish()
 }
 
-#[cfg(not(test))]
-fn admit_process_request(key: u64) -> RequestAdmission {
+#[cfg(test)]
+fn reset_process_request_state_for_test() {
+    if let Some(lock) = PORTFOLIO_REQUEST_GOVERNOR.get() {
+        *lock.lock().expect("request governor mutex poisoned") = ProcessRequestGovernor::default();
+    }
+    if let Some(lock) = PORTFOLIO_RATE_LIMIT_UNTIL.get() {
+        *lock.lock().expect("rate limit circuit mutex poisoned") = None;
+    }
+}
+
+fn admit_process_request(key: u64, optional: bool) -> RequestAdmission {
     let lock =
         PORTFOLIO_REQUEST_GOVERNOR.get_or_init(|| Mutex::new(ProcessRequestGovernor::default()));
     let mut governor = lock.lock().expect("request governor mutex poisoned");
     if governor.window_started.elapsed() >= Duration::from_secs(3600) {
         governor.window_started = Instant::now();
         governor.requests = 0;
+        governor.primary_requests = 0;
+        governor.optional_requests = 0;
         governor.in_flight.clear();
+        governor.completions.clear();
     }
-    if governor.in_flight.contains(&key) {
-        return RequestAdmission::Coalesced;
+    if let Some(completion) = governor.completions.get(&key) {
+        return RequestAdmission::Coalesced(std::sync::Arc::clone(completion));
     }
-    if governor.requests >= PROCESS_REQUESTS_PER_HOUR {
+    if optional {
+        if governor.optional_requests >= OPTIONAL_REQUESTS_PER_HOUR {
+            return RequestAdmission::BudgetExhausted;
+        }
+    } else if governor.primary_requests >= PRIMARY_REQUESTS_PER_HOUR {
         return RequestAdmission::BudgetExhausted;
     }
+    let completion = std::sync::Arc::new(InFlightResult::new());
     governor.requests += 1;
+    if optional {
+        governor.optional_requests += 1;
+    } else {
+        governor.primary_requests += 1;
+    }
     governor.in_flight.insert(key);
-    RequestAdmission::Owner(key)
+    governor
+        .completions
+        .insert(key, std::sync::Arc::clone(&completion));
+    RequestAdmission::Owner(key, completion)
 }
 
-#[cfg(not(test))]
-fn release_process_request(key: u64) {
+fn complete_process_request(
+    key: u64,
+    completion: &std::sync::Arc<InFlightResult>,
+    result: ResourceResult,
+) {
+    if let Ok(mut slot) = completion.result.lock() {
+        *slot = Some(result);
+        completion.completed.notify_all();
+    }
     if let Some(lock) = PORTFOLIO_REQUEST_GOVERNOR.get() {
-        lock.lock()
-            .expect("request governor mutex poisoned")
-            .in_flight
-            .remove(&key);
+        let mut governor = lock.lock().expect("request governor mutex poisoned");
+        governor.in_flight.remove(&key);
+        governor.completions.remove(&key);
     }
 }
 
-#[cfg(not(test))]
 fn guarded_resource<T: GitHubReadTransport>(
     database: &DatabaseState,
     project: &ProjectRecord,
@@ -1004,7 +1121,8 @@ fn guarded_resource<T: GitHubReadTransport>(
     request: impl FnOnce(&mut T) -> Result<Value, String>,
 ) -> ResourceResult {
     let key = request_key(&project.id, repository, branch, kind);
-    match admit_process_request(key) {
+    let optional = !PRIMARY_RESOURCE_KINDS.contains(&kind);
+    match admit_process_request(key, optional) {
         RequestAdmission::BudgetExhausted => stale_or_unavailable(
             database,
             project,
@@ -1013,63 +1131,79 @@ fn guarded_resource<T: GitHubReadTransport>(
             kind,
             "GITHUB_PROCESS_REQUEST_BUDGET_EXHAUSTED",
         ),
-        RequestAdmission::Coalesced => {
-            for _ in 0..COALESCE_WAIT_ATTEMPTS {
-                if let Ok(Some(cache)) = load_cache(database, &project.id, kind, repository, branch)
-                {
-                    return ResourceResult {
-                        kind: kind.into(),
-                        value: Some(cache.payload),
-                        state: "STALE".into(),
-                        fetched_at: Some(cache.fetched_at),
-                        last_known_good_at: Some(cache.last_known_good_at),
-                        error: Some("GITHUB_REQUEST_COALESCED".into()),
-                    };
+        RequestAdmission::Coalesced(completion) => {
+            let mut guard = completion
+                .result
+                .lock()
+                .expect("in-flight result mutex poisoned");
+            let deadline = Instant::now() + HTTP_TIMEOUT + Duration::from_secs(1);
+            while guard.is_none() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
                 }
-                thread::sleep(Duration::from_millis(5));
+                let (next, timed_out) = completion
+                    .completed
+                    .wait_timeout(guard, remaining)
+                    .expect("in-flight result condvar poisoned");
+                guard = next;
+                if timed_out.timed_out() {
+                    break;
+                }
             }
-            ResourceResult {
-                kind: kind.into(),
-                value: None,
-                state: "UNAVAILABLE".into(),
-                fetched_at: None,
-                last_known_good_at: None,
-                error: Some("GITHUB_REQUEST_COALESCED_NO_CACHE".into()),
-            }
+            guard.clone().unwrap_or_else(|| {
+                stale_or_unavailable(
+                    database,
+                    project,
+                    repository,
+                    branch,
+                    kind,
+                    "GITHUB_REQUEST_COALESCED_TIMEOUT",
+                )
+            })
         }
-        RequestAdmission::Owner(key) => {
-            let result = match request(transport) {
-                Ok(value) => {
-                    let cache = CacheEnvelope {
-                        schema_version: CACHE_SCHEMA_VERSION,
-                        resource_kind: kind.into(),
-                        repository: repository.into(),
-                        branch: branch.into(),
-                        fetched_at: now.into(),
-                        last_known_good_at: now.into(),
-                        payload: sanitize_value(&value, None),
-                    };
-                    let persist_error = persist_cache(database, &project.id, &cache).err();
-                    ResourceResult {
-                        kind: kind.into(),
-                        value: Some(cache.payload.clone()),
-                        state: "CURRENT".into(),
-                        fetched_at: Some(now.into()),
-                        last_known_good_at: Some(now.into()),
-                        error: persist_error,
+        RequestAdmission::Owner(key, completion) => {
+            let result =
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| request(transport)))
+                {
+                    Ok(Ok(value)) => {
+                        let cache = CacheEnvelope {
+                            schema_version: CACHE_SCHEMA_VERSION,
+                            resource_kind: kind.into(),
+                            repository: repository.into(),
+                            branch: branch.into(),
+                            fetched_at: now.into(),
+                            last_known_good_at: now.into(),
+                            payload: sanitize_value(&value, None),
+                        };
+                        let persist_error = persist_cache(database, &project.id, &cache).err();
+                        ResourceResult {
+                            kind: kind.into(),
+                            value: Some(cache.payload.clone()),
+                            state: "CURRENT".into(),
+                            fetched_at: Some(now.into()),
+                            last_known_good_at: Some(now.into()),
+                            error: persist_error,
+                        }
                     }
-                }
-                Err(error) => {
-                    stale_or_unavailable(database, project, repository, branch, kind, &error)
-                }
-            };
-            release_process_request(key);
+                    Ok(Err(error)) => {
+                        stale_or_unavailable(database, project, repository, branch, kind, &error)
+                    }
+                    Err(_) => stale_or_unavailable(
+                        database,
+                        project,
+                        repository,
+                        branch,
+                        kind,
+                        "GITHUB_REQUEST_PANICKED",
+                    ),
+                };
+            complete_process_request(key, &completion, result.clone());
             result
         }
     }
 }
 
-#[cfg(not(test))]
 fn stale_or_unavailable(
     database: &DatabaseState,
     project: &ProjectRecord,
@@ -1181,7 +1315,6 @@ fn load_or_fetch<T: GitHubReadTransport>(
             };
         }
     }
-    #[cfg(not(test))]
     return guarded_resource(
         database,
         project,
@@ -1192,47 +1325,6 @@ fn load_or_fetch<T: GitHubReadTransport>(
         transport,
         |transport| request_json(transport, url),
     );
-    #[cfg(test)]
-    match request_json(transport, url) {
-        Ok(value) => {
-            let cache = CacheEnvelope {
-                schema_version: CACHE_SCHEMA_VERSION,
-                resource_kind: kind.into(),
-                repository: repository.into(),
-                branch: branch.into(),
-                fetched_at: now.into(),
-                last_known_good_at: now.into(),
-                payload: sanitize_value(&value, None),
-            };
-            let persist_error = persist_cache(database, &project.id, &cache).err();
-            ResourceResult {
-                kind: kind.into(),
-                value: Some(cache.payload.clone()),
-                state: "CURRENT".into(),
-                fetched_at: Some(now.into()),
-                last_known_good_at: Some(now.into()),
-                error: persist_error,
-            }
-        }
-        Err(error) => match load_cache(database, &project.id, kind, repository, branch) {
-            Ok(Some(cache)) => ResourceResult {
-                kind: kind.into(),
-                value: Some(cache.payload),
-                state: classify_failure(&error),
-                fetched_at: Some(cache.fetched_at),
-                last_known_good_at: Some(cache.last_known_good_at),
-                error: Some(error),
-            },
-            _ => ResourceResult {
-                kind: kind.into(),
-                value: None,
-                state: classify_failure(&error),
-                fetched_at: None,
-                last_known_good_at: None,
-                error: Some(error),
-            },
-        },
-    }
 }
 
 fn load_or_fetch_text<T: GitHubReadTransport>(
@@ -1257,7 +1349,6 @@ fn load_or_fetch_text<T: GitHubReadTransport>(
             };
         }
     }
-    #[cfg(not(test))]
     return guarded_resource(
         database,
         project,
@@ -1279,56 +1370,6 @@ fn load_or_fetch_text<T: GitHubReadTransport>(
             })
         },
     );
-    #[cfg(test)]
-    match transport.get(url).and_then(|response| {
-        if (200..300).contains(&response.status) {
-            Ok(sanitize_value(&Value::String(response.body), None))
-        } else {
-            Err(format!(
-                "GITHUB_HTTP_REMOTE_UNAVAILABLE: HTTP {}",
-                response.status
-            ))
-        }
-    }) {
-        Ok(value) => {
-            let cache = CacheEnvelope {
-                schema_version: CACHE_SCHEMA_VERSION,
-                resource_kind: kind.into(),
-                repository: repository.into(),
-                branch: branch.into(),
-                fetched_at: now.into(),
-                last_known_good_at: now.into(),
-                payload: value.clone(),
-            };
-            let persist_error = persist_cache(database, &project.id, &cache).err();
-            ResourceResult {
-                kind: kind.into(),
-                value: Some(value),
-                state: "CURRENT".into(),
-                fetched_at: Some(now.into()),
-                last_known_good_at: Some(now.into()),
-                error: persist_error,
-            }
-        }
-        Err(error) => match load_cache(database, &project.id, kind, repository, branch) {
-            Ok(Some(cache)) => ResourceResult {
-                kind: kind.into(),
-                value: Some(cache.payload),
-                state: classify_failure(&error),
-                fetched_at: Some(cache.fetched_at),
-                last_known_good_at: Some(cache.last_known_good_at),
-                error: Some(sanitize_error(&error)),
-            },
-            _ => ResourceResult {
-                kind: kind.into(),
-                value: None,
-                state: classify_failure(&error),
-                fetched_at: None,
-                last_known_good_at: None,
-                error: Some(sanitize_error(&error)),
-            },
-        },
-    }
 }
 
 fn persist_cache(
@@ -2928,6 +2969,8 @@ mod tests {
             latest_commit_author: None,
             latest_commit_at: None,
             fetched_at: "2026-09-15T00:00:00Z".into(),
+            content_fetched_at: Some("2026-09-15T00:00:00Z".into()),
+            validated_at: Some("2026-09-15T00:00:00Z".into()),
             remote_health: "CURRENT".into(),
             error: None,
             recent_events: Vec::new(),
@@ -3106,29 +3149,28 @@ mod tests {
             snapshot.actions[0].jobs[0].steps[0].name.as_deref(),
             Some("compile")
         );
-        assert_eq!(
-            snapshot.actions[0].failed_log_summary.as_deref(),
-            Some("Job #56 build: compile failed")
-        );
-        assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 56);
+        assert_eq!(snapshot.actions[0].jobs_state, "CURRENT");
+        assert_eq!(snapshot.actions[0].logs_state, "UNAVAILABLE");
+        assert!(snapshot.actions[0].failed_log_evidence.is_empty());
         for expected in [
-            detail,
-            files,
-            reviews,
-            comments,
-            review_comments,
-            checks,
-            status,
-            jobs,
-            logs,
+            &detail,
+            &files,
+            &reviews,
+            &comments,
+            &review_comments,
+            &checks,
+            &status,
+            &jobs,
+            &logs,
         ] {
-            assert!(
-                transport
-                    .requests
-                    .iter()
-                    .any(|request| request == &expected),
-                "missing request {expected}"
-            );
+            if expected == &logs {
+                assert!(!transport.requests.iter().any(|request| request == expected));
+            } else {
+                assert!(
+                    transport.requests.iter().any(|request| request == expected),
+                    "missing request {expected}"
+                );
+            }
         }
         assert!(transport.requests.len() <= MAX_SUBRESOURCE_REQUESTS + 8);
     }
@@ -3510,6 +3552,230 @@ mod tests {
     }
 
     #[test]
+    fn cached_403_and_429_rate_limit_causes_stop_all_fanout() {
+        for (status, label) in [(403_u16, "403"), (429_u16, "429")] {
+            for cached in [false, true] {
+                let database_dir = tempfile::tempdir().unwrap();
+                let database =
+                    DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+                crate::github_tracking::ensure_portfolio(&database).unwrap();
+                let project =
+                    crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main")
+                        .unwrap();
+                let repository = "Sekiph82/H-veAI";
+                let first = "https://api.github.com/repos/Sekiph82/H-veAI";
+                if cached {
+                    persist_cache(
+                        &database,
+                        &project.id,
+                        &CacheEnvelope {
+                            schema_version: CACHE_SCHEMA_VERSION,
+                            resource_kind: RESOURCE_REPOSITORY.into(),
+                            repository: repository.into(),
+                            branch: "main".into(),
+                            fetched_at: "2026-09-01T00:00:00Z".into(),
+                            last_known_good_at: "2026-09-01T00:00:00Z".into(),
+                            payload: json!({"full_name": repository}),
+                        },
+                    )
+                    .unwrap();
+                }
+                let mut transport = FixtureTransport::default().response(
+                    first,
+                    status,
+                    &format!(r#"{{"message":"API rate limit exceeded ({label})"}}"#),
+                );
+                let snapshot =
+                    snapshot_with_transport(&database, &project, &mut transport).unwrap();
+                assert_eq!(
+                    transport.requests.len(),
+                    1,
+                    "cached={cached}, status={status}"
+                );
+                assert_eq!(snapshot.remote_health, "RATE_LIMITED");
+                assert_eq!(
+                    snapshot
+                        .warnings
+                        .iter()
+                        .filter(|warning| warning.contains("rate limit reached"))
+                        .count(),
+                    1
+                );
+                if cached {
+                    let repository_state = snapshot
+                        .cache
+                        .resources
+                        .iter()
+                        .find(|resource| resource.kind == RESOURCE_REPOSITORY)
+                        .unwrap();
+                    assert_eq!(repository_state.state, "STALE");
+                    assert!(repository_state.last_known_good_at.is_some());
+                }
+            }
+        }
+    }
+
+    struct SlowTransport {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        delay: Duration,
+        status: u16,
+    }
+
+    impl GitHubReadTransport for SlowTransport {
+        fn get(&mut self, _url: &str) -> Result<ReadResponse, String> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            Ok(ReadResponse {
+                status: self.status,
+                body: if self.status == 200 {
+                    r#"{"value":"owner-result"}"#.into()
+                } else {
+                    r#"{"message":"API rate limit exceeded"}"#.into()
+                },
+            })
+        }
+    }
+
+    fn coalesced_resource_call(
+        database: DatabaseState,
+        project: ProjectRecord,
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        status: u16,
+    ) -> ResourceResult {
+        let mut transport = SlowTransport {
+            calls,
+            delay: Duration::from_millis(150),
+            status,
+        };
+        guarded_resource(
+            &database,
+            &project,
+            "Sekiph82/H-veAI",
+            "main",
+            "GITHUB_COALESCING_PRIMARY",
+            "2026-09-16T00:00:00Z",
+            &mut transport,
+            |transport| request_json(transport, "https://api.github.com/coalesced"),
+        )
+    }
+
+    #[test]
+    fn production_governor_shares_one_current_result_with_two_and_ten_callers() {
+        let _coordinator = TEST_GITHUB_COORDINATOR
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        reset_process_request_state_for_test();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        for caller_count in [2_usize, 10] {
+            reset_process_request_state_for_test();
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(caller_count));
+            let mut handles = Vec::new();
+            for _ in 0..caller_count {
+                let database = database.clone();
+                let project = project.clone();
+                let calls = std::sync::Arc::clone(&calls);
+                let barrier = std::sync::Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    coalesced_resource_call(database, project, calls, 200)
+                }));
+            }
+            let results = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(results.iter().all(|result| result.state == "CURRENT"));
+            assert!(results
+                .iter()
+                .all(|result| result.value == results[0].value));
+            assert!(results
+                .iter()
+                .all(|result| result.fetched_at == results[0].fetched_at));
+        }
+    }
+
+    #[test]
+    fn production_governor_shares_owner_failure_and_cached_waiter_result() {
+        let _coordinator = TEST_GITHUB_COORDINATOR
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        reset_process_request_state_for_test();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let database = database.clone();
+            let project = project.clone();
+            let calls = std::sync::Arc::clone(&calls);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                coalesced_resource_call(database, project, calls, 429)
+            }));
+        }
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(results.iter().all(|result| result.state == "RATE_LIMITED"));
+        assert!(results
+            .iter()
+            .all(|result| result.error == results[0].error));
+
+        reset_process_request_state_for_test();
+        persist_cache(
+            &database,
+            &project.id,
+            &CacheEnvelope {
+                schema_version: CACHE_SCHEMA_VERSION,
+                resource_kind: "GITHUB_COALESCING_PRIMARY".into(),
+                repository: "Sekiph82/H-veAI".into(),
+                branch: "main".into(),
+                fetched_at: "2026-09-01T00:00:00Z".into(),
+                last_known_good_at: "2026-09-01T00:00:00Z".into(),
+                payload: json!({"value":"old-cache"}),
+            },
+        )
+        .unwrap();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let database = database.clone();
+            let project = project.clone();
+            let calls = std::sync::Arc::clone(&calls);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                coalesced_resource_call(database, project, calls, 200)
+            }));
+        }
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(results.iter().all(|result| result.state == "CURRENT"));
+        assert!(results
+            .iter()
+            .all(|result| result.value.as_ref().unwrap()["value"] == "owner-result"));
+    }
+
+    #[test]
     fn production_github_resource_identities_are_exact_for_control_bulk_and_pixel_projects() {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
@@ -3579,7 +3845,7 @@ mod tests {
                 .len(),
             8
         );
-        assert_eq!(overall_health(&resources), "CURRENT");
+        assert_eq!(overall_health(&resources), "PARTIAL");
     }
 
     #[test]
@@ -3936,8 +4202,8 @@ mod tests {
                 .iter()
                 .filter(|url| url.contains("/actions/jobs/"))
                 .count(),
-            2,
-            "requests={:?}",
+            0,
+            "PR enrichment is shed before action-log enrichment: requests={:?}",
             transport.requests
         );
         assert!(!transport
@@ -3952,34 +4218,58 @@ mod tests {
             .requests
             .iter()
             .any(|url| url.ends_with("/actions/jobs/105/logs")));
-        assert_eq!(transport.requests.len(), 8 + MAX_SUBRESOURCE_REQUESTS);
+        assert!(transport.requests.len() <= 8 + OPTIONAL_REQUESTS_PER_HOUR);
         assert_eq!(
             resources
                 .iter()
                 .filter(|resource| resource.kind.contains("_LOG"))
                 .count(),
-            3
+            0
         );
         let log_states = resources
             .iter()
             .filter(|resource| resource.kind.contains("_LOG"))
             .map(|resource| resource.state.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(log_states, vec!["CURRENT", "CURRENT", "UNAVAILABLE"]);
+        assert!(log_states.is_empty());
     }
 
     #[test]
     fn process_budget_is_below_unauthenticated_quota_for_required_portfolios() {
         for projects in [8usize, 9, 10, 20] {
-            let cold_primary_demand = projects * PRIMARY_RESOURCE_KINDS.len();
-            let admitted = cold_primary_demand.min(PROCESS_REQUESTS_PER_HOUR);
-            assert!(admitted <= PROCESS_REQUESTS_PER_HOUR);
-            assert!(
-                admitted < 60,
-                "portfolio size {projects} exceeded unauthenticated quota"
+            let idle = portfolio_acquisition_plan(projects, AcquisitionIntent::Idle);
+            assert_eq!(idle.primary_calls, 0);
+            assert_eq!(idle.optional_calls, 0);
+            assert_eq!(idle.remote_tracking_calls, projects);
+
+            let selected = portfolio_acquisition_plan(projects, AcquisitionIntent::Selected);
+            assert_eq!(selected.primary_calls, PRIMARY_RESOURCE_KINDS.len());
+            assert_eq!(selected.optional_calls, OPTIONAL_REQUESTS_PER_HOUR);
+            assert_eq!(selected.remote_tracking_calls, 1);
+
+            let navigation = portfolio_acquisition_plan(projects, AcquisitionIntent::Navigation);
+            assert!(navigation.primary_calls <= PRIMARY_REQUESTS_PER_HOUR);
+            assert!(navigation.primary_calls > 0);
+            assert_eq!(navigation.optional_calls, OPTIONAL_REQUESTS_PER_HOUR);
+            let schedule = fair_primary_schedule(projects);
+            assert_eq!(schedule.len(), navigation.primary_calls);
+            for project_index in 0..projects {
+                assert!(schedule.iter().any(|(index, _)| *index == project_index));
+            }
+            assert_eq!(
+                schedule
+                    .iter()
+                    .take(projects)
+                    .map(|(index, _)| *index)
+                    .collect::<Vec<_>>(),
+                (0..projects).collect::<Vec<_>>(),
+                "portfolio size {projects} must rotate service before repeating a project"
             );
-            let optional_demand = projects * MAX_SUBRESOURCE_REQUESTS;
-            assert!(admitted + optional_demand >= cold_primary_demand);
+
+            let manual = portfolio_acquisition_plan(projects, AcquisitionIntent::Manual);
+            assert_eq!(manual.primary_calls, PRIMARY_RESOURCE_KINDS.len());
+            assert_eq!(manual.optional_calls, OPTIONAL_REQUESTS_PER_HOUR);
+            assert!(manual.primary_calls + manual.optional_calls <= PROCESS_REQUESTS_PER_HOUR);
         }
     }
 }

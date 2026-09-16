@@ -6,15 +6,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(not(test))]
 use std::collections::HashMap;
+#[cfg(not(test))]
 use std::collections::HashSet;
 use std::io::Read;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 #[cfg(not(test))]
 use std::sync::mpsc;
+use std::sync::Condvar;
+use std::sync::Mutex;
 #[cfg(not(test))]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 use std::thread;
 use std::time::Duration;
@@ -36,6 +40,56 @@ impl RefreshRequestGate {
 
     pub fn take(&self) -> bool {
         self.0.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
+/// Coordinates an intentional refresh generation with the scheduler. The
+/// frontend command resolves only after the generation has drained all queued
+/// observations, so history cannot be recorded merely because work was queued.
+#[derive(Debug, Default)]
+pub struct RefreshCompletion {
+    requested: AtomicU64,
+    completed: Mutex<u64>,
+    changed: Condvar,
+}
+
+impl RefreshCompletion {
+    pub fn request(&self) -> u64 {
+        let generation = self.requested.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+        generation
+    }
+
+    fn requested(&self) -> u64 {
+        self.requested.load(AtomicOrdering::Acquire)
+    }
+
+    fn complete(&self, generation: u64) {
+        if let Ok(mut completed) = self.completed.lock() {
+            *completed = (*completed).max(generation);
+            self.changed.notify_all();
+        }
+    }
+
+    pub fn wait(&self, generation: u64, timeout: Duration) -> Result<(), String> {
+        let mut completed = self
+            .completed
+            .lock()
+            .map_err(|_| "GitHub refresh completion lock poisoned".to_string())?;
+        let (next, result) = self
+            .changed
+            .wait_timeout_while(completed, timeout, |value| *value < generation)
+            .map_err(|_| "GitHub refresh completion wait poisoned".to_string())?;
+        completed = next;
+        if *completed >= generation {
+            Ok(())
+        } else if result.timed_out() {
+            Err(
+                "GitHub refresh completion timed out before the requested generation settled"
+                    .into(),
+            )
+        } else {
+            Err("GitHub refresh completion ended before the requested generation settled".into())
+        }
     }
 }
 
@@ -85,6 +139,12 @@ pub struct RemoteTrackingSnapshot {
     #[serde(default)]
     pub latest_commit_at: Option<String>,
     pub fetched_at: String,
+    /// Backward-compatible alias for the content materialization timestamp.
+    #[serde(default)]
+    pub content_fetched_at: Option<String>,
+    /// Last successful identity/branch/HEAD validation timestamp.
+    #[serde(default)]
+    pub validated_at: Option<String>,
     pub remote_health: String,
     pub error: Option<String>,
     #[serde(default)]
@@ -110,6 +170,10 @@ pub struct RemoteTrackingEvent {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteTaskRow {
     pub id: String,
+    /// Stable identity for this physical root-TASKS row. `id` remains the
+    /// owner-authored explicit task ID used by dependency references/UI.
+    #[serde(default)]
+    pub canonical_row_id: String,
     pub title: String,
     pub status: String,
     pub source_path: String,
@@ -459,7 +523,9 @@ pub fn observe_project(
         Ok(head) => {
             if let Some(snapshot) = previous.as_ref() {
                 if same_head_cache_is_reusable(snapshot, &head, &branch) {
-                    return Ok((snapshot.clone(), RemoteObservationChange::Unchanged));
+                    let refreshed = refresh_same_head_validation(snapshot, utc_timestamp());
+                    persist(database, project, &refreshed)?;
+                    return Ok((refreshed, RemoteObservationChange::Unchanged));
                 }
             }
             match fetch_github_root_tasks(&repository_name, &branch, &head).and_then(|raw| {
@@ -525,6 +591,18 @@ pub(crate) fn same_head_cache_is_reusable(
         Some(_) => !snapshot.task_rows.is_empty(),
         None => false,
     }
+}
+
+pub(crate) fn refresh_same_head_validation(
+    snapshot: &RemoteTrackingSnapshot,
+    validated_at: String,
+) -> RemoteTrackingSnapshot {
+    let mut refreshed = snapshot.clone();
+    refreshed.validated_at = Some(validated_at.clone());
+    refreshed.fetched_at = validated_at;
+    refreshed.error = None;
+    refreshed.remote_health = "CURRENT".into();
+    refreshed
 }
 
 pub fn refresh_project(
@@ -805,7 +883,11 @@ fn remote_task_metadata(lines: &[&str], start: usize, end: usize) -> RemoteTaskM
         ..Default::default()
     };
     let mut active_label: Option<String> = None;
-    for raw in lines.iter().skip(start + 1).take(end.saturating_sub(start + 1)) {
+    for raw in lines
+        .iter()
+        .skip(start + 1)
+        .take(end.saturating_sub(start + 1))
+    {
         let trimmed = raw.trim();
         if trimmed.starts_with('#') || task_row(trimmed).is_some() {
             break;
@@ -954,6 +1036,12 @@ fn parse_root_tasks(
                 );
                 task_rows.push(RemoteTaskRow {
                     id,
+                    canonical_row_id: format!(
+                        "{repository}@{branch}:{}:{}:{}",
+                        raw.tasks_blob_sha,
+                        *line_index + 1,
+                        lines[*line_index].trim().to_ascii_lowercase()
+                    ),
                     title,
                     status: normalized_status.into(),
                     source_path: "TASKS.md".into(),
@@ -999,6 +1087,8 @@ fn parse_root_tasks(
     } else {
         Some(completed as f64 * 100.0 / total as f64)
     };
+    let content_fetched_at = Some(fetched_at.clone());
+    let validated_at = Some(fetched_at.clone());
     Ok(RemoteTrackingSnapshot {
         project_key: format!("github:{repository}@{branch}"),
         display_name,
@@ -1035,6 +1125,8 @@ fn parse_root_tasks(
         latest_commit_author: raw.latest_commit_author.clone(),
         latest_commit_at: raw.latest_commit_at.clone(),
         fetched_at,
+        content_fetched_at,
+        validated_at,
         remote_health: "CURRENT".into(),
         error: None,
         recent_events: Vec::new(),
@@ -1070,6 +1162,12 @@ fn cached(
     Ok(value
         .and_then(|json| serde_json::from_str::<RemoteTrackingSnapshot>(&json).ok())
         .map(|mut snapshot| {
+            if snapshot.content_fetched_at.is_none() {
+                snapshot.content_fetched_at = Some(snapshot.fetched_at.clone());
+            }
+            if snapshot.validated_at.is_none() && snapshot.remote_health == "CURRENT" {
+                snapshot.validated_at = Some(snapshot.fetched_at.clone());
+            }
             if !error.is_empty() {
                 snapshot.error = Some(error.into());
             }
@@ -1129,6 +1227,8 @@ fn unavailable(
         latest_commit_author: None,
         latest_commit_at: None,
         fetched_at,
+        content_fetched_at: None,
+        validated_at: None,
         remote_health: "UNAVAILABLE".into(),
         error: Some(error),
         recent_events: Vec::new(),
@@ -1169,6 +1269,7 @@ pub struct GitHubTrackingManager {
     app_handle: tauri::AppHandle,
     selected_project: Arc<Mutex<Option<String>>>,
     refresh_requested: Arc<RefreshRequestGate>,
+    refresh_completion: Arc<RefreshCompletion>,
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
 }
@@ -1182,6 +1283,7 @@ impl GitHubTrackingManager {
             app_handle,
             selected_project: Arc::new(Mutex::new(None)),
             refresh_requested: Arc::new(RefreshRequestGate::default()),
+            refresh_completion: Arc::new(RefreshCompletion::default()),
             stop: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(None),
         };
@@ -1189,6 +1291,7 @@ impl GitHubTrackingManager {
         let app_handle = manager.app_handle.clone();
         let selected_project = Arc::clone(&manager.selected_project);
         let refresh_requested = Arc::clone(&manager.refresh_requested);
+        let refresh_completion = Arc::clone(&manager.refresh_completion);
         let stop = Arc::clone(&manager.stop);
         let worker = thread::Builder::new()
             .name("hiveai-github-tracking".into())
@@ -1198,6 +1301,7 @@ impl GitHubTrackingManager {
                     app_handle,
                     selected_project,
                     refresh_requested,
+                    refresh_completion,
                     stop,
                 )
             })
@@ -1217,8 +1321,11 @@ impl GitHubTrackingManager {
     }
 
     pub fn refresh_now(&self) -> Result<usize, String> {
+        let generation = self.refresh_completion.request();
         self.refresh_requested.request();
-        Ok(0)
+        self.refresh_completion
+            .wait(generation, Duration::from_secs(30))?;
+        Ok(generation as usize)
     }
 }
 
@@ -1240,6 +1347,7 @@ fn polling_loop(
     app_handle: tauri::AppHandle,
     selected_project: Arc<Mutex<Option<String>>>,
     refresh_requested: Arc<RefreshRequestGate>,
+    refresh_completion: Arc<RefreshCompletion>,
     stop: Arc<AtomicBool>,
 ) {
     if let Err(error) = ensure_portfolio(&database) {
@@ -1300,6 +1408,7 @@ fn polling_loop(
     let mut failures = HashMap::<String, u32>::new();
     let mut signatures = HashMap::<String, (Option<String>, String)>::new();
     let mut in_flight = HashSet::<String>::new();
+    let mut pending_generation = 0_u64;
     while !stop.load(Ordering::Acquire) {
         while let Ok((project_id, result)) = result_rx.try_recv() {
             in_flight.remove(&project_id);
@@ -1359,6 +1468,7 @@ fn polling_loop(
         let selected = selected_project.lock().ok().and_then(|value| value.clone());
         let now = std::time::Instant::now();
         if refresh_requested.take() {
+            pending_generation = pending_generation.max(refresh_completion.requested());
             for due in next_due.values_mut() {
                 *due = now;
             }
@@ -1388,6 +1498,10 @@ fn polling_loop(
         next_due.retain(|id, _| live_ids.contains(id));
         failures.retain(|id, _| live_ids.contains(id));
         signatures.retain(|id, _| live_ids.contains(id));
+        if pending_generation > 0 && in_flight.is_empty() {
+            refresh_completion.complete(pending_generation);
+            pending_generation = 0;
+        }
         thread::sleep(Duration::from_millis(100));
     }
     drop(job_tx);
@@ -1412,7 +1526,9 @@ fn emit_update(app_handle: &tauri::AppHandle, project_id: &str, snapshot: &Remot
 mod tests {
     use super::*;
     use crate::db::DatabaseState;
-    use crate::projects::{archive_project, register_project, remove_project, RegisterProjectRequest};
+    use crate::projects::{
+        archive_project, register_project, remove_project, RegisterProjectRequest,
+    };
     use tempfile::tempdir;
 
     #[test]
@@ -1435,11 +1551,20 @@ mod tests {
         assert_eq!(snapshot.task_rows[1].id, "TASK-2");
         assert_eq!(snapshot.task_rows[1].status, "IN_PROGRESS");
         assert_eq!(snapshot.task_rows[1].source_path, "TASKS.md");
-        assert_eq!(snapshot.task_rows[1].required_actor.as_deref(), Some("Claude"));
+        assert_eq!(
+            snapshot.task_rows[1].required_actor.as_deref(),
+            Some("Claude")
+        );
         assert_eq!(snapshot.task_rows[1].dependencies, vec!["TASK-1"]);
         assert_eq!(snapshot.task_rows[1].priority, Some(7));
-        assert_eq!(snapshot.task_rows[2].required_actor.as_deref(), Some("Human"));
-        assert_eq!(snapshot.task_rows[2].external_wait.as_deref(), Some("approval"));
+        assert_eq!(
+            snapshot.task_rows[2].required_actor.as_deref(),
+            Some("Human")
+        );
+        assert_eq!(
+            snapshot.task_rows[2].external_wait.as_deref(),
+            Some("approval")
+        );
         assert!(snapshot.task_rows.iter().all(|row| row.metadata_complete));
         assert!((snapshot.progress_percent.unwrap() - 33.333333333333336).abs() < 0.0001);
         assert_eq!(
@@ -1460,14 +1585,83 @@ mod tests {
         };
         let snapshot = parse_root_tasks(&raw, "Sekiph82/Bulk-Edit", "main", "now".into()).unwrap();
         assert_eq!(snapshot.task_rows.len(), 3);
-        assert_eq!(snapshot.task_rows[0].required_actor.as_deref(), Some("Codex"));
-        assert_eq!(snapshot.task_rows[1].required_actor.as_deref(), Some("Claude"));
+        assert_eq!(
+            snapshot.task_rows[0].required_actor.as_deref(),
+            Some("Codex")
+        );
+        assert_eq!(
+            snapshot.task_rows[1].required_actor.as_deref(),
+            Some("Claude")
+        );
         assert_eq!(snapshot.task_rows[1].dependencies, vec!["TASK-A"]);
         assert_eq!(snapshot.task_rows[1].blockers, vec!["waiting on TASK-A"]);
-        assert_eq!(snapshot.task_rows[1].external_wait.as_deref(), Some("review"));
-        assert_eq!(snapshot.task_rows[2].required_actor.as_deref(), Some("Codex"));
+        assert_eq!(
+            snapshot.task_rows[1].external_wait.as_deref(),
+            Some("review")
+        );
+        assert_eq!(
+            snapshot.task_rows[2].required_actor.as_deref(),
+            Some("Codex")
+        );
         assert!(!snapshot.task_rows[2].metadata_complete);
-        assert!(snapshot.task_rows.iter().all(|row| row.content_hash.as_deref() == Some("sha256:remote")));
+        assert!(snapshot
+            .task_rows
+            .iter()
+            .all(|row| row.content_hash.as_deref() == Some("sha256:remote")));
+    }
+
+    #[test]
+    fn remote_duplicate_explicit_ids_keep_distinct_canonical_rows() {
+        let raw = RootTasksRemote {
+            head: "duplicate-head".into(),
+            tasks: "## Tasks\n- [ ] TASK-A — first spelling\n  Owner: CODEX\n- [x] task-a — conflicting completion\n  Owner: CODEX\n- [ ] TASK-B — dependent\n  Owner: CODEX\n  Depends on: TASK-A\n".into(),
+            tasks_blob_sha: "sha256:duplicate".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let snapshot = parse_root_tasks(&raw, "Sekiph82/Bulk-Edit", "main", "T0".into()).unwrap();
+        assert_eq!(snapshot.task_rows.len(), 3);
+        assert_ne!(
+            snapshot.task_rows[0].canonical_row_id,
+            snapshot.task_rows[1].canonical_row_id
+        );
+        assert_eq!(snapshot.task_rows[0].id.to_ascii_lowercase(), "task-a");
+        assert_eq!(snapshot.task_rows[1].id.to_ascii_lowercase(), "task-a");
+        assert_eq!(snapshot.task_rows[1].status, "TASK_COMPLETE");
+        assert_eq!(snapshot.validated_at.as_deref(), Some("T0"));
+        assert_eq!(snapshot.content_fetched_at.as_deref(), Some("T0"));
+    }
+
+    #[test]
+    fn same_head_validation_refreshes_only_validation_timestamp_and_clears_error() {
+        let raw = RootTasksRemote {
+            head: "same-head".into(),
+            tasks: "## Tasks\n- [ ] TASK-A — stable task\n  Owner: CODEX\n".into(),
+            tasks_blob_sha: "sha256:stable".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let mut snapshot = parse_root_tasks(
+            &raw,
+            "Sekiph82/H-veAI",
+            "main",
+            "2026-09-15T00:00:00Z".into(),
+        )
+        .unwrap();
+        snapshot.error = Some("transient old error".into());
+        let refreshed = refresh_same_head_validation(&snapshot, "2026-09-16T00:00:01Z".into());
+        assert_eq!(
+            refreshed.content_fetched_at.as_deref(),
+            Some("2026-09-15T00:00:00Z")
+        );
+        assert_eq!(
+            refreshed.validated_at.as_deref(),
+            Some("2026-09-16T00:00:01Z")
+        );
+        assert_eq!(refreshed.fetched_at, "2026-09-16T00:00:01Z");
+        assert_eq!(refreshed.error, None);
     }
 
     #[test]
@@ -1799,6 +1993,38 @@ mod tests {
     }
 
     #[test]
+    fn refresh_generations_wait_for_completion_and_preserve_order() {
+        let completion = std::sync::Arc::new(RefreshCompletion::default());
+        let first = completion.request();
+        let second = completion.request();
+        assert_eq!((first, second), (1, 2));
+        let waiter = std::sync::Arc::clone(&completion);
+        let handle = std::thread::spawn(move || waiter.wait(second, Duration::from_secs(2)));
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            !handle.is_finished(),
+            "queued refresh must not look completed"
+        );
+        completion.complete(first);
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(
+            !handle.is_finished(),
+            "first generation cannot settle the second"
+        );
+        completion.complete(second);
+        assert!(handle.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn refresh_generation_wait_has_a_bounded_timeout() {
+        let completion = RefreshCompletion::default();
+        let generation = completion.request();
+        let result = completion.wait(generation, Duration::from_millis(20));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
     fn ensure_portfolio_merges_legacy_repository_rows_into_one_remote_identity() {
         let database_dir = tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
@@ -1966,7 +2192,8 @@ mod tests {
                 path: ninth_dir.path().to_string_lossy().into_owned(),
                 name: Some("Duplicate ninth project".into()),
             },
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(duplicate.id, ninth.id);
 
         ensure_portfolio(&database).unwrap();
@@ -2044,20 +2271,49 @@ mod tests {
             )
             .unwrap();
         ensure_portfolio(&database).unwrap();
-        let preserved = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
-        assert_eq!(preserved.task_source_policy.as_deref(), Some("REGISTRY_CUSTOM"));
-        assert_eq!(preserved.repository.as_ref().and_then(|repo| repo.github_owner.as_deref()), Some("owner"));
-        assert_eq!(preserved.repository.as_ref().and_then(|repo| repo.github_repo.as_deref()), Some("project"));
-        assert_eq!(preserved.repository.as_ref().and_then(|repo| repo.default_branch.as_deref()), Some("release"));
+        let preserved =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        assert_eq!(
+            preserved.task_source_policy.as_deref(),
+            Some("REGISTRY_CUSTOM")
+        );
+        assert_eq!(
+            preserved
+                .repository
+                .as_ref()
+                .and_then(|repo| repo.github_owner.as_deref()),
+            Some("owner")
+        );
+        assert_eq!(
+            preserved
+                .repository
+                .as_ref()
+                .and_then(|repo| repo.github_repo.as_deref()),
+            Some("project")
+        );
+        assert_eq!(
+            preserved
+                .repository
+                .as_ref()
+                .and_then(|repo| repo.default_branch.as_deref()),
+            Some("release")
+        );
         assert!(!preserved.repository.as_ref().unwrap().is_git_repository);
 
         archive_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
         ensure_portfolio(&database).unwrap();
-        assert_eq!(crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap().status, "ARCHIVED");
+        assert_eq!(
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main")
+                .unwrap()
+                .status,
+            "ARCHIVED"
+        );
 
         remove_project(&database, "github:Sekiph82/Bulk-Edit@main").unwrap();
         ensure_portfolio(&database).unwrap();
-        assert!(crate::projects::fetch_project(&database, "github:Sekiph82/Bulk-Edit@main").is_err());
+        assert!(
+            crate::projects::fetch_project(&database, "github:Sekiph82/Bulk-Edit@main").is_err()
+        );
         let exclusion: i64 = database.open_connection().unwrap().query_row(
             "SELECT COUNT(*) FROM github_project_exclusions WHERE lower(repository)=lower('Sekiph82/Bulk-Edit') AND branch='main'",
             [],

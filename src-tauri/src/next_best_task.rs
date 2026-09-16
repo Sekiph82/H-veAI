@@ -94,6 +94,7 @@ pub struct M19Attention {
     pub category: String,
     pub detail: String,
     pub evidence: Vec<String>,
+    pub issue_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,6 +112,9 @@ pub struct CandidateInput {
     pub project_name: String,
     pub project_priority: i64,
     pub task_id: String,
+    /// Unique physical task-row identity used by the canonical graph.
+    /// Explicit IDs remain aliases and are never sufficient as row keys.
+    pub canonical_row_id: String,
     pub explicit_task_id: Option<String>,
     pub task_title: String,
     pub factual_state: String,
@@ -440,7 +444,7 @@ fn collect_parsed_inputs(
     unavailable: &mut Vec<String>,
     root_hash: &str,
 ) {
-    let mut explicit_ids: HashMap<String, Vec<String>> = tasks
+    let explicit_ids: HashMap<String, Vec<String>> = tasks
         .iter()
         .filter_map(|task| {
             task.explicit_task_id
@@ -483,6 +487,7 @@ fn collect_parsed_inputs(
             project_name: project.name.clone(),
             project_priority: project.priority,
             task_id: task.id.clone(),
+            canonical_row_id: task.id.clone(),
             explicit_task_id: task.explicit_task_id.clone(),
             task_title: task.title.clone(),
             factual_state: task.parsed_status.clone(),
@@ -547,16 +552,10 @@ fn collect_remote_inputs(
             .as_deref()
             .or(repository.current_branch.as_deref())
     });
-    let fetched_at = DateTime::parse_from_rfc3339(&remote.fetched_at)
-        .ok()
-        .map(|value| value.with_timezone(&Utc));
     let now = DateTime::parse_from_rfc3339(&utc_timestamp())
         .ok()
         .map(|value| value.with_timezone(&Utc));
-    let fresh = fetched_at.zip(now).is_some_and(|(fetched, now)| {
-        now.signed_duration_since(fetched) >= Duration::zero()
-            && now.signed_duration_since(fetched) <= REMOTE_M19_MAX_AGE
-    });
+    let fresh = remote_validation_is_fresh(&remote, now);
     if remote.remote_health != "CURRENT"
         || !registry_repository
             .as_deref()
@@ -607,6 +606,12 @@ fn collect_remote_inputs(
                     "Per-task actor/dependency/blocker/owner evidence or root hash is unavailable."
                         .into(),
                 evidence,
+                issue_key: format!(
+                    "{}:{}:{}",
+                    project.id,
+                    task.id,
+                    normalize_issue_text(&task.title)
+                ),
             });
             continue;
         }
@@ -633,6 +638,11 @@ fn collect_remote_inputs(
             project_name: project.name.clone(),
             project_priority: project.priority,
             task_id: task.id.clone(),
+            canonical_row_id: if task.canonical_row_id.is_empty() {
+                format!("{}:{}:{}", project.id, task.source_line, task.id)
+            } else {
+                task.canonical_row_id.clone()
+            },
             explicit_task_id: Some(task.id.clone()),
             task_title: task.title.clone(),
             factual_state: task.status.clone(),
@@ -657,13 +667,31 @@ fn collect_remote_inputs(
     }
 }
 
+fn remote_validation_is_fresh(
+    remote: &github_tracking::RemoteTrackingSnapshot,
+    now: Option<DateTime<Utc>>,
+) -> bool {
+    let validated_at = remote
+        .validated_at
+        .as_deref()
+        .unwrap_or(remote.fetched_at.as_str());
+    DateTime::parse_from_rfc3339(validated_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+        .zip(now)
+        .is_some_and(|(validated, now)| {
+            now.signed_duration_since(validated) >= Duration::zero()
+                && now.signed_duration_since(validated) <= REMOTE_M19_MAX_AGE
+        })
+}
+
 fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
     let mut set = CandidateSet::default();
     let all_states = inputs
         .iter()
         .map(|input| {
             (
-                (input.project_id.clone(), input.task_id.to_ascii_lowercase()),
+                (input.project_id.clone(), input.canonical_row_id.clone()),
                 input.factual_state.clone(),
             )
         })
@@ -680,8 +708,8 @@ fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
             let ids = canonical_ids
                 .entry((input.project_id.clone(), alias.trim().to_ascii_lowercase()))
                 .or_default();
-            if !ids.contains(&input.task_id) {
-                ids.push(input.task_id.clone());
+            if !ids.contains(&input.canonical_row_id) {
+                ids.push(input.canonical_row_id.clone());
             }
         }
     }
@@ -694,17 +722,19 @@ fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
         };
         input.dependency_task_ids.clear();
         let mut derived_blockers = Vec::new();
+        let mut normalized_dependencies = HashSet::new();
         for dependency in dependency_refs {
-            let matches = canonical_ids.get(&(
-                input.project_id.clone(),
-                dependency.trim().to_ascii_lowercase(),
-            ));
+            let normalized_dependency = dependency.trim().to_ascii_lowercase();
+            if !normalized_dependencies.insert(normalized_dependency.clone()) {
+                continue;
+            }
+            let matches = canonical_ids.get(&(input.project_id.clone(), normalized_dependency));
             match matches {
                 Some(ids) if ids.len() == 1 => {
                     let prerequisite = ids[0].clone();
                     input.dependency_task_ids.push(prerequisite.clone());
                     if all_states
-                        .get(&(input.project_id.clone(), prerequisite.to_ascii_lowercase()))
+                        .get(&(input.project_id.clone(), prerequisite.clone()))
                         .is_some_and(|state| !is_completed(state))
                     {
                         derived_blockers.push(format!(
@@ -719,6 +749,21 @@ fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
                     "dependency {dependency} is not evidenced in canonical TASKS.md"
                 )),
             }
+        }
+        let own_alias = input
+            .explicit_task_id
+            .as_deref()
+            .unwrap_or(input.task_id.as_str())
+            .trim()
+            .to_ascii_lowercase();
+        if canonical_ids
+            .get(&(input.project_id.clone(), own_alias))
+            .is_some_and(|rows| rows.len() > 1)
+        {
+            derived_blockers.push(format!(
+                "explicit task ID {} is ambiguous in canonical TASKS.md",
+                input.explicit_task_id.as_deref().unwrap_or(&input.task_id)
+            ));
         }
         let generated_blocker_count = derived_blockers.len();
         input.blockers.extend(derived_blockers);
@@ -745,10 +790,7 @@ fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
             .iter()
             .filter(|prerequisite| {
                 all_states
-                    .get(&(
-                        dependent.project_id.clone(),
-                        prerequisite.to_ascii_lowercase(),
-                    ))
+                    .get(&(dependent.project_id.clone(), prerequisite.to_string()))
                     .is_some_and(|state| !is_completed(state))
             })
             .collect::<HashSet<_>>();
@@ -757,21 +799,18 @@ fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
         }
         let prerequisite = unmet.into_iter().next().unwrap();
         dependent_counts
-            .entry((
-                dependent.project_id.clone(),
-                prerequisite.to_ascii_lowercase(),
-            ))
+            .entry((dependent.project_id.clone(), prerequisite.to_string()))
             .or_default()
             .insert((
                 dependent.project_id.clone(),
-                dependent.task_id.to_ascii_lowercase(),
+                dependent.canonical_row_id.clone(),
             ));
     }
     for (input, _) in normalized {
         if is_completed(&input.factual_state) {
             continue;
         }
-        let key = (input.project_id.clone(), input.task_id.to_ascii_lowercase());
+        let key = (input.project_id.clone(), input.canonical_row_id.clone());
         let candidate = Candidate {
             unblocks: dependent_counts
                 .get(&key)
@@ -845,6 +884,12 @@ fn defer_or_retain(candidate: Candidate, set: &mut CandidateSet) {
 }
 
 fn attention_for(candidate: &Candidate, category: &str, detail: String) -> M19Attention {
+    let issue_key = format!(
+        "{}:{}:{}",
+        candidate.input.project_id,
+        candidate.input.task_id,
+        normalize_issue_text(&detail)
+    );
     M19Attention {
         project_id: candidate.input.project_id.clone(),
         project_name: candidate.input.project_name.clone(),
@@ -853,7 +898,16 @@ fn attention_for(candidate: &Candidate, category: &str, detail: String) -> M19At
         category: category.into(),
         detail,
         evidence: candidate.input.evidence.clone(),
+        issue_key,
     }
+}
+
+fn normalize_issue_text(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn apply_readiness(set: &mut CandidateSet, readiness: &[ProviderReadiness]) {
@@ -1411,6 +1465,7 @@ mod tests {
             project_name: project.into(),
             project_priority: 1,
             task_id: task.into(),
+            canonical_row_id: task.into(),
             explicit_task_id: Some(task.into()),
             task_title: format!("{task} title"),
             factual_state: "PLANNED".into(),
@@ -1509,6 +1564,120 @@ mod tests {
         duplicate.dependency_task_ids = vec!["A".into(), "A".into()];
         let deduped = build_candidate_set(vec![input("project", "A"), duplicate]);
         assert_eq!(deduped.eligible[0].unblocks, 1);
+    }
+
+    #[test]
+    fn duplicate_remote_explicit_ids_are_ambiguous_even_with_conflicting_states() {
+        let mut first = input("remote", "TASK-A");
+        first.canonical_row_id = "remote:TASKS.md:10:first".into();
+        first.factual_state = "PLANNED".into();
+        let mut second = input("remote", "task-a");
+        second.canonical_row_id = "remote:TASKS.md:11:second".into();
+        second.factual_state = "TASK_COMPLETE".into();
+        let mut dependent = input("remote", "TASK-B");
+        dependent.canonical_row_id = "remote:TASKS.md:12:dependent".into();
+        dependent.dependencies = vec!["TASK-A".into()];
+        let set = build_candidate_set(vec![first, second, dependent]);
+        assert!(set
+            .eligible
+            .iter()
+            .all(|candidate| candidate.input.task_id != "TASK-B"));
+        assert!(set.attention.iter().any(|item| {
+            item.task_id.as_deref() == Some("TASK-B") && item.detail.contains("ambiguous")
+        }));
+    }
+
+    #[test]
+    fn duplicate_local_explicit_ids_are_ambiguous_without_row_collapse() {
+        let mut first = input("local", "TASK-A");
+        first.canonical_row_id = "local:TASKS.md:10:first".into();
+        let mut second = input("local", "TASK-A");
+        second.canonical_row_id = "local:TASKS.md:11:second".into();
+        let mut dependent = input("local", "TASK-B");
+        dependent.canonical_row_id = "local:TASKS.md:12:dependent".into();
+        dependent.dependencies = vec!["TASK-A".into()];
+        let set = build_candidate_set(vec![first, second, dependent]);
+        assert!(set
+            .eligible
+            .iter()
+            .all(|candidate| candidate.input.task_id != "TASK-B"));
+        assert!(set.attention.iter().any(|item| {
+            item.task_id.as_deref() == Some("TASK-B") && item.detail.contains("ambiguous")
+        }));
+    }
+
+    #[test]
+    fn duplicate_dependency_edges_are_one_canonical_edge_and_one_blocker() {
+        let mut dependent = input("local", "B");
+        dependent.dependencies = vec!["A".into(), "A".into(), "a".into()];
+        let set = build_candidate_set(vec![input("local", "A"), dependent]);
+        assert_eq!(set.attention.len(), 1);
+        assert_eq!(
+            set.attention[0]
+                .detail
+                .matches("dependency A is unfinished")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn remote_validation_timestamp_keeps_same_head_fresh_after_content_ages() {
+        let remote = github_tracking::RemoteTrackingSnapshot {
+            project_key: "github:owner/repo@main".into(),
+            display_name: "repo".into(),
+            repository: "owner/repo".into(),
+            branch: "main".into(),
+            remote_head: Some("head".into()),
+            project_blob_sha: None,
+            tasks_blob_sha: Some("tasks".into()),
+            rules_blob_sha: None,
+            events_blob_sha: None,
+            current_milestone: None,
+            current_sprint: None,
+            current_task_id: None,
+            current_task_title: None,
+            current_task_status: None,
+            workflow_state: None,
+            required_actor: None,
+            next_action: None,
+            next_task_id: None,
+            next_task_title: None,
+            blockers: Vec::new(),
+            progress_scope_type: None,
+            progress_scope_id: None,
+            progress_completed: Some(0),
+            progress_total: Some(0),
+            progress_percent: Some(0.0),
+            last_completed_task_id: None,
+            last_completed_task_title: None,
+            updated_at: None,
+            updated_by: None,
+            total_tasks: Some(0),
+            completed_tasks: Some(0),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+            fetched_at: "2026-09-16T00:09:00Z".into(),
+            content_fetched_at: Some("2026-09-15T00:00:00Z".into()),
+            validated_at: Some("2026-09-16T00:09:00Z".into()),
+            remote_health: "CURRENT".into(),
+            error: None,
+            recent_events: Vec::new(),
+            task_rows: Vec::new(),
+        };
+        assert!(remote_validation_is_fresh(
+            &remote,
+            DateTime::parse_from_rfc3339("2026-09-16T00:13:00Z")
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        ));
+        assert!(!remote_validation_is_fresh(
+            &remote,
+            DateTime::parse_from_rfc3339("2026-09-16T00:15:01Z")
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        ));
     }
 
     #[test]

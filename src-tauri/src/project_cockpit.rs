@@ -959,6 +959,8 @@ mod tests {
             latest_commit_author: Some("CODEX".into()),
             latest_commit_at: Some("2026-09-10T12:00:00Z".into()),
             fetched_at: "2026-09-10T12:00:00Z".into(),
+            content_fetched_at: Some("2026-09-10T12:00:00Z".into()),
+            validated_at: Some("2026-09-10T12:00:00Z".into()),
             remote_health: health.into(),
             error: (health != "CURRENT").then(|| format!("remote health is {health}")),
             recent_events: Vec::new(),
@@ -1318,7 +1320,10 @@ mod tests {
         .unwrap();
         let cockpit = snapshot(&database, &project.id).unwrap();
         assert!(cockpit.control_plane.is_none());
-        assert_eq!(cockpit.dashboard.tracking_mode.as_deref(), Some("ROOT_TASKS_ONLY"));
+        assert_eq!(
+            cockpit.dashboard.tracking_mode.as_deref(),
+            Some("ROOT_TASKS_ONLY")
+        );
         assert_eq!(
             cockpit.dashboard.materialized,
             project_dashboard::MaterializedDashboardStatus::default()
@@ -1333,10 +1338,9 @@ mod tests {
             .attention
             .iter()
             .all(|item| item.category != "PROJECT_DASHBOARD" && item.category != "WORKFLOW"));
-        assert!(center
-            .work_queue
-            .iter()
-            .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:") && !item.id.starts_with("queue:")));
+        assert!(center.work_queue.iter().all(
+            |item| !item.id.starts_with("PROJECT_DASHBOARD:") && !item.id.starts_with("queue:")
+        ));
     }
 
     #[test]
@@ -1403,10 +1407,17 @@ mod tests {
         )
         .unwrap();
         let snapshot = snapshot(&database, &project_a.id).unwrap();
-        assert_eq!(snapshot.dashboard.project_key.as_deref(), Some(project_a.id.as_str()));
+        assert_eq!(
+            snapshot.dashboard.project_key.as_deref(),
+            Some(project_a.id.as_str())
+        );
         assert_eq!(snapshot.dashboard.provenance_mode, "ROOT_TASKS_UNAVAILABLE");
         assert!(snapshot.dashboard.materialized.current_task_title.is_none());
-        assert!(snapshot.dashboard.materialized.recent_meaningful_activity.is_empty());
+        assert!(snapshot
+            .dashboard
+            .materialized
+            .recent_meaningful_activity
+            .is_empty());
         assert!(snapshot
             .files
             .iter()

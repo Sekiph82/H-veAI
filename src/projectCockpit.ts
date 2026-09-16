@@ -78,6 +78,7 @@ export type CockpitFileEntry = {
 
 export type RemoteTaskRow = {
   id: string;
+  canonicalRowId?: string;
   title: string;
   status: string;
   sourcePath: string;

@@ -110,7 +110,7 @@ export type CommandCenterProject = {
   githubTracking?: GitHubTrackingSnapshot;
 };
 
-export type AttentionItem = { id: string; projectId: string; projectName: string; taskId: string | null; title: string; state: string; detail: string; category: string };
+export type AttentionItem = { id: string; projectId: string; projectName: string; taskId: string | null; title: string; state: string; detail: string; category: string; issueKey?: string };
 export type WorkQueueItem = { id: string; projectId: string; projectName: string; taskId: string; task: string; stage: string; state: string; actor: string | null; updatedAt: string | null; attention: boolean };
 export type ActivityItem = { id: string; projectId: string; projectName: string; kind: string; event: string; state: string | null; actor: string | null; occurredAt: string };
 export type BriefFact = { label: string; value: string; source: string; provenance: { sourceClass: string; projectId: string | null; sourcePath: string | null; evidenceType: string | null; evidenceId: string | null } };
@@ -141,7 +141,7 @@ export type M19Snapshot = {
   candidateCount: number;
   recommended: M19Recommendation | null;
   alternatives: M19Recommendation[];
-  attention: Array<{ projectId: string; projectName: string; taskId: string | null; title: string; category: string; detail: string; evidence: string[] }>;
+  attention: Array<{ projectId: string; projectName: string; taskId: string | null; title: string; category: string; detail: string; evidence: string[]; issueKey?: string }>;
   facts: Array<{ label: string; value: string; source: string; freshness: string }>;
   unavailableInputs: string[];
   comparison: M19Comparison;

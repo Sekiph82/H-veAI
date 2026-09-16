@@ -117,16 +117,29 @@ describe("M11 Command Center evidence surface", () => {
     renderCommandCenter();
     await screen.findByText("Canonical task");
     invoke.mockClear();
+    let completeRefresh: (() => void) | undefined;
+    const refreshInFlight = new Promise<void>((resolve) => { completeRefresh = resolve; });
+    invoke.mockImplementation((command: string) => {
+      if (command === "hiveai_github_tracking_refresh") return refreshInFlight;
+      if (command === "hiveai_command_center_snapshot") return Promise.resolve(snapshot);
+      return Promise.resolve(undefined);
+    });
     fireEvent.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_github_tracking_refresh"));
+    expect(invoke).not.toHaveBeenCalledWith("hiveai_next_best_task_record_history");
+    completeRefresh?.();
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_next_best_task_record_history"));
     const commands = invoke.mock.calls.map(([command]) => command);
     expect(commands.indexOf("hiveai_github_tracking_refresh")).toBeGreaterThanOrEqual(0);
     expect(commands.indexOf("hiveai_next_best_task_record_history")).toBeGreaterThan(commands.indexOf("hiveai_github_tracking_refresh"));
   });
 
-  it("deduplicates by project/task/source evidence while preserving distinct issues", () => {
-    const base = { projectId: "project-1", taskId: "task-1", detail: "remote evidence unavailable", evidence: ["repo/TASKS.md@head-1"] };
-    expect(semanticAttentionKey({ ...base, category: "TASK_BLOCKED", title: "first wording" })).toBe(semanticAttentionKey({ ...base, category: "EVIDENCE_UNCERTAIN", title: "second wording" }));
-    expect(semanticAttentionKey({ ...base, evidence: ["repo/TASKS.md@head-2"] })).not.toBe(semanticAttentionKey(base));
+  it("deduplicates actual legacy and M19 shapes while preserving distinct facts", () => {
+    const legacy = { id: "legacy-1", projectId: "project-1", projectName: "Alpha", taskId: "task-1", state: "BLOCKED", title: "Legacy wording", detail: "dependency TASK-A is unfinished", category: "TASK_BLOCKED", issueKey: "project-1:task-1:dependency task-a is unfinished" };
+    const m19 = { projectId: "project-1", projectName: "Alpha", taskId: "task-1", title: "M19 wording", detail: "dependency TASK-A is unfinished", category: "M19_DEPENDENCY", evidence: ["repo/TASKS.md@head-1"], issueKey: legacy.issueKey };
+    expect(semanticAttentionKey(legacy)).toBe(semanticAttentionKey(m19));
+    expect(semanticAttentionKey({ ...legacy, issueKey: "project-1:task-1:dependency task-b is unfinished" })).not.toBe(semanticAttentionKey(legacy));
+    expect(semanticAttentionKey({ ...legacy, issueKey: "project-1:task-1:provider claude unavailable" })).not.toBe(semanticAttentionKey(legacy));
+    expect(semanticAttentionKey({ ...legacy, issueKey: "project-1:task-1:evidence-id-2" })).not.toBe(semanticAttentionKey(legacy));
   });
 });

@@ -1,13 +1,13 @@
 use crate::control_plane;
 use crate::db::DatabaseState;
 use crate::github_tracking::{self, RemoteTrackingSnapshot};
+use crate::next_best_task;
 use crate::project_dashboard::{self, ProjectDashboardResolution, TaskAuthorityState};
 use crate::projects::{list_projects, ProjectListQuery, ProjectRecord};
-use crate::next_best_task;
 use crate::task_intelligence::{self, ParsedTask, TaskIntelligenceSnapshot};
 use crate::watcher::{read_task_refresh_health, TaskRefreshHealth};
 use crate::workflow::{self, WorkflowState, WorkflowTask};
-use serde::Serialize;
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
@@ -105,8 +105,7 @@ pub struct ActionSummary {
     pub actor: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub struct AttentionItem {
     pub id: String,
     pub project_id: String,
@@ -116,8 +115,34 @@ pub struct AttentionItem {
     pub state: String,
     pub detail: String,
     pub category: String,
-    #[serde(skip)]
     operational_identity: Option<AttentionIdentity>,
+}
+
+impl Serialize for AttentionItem {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut output = serializer.serialize_struct("AttentionItem", 9)?;
+        output.serialize_field("id", &self.id)?;
+        output.serialize_field("projectId", &self.project_id)?;
+        output.serialize_field("projectName", &self.project_name)?;
+        output.serialize_field("taskId", &self.task_id)?;
+        output.serialize_field("title", &self.title)?;
+        output.serialize_field("state", &self.state)?;
+        output.serialize_field("detail", &self.detail)?;
+        output.serialize_field("category", &self.category)?;
+        let issue_key = format!(
+            "{}:{}:{}",
+            self.project_id,
+            self.task_id.as_deref().unwrap_or("project"),
+            normalize_operational_identity(
+                self.operational_identity
+                    .as_ref()
+                    .map(|identity| identity.source.as_str())
+                    .unwrap_or(&self.detail)
+            )
+        );
+        output.serialize_field("issueKey", &issue_key)?;
+        output.end()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -450,7 +475,10 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
     let m19 = match next_best_task::snapshot(database) {
         Ok(value) => Some(value),
         Err(error) => {
-            push_portfolio_warning(&mut warnings, format!("M19 Engineering Brief unavailable: {error}"));
+            push_portfolio_warning(
+                &mut warnings,
+                format!("M19 Engineering Brief unavailable: {error}"),
+            );
             None
         }
     };
@@ -495,11 +523,28 @@ pub fn snapshot(database: &DatabaseState) -> Result<CommandCenterSnapshot, Strin
         recent_activity: activity,
         engineering_brief: EngineeringBrief {
             facts,
-            recommendation: m19.as_ref().and_then(|value| value.recommended.as_ref()).map(|value| format!("Rank 1: {} / {} (score {})", value.project_name, value.task_title, value.score)),
+            recommendation: m19
+                .as_ref()
+                .and_then(|value| value.recommended.as_ref())
+                .map(|value| {
+                    format!(
+                        "Rank 1: {} / {} (score {})",
+                        value.project_name, value.task_title, value.score
+                    )
+                }),
             changes_since_last: m19.as_ref().map(|value| value.comparison.clone()),
-            attention: m19.as_ref().map(|value| value.attention.clone()).unwrap_or_default(),
-            unavailable_inputs: m19.as_ref().map(|value| value.unavailable_inputs.clone()).unwrap_or_default(),
-            actor_readiness: m19.as_ref().map(|value| value.actor_readiness.clone()).unwrap_or_default(),
+            attention: m19
+                .as_ref()
+                .map(|value| value.attention.clone())
+                .unwrap_or_default(),
+            unavailable_inputs: m19
+                .as_ref()
+                .map(|value| value.unavailable_inputs.clone())
+                .unwrap_or_default(),
+            actor_readiness: m19
+                .as_ref()
+                .map(|value| value.actor_readiness.clone())
+                .unwrap_or_default(),
             m19: m19.clone(),
         },
         m19,
@@ -844,11 +889,13 @@ fn summarize_project(
         .filter(|task| {
             task_is_complete(
                 task,
-                (!root_tasks_only).then(|| {
-                    workflow_tasks
-                        .iter()
-                        .find(|workflow| workflow.task_id == task.id)
-                }).flatten(),
+                (!root_tasks_only)
+                    .then(|| {
+                        workflow_tasks
+                            .iter()
+                            .find(|workflow| workflow.task_id == task.id)
+                    })
+                    .flatten(),
             )
         })
         .count();
@@ -899,14 +946,14 @@ fn summarize_project(
         truth.required_actor.clone().into_iter().collect()
     } else {
         current_workflow
-        .as_ref()
-        .map(|task| {
-            task.allowed_actors
-                .iter()
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+            .as_ref()
+            .map(|task| {
+                task.allowed_actors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
     };
     let next_action = truth.next_action.clone();
     let refresh_health = read_task_refresh_health(database, &project.id)?;
@@ -1691,10 +1738,7 @@ fn root_tasks_current_items(
         .as_deref()
         .unwrap_or("NEEDS_RECONCILIATION");
     let needs_attention = truth.reconciliation_state == "NEEDS_RECONCILIATION"
-        || matches!(
-            state,
-            "BLOCKED" | "WAITING_HUMAN" | "WAITING_EXTERNAL"
-        );
+        || matches!(state, "BLOCKED" | "WAITING_HUMAN" | "WAITING_EXTERNAL");
     let mut attention = Vec::new();
     if needs_attention {
         let detail = if !truth.blockers.is_empty() {
@@ -2528,7 +2572,10 @@ mod tests {
             .attention
             .iter()
             .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT")));
-        assert_eq!(prefix_only.kpis.needs_attention, Some(prefix_only.attention.len()));
+        assert_eq!(
+            prefix_only.kpis.needs_attention,
+            Some(prefix_only.attention.len())
+        );
     }
 
     #[test]
@@ -2552,10 +2599,7 @@ mod tests {
             .work_queue
             .iter()
             .all(|item| !item.id.starts_with("PROJECT_DASHBOARD:")));
-        assert_eq!(
-            normalize_operational_identity(blocker_a),
-            "build ğ blocker"
-        );
+        assert_eq!(normalize_operational_identity(blocker_a), "build ğ blocker");
         assert_ne!(
             structured_attention_identity("PROJECT_DASHBOARD_BLOCKER", None, blocker_a),
             structured_attention_identity("PROJECT_DASHBOARD_BLOCKER", None, blocker_b)
@@ -2611,7 +2655,10 @@ mod tests {
             .attention
             .iter()
             .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT")));
-        assert_eq!(distinct.kpis.needs_attention, Some(distinct.attention.len()));
+        assert_eq!(
+            distinct.kpis.needs_attention,
+            Some(distinct.attention.len())
+        );
 
         let mut dashboard = AttentionItem {
             id: "PROJECT_DASHBOARD:QUALITY:display-independent".into(),
@@ -2691,7 +2738,10 @@ mod tests {
             .attention
             .iter()
             .all(|item| !matches!(item.category.as_str(), "TEST_RUN" | "AUDIT")));
-        assert_eq!(distinct.kpis.needs_attention, Some(distinct.attention.len()));
+        assert_eq!(
+            distinct.kpis.needs_attention,
+            Some(distinct.attention.len())
+        );
     }
 
     #[test]
@@ -3005,15 +3055,16 @@ mod tests {
         assert_eq!(first.kpis.needs_attention, Some(first.attention.len()));
         assert_eq!(
             first.kpis.running,
-            Some(first
-                .work_queue
-                .iter()
-                .filter(|item| is_running_state(&item.state))
-                .count())
+            Some(
+                first
+                    .work_queue
+                    .iter()
+                    .filter(|item| is_running_state(&item.state))
+                    .count()
+            )
         );
         assert!(first.engineering_brief.facts.iter().all(|fact| {
-            fact.label != "Needs attention"
-                || fact.provenance.source_class != "GITHUB_TASKS_ONLY"
+            fact.label != "Needs attention" || fact.provenance.source_class != "GITHUB_TASKS_ONLY"
         }));
         assert!(first
             .recent_activity
@@ -3064,7 +3115,10 @@ mod tests {
         assert_eq!(project.current_milestone.as_deref(), Some("X05-MILESTONE"));
         assert_eq!(project.required_actor.as_deref(), Some("Codex"));
         assert_eq!(project.blockers, vec!["Canonical blocker"]);
-        assert_eq!(project.next_action.as_deref(), Some("Run the canonical action"));
+        assert_eq!(
+            project.next_action.as_deref(),
+            Some("Run the canonical action")
+        );
         assert_eq!(project.authority_source, "TASKS.md");
         assert_eq!(project.reconciliation_state, "RESOLVED");
         assert!(current
@@ -3074,7 +3128,10 @@ mod tests {
         assert_eq!(current.work_queue.len(), 1);
         assert_eq!(current.work_queue[0].task, "Canonical running task");
         assert_eq!(current.work_queue[0].actor.as_deref(), Some("Codex"));
-        assert_eq!(current.work_queue[0].id, format!("root-tasks:queue:{}", project.project_id));
+        assert_eq!(
+            current.work_queue[0].id,
+            format!("root-tasks:queue:{}", project.project_id)
+        );
     }
 
     #[test]
@@ -3101,7 +3158,10 @@ mod tests {
         assert_eq!(summary.provenance_mode, "ROOT_TASKS_UNAVAILABLE");
         assert_eq!(summary.authority_source, "ROOT_TASKS_UNAVAILABLE");
         assert_eq!(summary.reconciliation_state, "NEEDS_RECONCILIATION");
-        assert_eq!(summary.next_action.as_deref(), Some("Restore a readable repository-root TASKS.md"));
+        assert_eq!(
+            summary.next_action.as_deref(),
+            Some("Restore a readable repository-root TASKS.md")
+        );
         assert!(summary.control_plane.is_none());
         assert!(!summary
             .warnings
