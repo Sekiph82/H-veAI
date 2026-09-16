@@ -4,12 +4,12 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 
 ## Project Status
 
-- Current Milestone: M18
-- Current Sprint: M18-GITHUB-INTEGRATION
-- Current Task: M18 V04 — GitHub Integration strict remediation + owner-directed Prompt Engine/session UX consolidation
-- Current Task Status: CHANGES_REQUIRED / V04_REMEDIATION_READY
-- Next Task/Action: Safely synchronize the standalone H!veAI checkout and execute `docs/H!veAI/prompts/M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`; close F-M18-V03-001 through F-M18-V03-005 plus M18.10.01 through M18.10.05 only, stop for independent strict re-audit, and do not activate M19.
-- Required Actor: CODEX
+- Current Milestone: M19
+- Current Sprint: M19-NEXT-BEST-TASK-AI-ENGINEERING-BRIEF
+- Current Task: M19 — Next Best Task AI and Engineering Brief
+- Current Task Status: ACTIVE / READY_FOR_AUTHORITATIVE_PROMPT
+- Next Task/Action: Author the authoritative whole-M19 implementation prompt covering M19.01 through M19.08, then have Codex safely synchronize GitHub `main`, execute only M19, run the required regression/publication gates, create immutable builder evidence, and stop for independent strict audit before M20.
+- Required Actor: CHATGPT
 - Tracking Repository: Sekiph82/H-veAI
 - Tracking Branch: main
 
@@ -23,7 +23,8 @@ This root TASKS.md is the only authoritative project-status tracker consumed by 
 - [x] M17 — Claude Code Adapter V05 source audit PASS and owner-native acceptance PASS; M17 PASS/CLOSED
 - [x] X03 — Pre-M18 Audit Provider Route Truth hotfix source audit PASS and owner-native acceptance PASS
 - [x] X04 — Pre-M18 TASKS-only Audit Evidence Authority hotfix V05 source audit PASS and owner-native acceptance PASS
-- [~] M18 — GitHub Integration V03 strict audit CHANGES_REQUIRED with 5 MAJOR findings; V04 strict remediation plus owner-directed Prompt Engine/Agent Sessions UX consolidation ready; M19-M20 remain planned/blocked
+- [x] M18 — GitHub Integration V07 independent strict source re-audit PASS and owner-native multi-project GitHub re-acceptance PASS; M18 PASS/CLOSED
+- [~] M19 — Next Best Task AI and Engineering Brief ACTIVE/READY; authoritative whole-milestone prompt is the next action; M20 remains planned/blocked
 
 # H!veAI MASTER TASKS
 
@@ -45,7 +46,7 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 
 ## Current truth
 
-- M00 through M17 are PASS/CLOSED.
+- M00 through M18 are PASS/CLOSED.
 - M08 presentation bootstrap, Task Source Discovery, remediation chain, and native `/tasks` manual acceptance are PASS/CLOSED.
 - M09 original strict audit = historical FAIL.
 - M09A strict re-audit = historical FAIL after closing the original seven findings but exposing two residual production defects.
@@ -56,12 +57,12 @@ Package numbering such as `M08.01`, `M08.02`, etc. is a task/audit decomposition
 - Pre-M10 Native UX Hotfix X01/X02 = PASS/CLOSED after independent source audit plus user native acceptance.
   - X01: terminal/console popup suppression accepted fixed after approximately 45 minutes of native runtime with no unwanted terminal windows.
   - X02: startup intro audio/replay behavior accepted fixed; audio works and same-process route navigation does not replay the intro.
-- Strict completed milestone count is **18 / 20 = 90%**; M17 is PASS/CLOSED, pre-M18 X03/X04 are PASS/CLOSED, and M18 remains ACTIVE with V03 independently audited CHANGES_REQUIRED (0 BLOCKER / 5 MAJOR) and V04 remediation current, now including owner-directed M18.10 Prompt Engine/session UX consolidation; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 and pre-M18 hotfixes are not numbered roadmap milestones.
+- Strict completed milestone count is **19 / 20 = 95%**; M18 is PASS/CLOSED after the V07 independent strict source re-audit and owner-native multi-project GitHub re-acceptance; M19 is ACTIVE/READY; M20 remains planned/blocked; M21 standalone migration and M21-R01 through M21-R03 are accepted; the pre-M10 and pre-M18 hotfixes are not numbered roadmap milestones.
 - M10 original strict audit = historical FAIL with 5 MAJOR findings.
 - M10A remediation, independent re-audit, and Akilta footer native click acceptance are complete; Akilta footer link = PASS/ACCEPTED.
 - Original M11 implementation is a historical strict-audit FAIL with 8 MAJOR findings.
 - M11A REV4, REV5, REV6, and REV7 remediation history remains immutable; all findings are closed by the accepted strict audits. M11A REV7 = PASS/CLOSED and the final Projects visual cleanup = PASS/CLOSED.
-- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 through V11 are validated complete; M16 is PASS/CLOSED; M17 is PASS/CLOSED; pre-M18 X03/X04 are PASS/CLOSED; M18 V03 strict audit is CHANGES_REQUIRED and V04 remediation plus M18.10 owner-directed consolidation is current; M19-M20 remain planned/blocked.
+- M11 = PASS/CLOSED. M12, M12A R26, and M12B native Open Cockpit remediation = PASS/CLOSED on accepted strict evidence and user native/visual acceptance. M13/M13A/M13B/M13C/M13D/M13E = PASS/CLOSED on accepted strict re-audits and user native/visual evidence. M14 and M14A-M14E = PASS/CLOSED on accepted strict and native evidence. M15 = PASS/CLOSED on accepted strict and user native evidence. M16H closes UCP-R19 through UCP-R21; M16I closes UCP-R22 through UCP-R26; M16M closes UCP-R39 through UCP-R42; M16S is source-audit PASS and superseded before final owner provider acceptance; M16T V09 through V11 are validated complete; M16 is PASS/CLOSED; M17 is PASS/CLOSED; pre-M18 X03/X04 are PASS/CLOSED; M18 V07 strict re-audit PASS plus final owner-native multi-project re-acceptance close the prior GitHub whole-app black-screen blocker; M18 is PASS/CLOSED; M19 is ACTIVE/READY; M20 remains planned/blocked.
 - M21 standalone migration and M21-R01 through M21-R03 are PASS/CLOSED on accepted evidence; the historical local AI-Commerce parent is retired from active use, while the GitHub repository remains retained for preservation and has not been deleted.
 
 ---
@@ -1420,7 +1421,7 @@ M15D REMEDIATION COMPLETE / ACCEPTED STRICT RE-AUDIT + USER NATIVE/VISUAL ACCEPT
 
 M16 PASS/CLOSED after independent strict audit and final owner-native acceptance.
 
-The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16T V11 is validated complete, M16 and M17 are PASS/CLOSED, pre-M18 X03/X04 are PASS/CLOSED, and M18 is active.
+The package notes below are historical implementation snapshots. Current prospective truth is recorded at the top of this ledger: M21 and M21-R01 through M21-R03 are accepted, M16T V11 is validated complete, M16 through M18 are PASS/CLOSED, pre-M18 X03/X04 are PASS/CLOSED, and M19 is active.
 
 ## M16A - Re-audit provenance and freshness remediation
 - [x] M16-R59 explicit evidence-backed prior-finding dispositions; omission never closes.
@@ -1615,59 +1616,59 @@ Pre-M18 X03/X04 PASS/CLOSED. These hotfixes are not numbered roadmap milestones.
 # M18 - GitHub Integration
 
 ### M18.01 - Repository/branch/commit reads
-- [ ] Read repository identity.
-- [ ] Read branches/commits.
-- [ ] Reconcile local branch/HEAD with remote.
+- [x] Read repository identity.
+- [x] Read branches/commits.
+- [x] Reconcile local branch/HEAD with remote.
 
 ### M18.02 - Pull requests
-- [ ] Read PR metadata/diff/status/comments.
-- [ ] Link PR to project/task/session where possible.
-- [ ] Permission-gated PR creation only.
+- [x] Read PR metadata/diff/status/comments.
+- [x] Link PR to project/task/session where possible.
+- [x] Permission-gated PR creation only.
 
 ### M18.03 - Issues
-- [ ] Read project-relevant issues.
-- [ ] Map explicit issue/task relationships.
-- [ ] Avoid guessing implicit ownership.
+- [x] Read project-relevant issues.
+- [x] Map explicit issue/task relationships.
+- [x] Avoid guessing implicit ownership.
 
 ### M18.04 - GitHub Actions
-- [ ] Read workflow runs/jobs/steps/log summaries.
-- [ ] Surface failed CI.
-- [ ] Permission-gated retry where supported.
+- [x] Read workflow runs/jobs/steps/log summaries.
+- [x] Surface failed CI.
+- [x] Permission-gated retry where supported.
 
 ### M18.05 - Releases
-- [ ] Read releases/tags.
-- [ ] Surface release state for project context.
+- [x] Read releases/tags.
+- [x] Surface release state for project context.
 
 ### M18.06 - Cache/rate limits/offline behavior
-- [ ] Persist bounded GitHub cache/sync cursor.
-- [ ] Respect rate limits.
-- [ ] Degrade truthfully when offline/stale.
+- [x] Persist bounded GitHub cache/sync cursor.
+- [x] Respect rate limits.
+- [x] Degrade truthfully when offline/stale.
 
 ### M18.07 - Local/remote reconciliation
-- [ ] Compare local Git Engine state to GitHub remote state.
-- [ ] Detect divergence/stale data.
-- [ ] Never overwrite local work automatically.
+- [x] Compare local Git Engine state to GitHub remote state.
+- [x] Detect divergence/stale data.
+- [x] Never overwrite local work automatically.
 
 ### M18.08 - Security/permissions
-- [ ] Least-privilege connector actions.
-- [ ] Human approval for remote mutations.
-- [ ] Secret/token redaction.
+- [x] Least-privilege connector actions.
+- [x] Human approval for remote mutations.
+- [x] Secret/token redaction.
 
 ### M18.09 - Tests/audit/closure
-- [ ] Mocked/fixture remote tests.
-- [ ] rate-limit/offline tests.
-- [ ] local/remote reconciliation tests.
-- [ ] Full regression/publication.
-- [ ] Independent strict audit.
+- [x] Mocked/fixture remote tests.
+- [x] rate-limit/offline tests.
+- [x] local/remote reconciliation tests.
+- [x] Full regression/publication.
+- [x] Independent strict audit.
 
 ### M18.10 - Owner-directed Prompt Engine / Agent Session UX consolidation
-- [ ] M18.10.01 — Merge the standalone Agents workspace into Prompt Engine as an internal Sessions surface; remove the separate Agents primary-navigation/command-palette entry while preserving accepted M14 session behavior.
-- [ ] M18.10.02 — Preserve backward-compatible `/agents` deep links and exact post-dispatch project/session handoff by routing them into Prompt Engine Sessions without redispatch, provider relaunch, or cross-project leakage.
-- [ ] M18.10.03 — Move Codex/Claude builder-provider readiness and capability presentation to Settings, separate from Codex Audit Provider readiness; keep session Start truthfully gated by the selected provider readiness.
-- [ ] M18.10.04 — Fix Prompt Engine nullable `required_actor` SQLite decoding so NULL remains unavailable/null truth and prompt context/generation no longer throws `Invalid column type Null`.
-- [ ] M18.10.05 — Add focused frontend/Rust routing, readiness, null-actor, exact-session-handoff, M14/M15 regression coverage and require owner-native visual acceptance only after independent V04 source re-audit PASS.
+- [x] M18.10.01 — Merge the standalone Agents workspace into Prompt Engine as an internal Sessions surface; remove the separate Agents primary-navigation/command-palette entry while preserving accepted M14 session behavior.
+- [x] M18.10.02 — Preserve backward-compatible `/agents` deep links and exact post-dispatch project/session handoff by routing them into Prompt Engine Sessions without redispatch, provider relaunch, or cross-project leakage.
+- [x] M18.10.03 — Move Codex/Claude builder-provider readiness and capability presentation to Settings, separate from Codex Audit Provider readiness; keep session Start truthfully gated by the selected provider readiness.
+- [x] M18.10.04 — Fix Prompt Engine nullable `required_actor` SQLite decoding so NULL remains unavailable/null truth and prompt context/generation no longer throws `Invalid column type Null`.
+- [x] M18.10.05 — Add focused frontend/Rust routing, readiness, null-actor, exact-session-handoff, M14/M15 regression coverage and require owner-native visual acceptance only after independent V04 source re-audit PASS.
 
-M18 V03 independent strict audit = CHANGES_REQUIRED (0 BLOCKER / 5 MAJOR). M18 remains OPEN. V04 strict remediation is ACTIVE/READY and is limited to F-M18-V03-001 through F-M18-V03-005 plus owner-directed M18.10.01 through M18.10.05. Execute only `docs/H!veAI/prompts/M18_GITHUB_INTEGRATION_V04_STRICT_REMEDIATION_PROMPT.md`; Codex must keep TASKS.md and CODEX_ROADMAP.md read-only. M19-M20 remain blocked.
+M18 PASS/CLOSED after V07 independent strict source re-audit PASS and final owner-native multi-project GitHub re-acceptance PASS. `F-M18-V06-NATIVE-001` is closed at source/test-contract and native levels. GitHub data may render normally or fail as a bounded panel-local unavailable/error state; the historical full React/WebView black-screen regression was not observed in final native acceptance. M19 is activated.
 
 ---
 
@@ -1720,7 +1721,7 @@ M18 V03 independent strict audit = CHANGES_REQUIRED (0 BLOCKER / 5 MAJOR). M18 r
 - [ ] Full regression/publication.
 - [ ] Independent strict audit.
 
-M19 PLANNED/BLOCKED until M18.
+M19 ACTIVE / READY_FOR_AUTHORITATIVE_PROMPT. M18 is PASS/CLOSED. Author the whole-M19 implementation prompt, then execute M19 as one bounded milestone under normal builder/regression/publication governance and stop for independent strict audit before M20.
 
 ---
 
@@ -1809,11 +1810,11 @@ M20 PLANNED/BLOCKED until M19 and final hardening gates.
 
 # Milestone policy
 
-- M00-M17 are PASS/CLOSED.
+- M00-M18 are PASS/CLOSED.
 - Pre-M10 Native UX Hotfix X01/X02 and pre-M18 X03/X04 are PASS/CLOSED after independent audit and required user native acceptance.
-- M18 remains ACTIVE at 18/20 = 90%; V03 strict audit = CHANGES_REQUIRED with 5 MAJOR findings and V04 strict remediation plus owner-directed M18.10 Prompt Engine/session UX consolidation is current. M19-M20 remain planned/blocked by dependency order.
+- M18 is PASS/CLOSED at 19/20 = 95% after V07 independent strict source re-audit PASS and final owner-native multi-project GitHub re-acceptance PASS. M19 is ACTIVE/READY; M20 remains planned/blocked by dependency order.
 - M10 original strict audit is historical FAIL; M10A remediation is IMPLEMENTATION COMPLETE / PENDING INDEPENDENT RE-AUDIT.
-- M13C R32 remediation is complete; M13 remains open pending independent strict re-audit and user native/visual acceptance. M14A closes M14-R35/R36/R37; M14B closes M14-R38/R39/R40; M14 is PASS/CLOSED on accepted strict-audit and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence; M16 and M17 are PASS/CLOSED.
+- M13C R32 remediation is complete; M13 remains open pending independent strict re-audit and user native/visual acceptance. M14A closes M14-R35/R36/R37; M14B closes M14-R38/R39/R40; M14 is PASS/CLOSED on accepted strict-audit and native evidence. M15 is PASS/CLOSED on accepted strict and user native/visual evidence; M16, M17, and M18 are PASS/CLOSED.
 - M11/M12 historical Project Dashboard/control-plane implementation remains provenance only; under the accepted X04 authority decision it must never override root TASKS current truth.
 - Each future milestone should be executed as one bounded milestone unless an actual independent audit requires a remediation prompt.
 - Subpackage numbering is for traceability, source/evidence mapping, and progress visibility, not an instruction to generate many tiny prompts.
