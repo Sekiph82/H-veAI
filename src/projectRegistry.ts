@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export type RegistryStatus = 'ACTIVE' | 'MISSING' | 'ARCHIVED';
+export type RegistrationDisposition = 'CREATED' | 'ALREADY_ACTIVE' | 'RESTORED_ARCHIVED' | 'RESTORED_MISSING';
 
 export type RemoteMetadata = { name: string; url: string };
 
@@ -48,6 +49,10 @@ export function listRegisteredProjects(query: ProjectListQuery = {}) {
 
 export function registerProject(path: string, name: string) {
   return invoke<ProjectRecord>('hiveai_project_register', { request: { path, name: name || null } });
+}
+
+export function registerProjectWithDisposition(path: string, name: string) {
+  return invoke<{ project: ProjectRecord; disposition: RegistrationDisposition }>('hiveai_project_register_with_disposition', { request: { path, name: name || null } });
 }
 
 export function getRegisteredProject(projectId: string) {

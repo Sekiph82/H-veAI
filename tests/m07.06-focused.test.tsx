@@ -418,9 +418,9 @@ describe("M07.07 live-Registry / route-race boundary", () => {
   it("newly_registered_project_refresh_appears_in_rail", async () => {
     liveRecords = records.slice(0, 2);
     invoke.mockImplementation((command: string, args?: { projectId?: string; request?: { path?: string; name?: string | null } }) => {
-      if (command === "hiveai_project_register") {
+      if (command === "hiveai_project_register_with_disposition") {
         liveRecords = [...liveRecords, records[2]];
-        return Promise.resolve(records[2]);
+        return Promise.resolve({ project: records[2], disposition: "CREATED" });
       }
       return defaultInvoke(command, args);
     });
@@ -448,9 +448,9 @@ describe("M07.07 live-Registry / route-race boundary", () => {
   it("registers_once_from_enter_and_surfaces_native_success", async () => {
     liveRecords = records.slice(0, 2);
     invoke.mockImplementation((command: string, args?: { projectId?: string; request?: { path?: string; name?: string | null } }) => {
-      if (command === "hiveai_project_register") {
+      if (command === "hiveai_project_register_with_disposition") {
         liveRecords = [...liveRecords, records[2]];
-        return Promise.resolve(records[2]);
+        return Promise.resolve({ project: records[2], disposition: "CREATED" });
       }
       return defaultInvoke(command, args);
     });
@@ -462,7 +462,7 @@ describe("M07.07 live-Registry / route-race boundary", () => {
     fireEvent.submit(screen.getByRole("dialog").querySelector("form") as HTMLFormElement);
     fireEvent.submit(screen.getByRole("dialog").querySelector("form") as HTMLFormElement);
     await waitFor(() => expect(liveRecords).toHaveLength(3));
-    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_project_register")).toHaveLength(1);
+    expect(invoke.mock.calls.filter(([command]) => command === "hiveai_project_register_with_disposition")).toHaveLength(1);
     expect(screen.getByRole("status")).toHaveTextContent("was registered locally; GitHub identity is unavailable or not applicable");
     expect(screen.getByRole("heading", { name: "fmcg-erp-system" })).toBeInTheDocument();
   });
@@ -471,9 +471,9 @@ describe("M07.07 live-Registry / route-race boundary", () => {
     const githubRecord = { ...records[2], repository: { id: "repo-3", isGitRepository: true, repositoryRoot: "C:\\Projects\\fmcg-erp-system", currentBranch: "main", headSha: "abc", preferredRemoteUrl: "https://github.com/example/repo.git", defaultBranch: "main", githubOwner: "example", githubRepo: "repo", remotes: [] } };
     liveRecords = records.slice(0, 2);
     invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
-      if (command === "hiveai_project_register") {
+      if (command === "hiveai_project_register_with_disposition") {
         liveRecords = [...liveRecords, githubRecord];
-        return Promise.resolve(githubRecord);
+        return Promise.resolve({ project: githubRecord, disposition: "CREATED" });
       }
       return defaultInvoke(command, args);
     });
@@ -489,7 +489,7 @@ describe("M07.07 live-Registry / route-race boundary", () => {
   it("keeps_add_project_open_and_shows_bounded_native_failure", async () => {
     let rejectRegister: ((reason: Error) => void) | null = null;
     invoke.mockImplementation((command: string, args?: { projectId?: string }) => {
-      if (command === "hiveai_project_register") {
+      if (command === "hiveai_project_register_with_disposition") {
         return new Promise((_, reject) => { rejectRegister = reject; });
       }
       return defaultInvoke(command, args);

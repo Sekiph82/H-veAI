@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
 import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CommandCenterLive } from "../src/command_center_view";
+import { CommandCenterLive, semanticAttentionKey } from "../src/command_center_view";
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
@@ -111,5 +111,22 @@ describe("M11 Command Center evidence surface", () => {
       expect(screen.getByText("Active Work Queue")).toBeInTheDocument();
       view.unmount();
     }
+  });
+
+  it("records M19 history only after the intentional native refresh completes", async () => {
+    renderCommandCenter();
+    await screen.findByText("Canonical task");
+    invoke.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /^Refresh$/i }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_next_best_task_record_history"));
+    const commands = invoke.mock.calls.map(([command]) => command);
+    expect(commands.indexOf("hiveai_github_tracking_refresh")).toBeGreaterThanOrEqual(0);
+    expect(commands.indexOf("hiveai_next_best_task_record_history")).toBeGreaterThan(commands.indexOf("hiveai_github_tracking_refresh"));
+  });
+
+  it("deduplicates by project/task/source evidence while preserving distinct issues", () => {
+    const base = { projectId: "project-1", taskId: "task-1", detail: "remote evidence unavailable", evidence: ["repo/TASKS.md@head-1"] };
+    expect(semanticAttentionKey({ ...base, category: "TASK_BLOCKED", title: "first wording" })).toBe(semanticAttentionKey({ ...base, category: "EVIDENCE_UNCERTAIN", title: "second wording" }));
+    expect(semanticAttentionKey({ ...base, evidence: ["repo/TASKS.md@head-2"] })).not.toBe(semanticAttentionKey(base));
   });
 });

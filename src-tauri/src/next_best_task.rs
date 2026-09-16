@@ -111,6 +111,7 @@ pub struct CandidateInput {
     pub project_name: String,
     pub project_priority: i64,
     pub task_id: String,
+    pub explicit_task_id: Option<String>,
     pub task_title: String,
     pub factual_state: String,
     pub task_priority: Option<i64>,
@@ -130,6 +131,7 @@ pub struct CandidateInput {
 
 #[derive(Debug, Clone)]
 pub struct FailureEvidence {
+    pub evidence_id: String,
     pub source: String,
     pub result: String,
     pub occurred_at: String,
@@ -139,7 +141,15 @@ pub struct FailureEvidence {
 
 impl FailureEvidence {
     fn summary(&self) -> String {
-        format!("{}={} at {} ({}; age={}s)", self.source, self.result, self.occurred_at, self.freshness, self.age_seconds)
+        format!(
+            "{}#{}={} at {} ({}; age={}s)",
+            self.source,
+            self.evidence_id,
+            self.result,
+            self.occurred_at,
+            self.freshness,
+            self.age_seconds
+        )
     }
 }
 
@@ -342,7 +352,8 @@ fn collect_local_inputs(
         }
     };
     // Parse the canonical source at decision time; persisted M09 snapshots are telemetry, not authority.
-    let parsed = match task_intelligence::parse_exact_root_tasks(&project.id, &project.name, &root) {
+    let parsed = match task_intelligence::parse_exact_root_tasks(&project.id, &project.name, &root)
+    {
         Ok(value) => value,
         Err(error) => {
             unavailable.push(format!(
@@ -449,26 +460,14 @@ fn collect_parsed_inputs(
                 (matches.len() == 1).then(|| matches[0].clone())
             })
             .collect::<Vec<_>>();
-        let mut blockers = task.blockers.clone();
+        let blockers = task.blockers.clone();
         let mut uncertainty = Vec::new();
-        for dependency in &dependencies {
-            let matches = explicit_ids.get(&dependency.trim().to_ascii_lowercase());
-            if matches.is_none() {
-                blockers.push(format!(
-                    "dependency {dependency} is not evidenced in canonical TASKS.md"
-                ));
-            } else if matches.is_some_and(|matches| matches.len() != 1) {
-                blockers.push(format!(
-                    "dependency {dependency} is ambiguous in canonical TASKS.md"
-                ));
-            }
-        }
         let (failure_evidence, failure_error) =
             match recent_failure_evidence(database, &project.id, &task.id) {
                 Ok(value) => (value, None),
                 Err(error) => (Vec::new(), Some(error)),
             };
-        let verified_failure_urgency = if failure_evidence.iter().any(|item| item.freshness == "CURRENT" && matches!(item.result.as_str(), "FAIL" | "FAILED" | "ERROR")) { 100 } else { 0 };
+        let verified_failure_urgency = verified_failure_urgency(&failure_evidence);
         if let Some(error) = failure_error {
             uncertainty.push(format!(
                 "linked failure evidence unavailable: {}",
@@ -484,6 +483,7 @@ fn collect_parsed_inputs(
             project_name: project.name.clone(),
             project_priority: project.priority,
             task_id: task.id.clone(),
+            explicit_task_id: task.explicit_task_id.clone(),
             task_title: task.title.clone(),
             factual_state: task.parsed_status.clone(),
             task_priority: task.priority,
@@ -535,17 +535,32 @@ fn collect_remote_inputs(
         return;
     };
     let registry_repository = project.repository.as_ref().and_then(|repository| {
-        Some(format!("{}/{}", repository.github_owner.as_deref()?, repository.github_repo.as_deref()?))
+        Some(format!(
+            "{}/{}",
+            repository.github_owner.as_deref()?,
+            repository.github_repo.as_deref()?
+        ))
     });
-    let expected_branch = project.repository.as_ref().and_then(|repository| repository.default_branch.as_deref().or(repository.current_branch.as_deref()));
-    let fetched_at = DateTime::parse_from_rfc3339(&remote.fetched_at).ok().map(|value| value.with_timezone(&Utc));
-    let now = DateTime::parse_from_rfc3339(&utc_timestamp()).ok().map(|value| value.with_timezone(&Utc));
+    let expected_branch = project.repository.as_ref().and_then(|repository| {
+        repository
+            .default_branch
+            .as_deref()
+            .or(repository.current_branch.as_deref())
+    });
+    let fetched_at = DateTime::parse_from_rfc3339(&remote.fetched_at)
+        .ok()
+        .map(|value| value.with_timezone(&Utc));
+    let now = DateTime::parse_from_rfc3339(&utc_timestamp())
+        .ok()
+        .map(|value| value.with_timezone(&Utc));
     let fresh = fetched_at.zip(now).is_some_and(|(fetched, now)| {
         now.signed_duration_since(fetched) >= Duration::zero()
             && now.signed_duration_since(fetched) <= REMOTE_M19_MAX_AGE
     });
     if remote.remote_health != "CURRENT"
-        || !registry_repository.as_deref().is_some_and(|expected| expected.eq_ignore_ascii_case(&remote.repository))
+        || !registry_repository
+            .as_deref()
+            .is_some_and(|expected| expected.eq_ignore_ascii_case(&remote.repository))
         || !expected_branch.is_some_and(|expected| expected == remote.branch)
         || !fresh
         || remote.remote_head.as_deref().is_none_or(str::is_empty)
@@ -566,11 +581,6 @@ fn collect_remote_inputs(
         }
         return;
     }
-    let known_ids = remote
-        .task_rows
-        .iter()
-        .map(|task| task.id.to_ascii_lowercase())
-        .collect::<HashSet<_>>();
     for task in remote.task_rows {
         let evidence = vec![format!(
             "GitHub {}/{}:{} {} head:{}",
@@ -600,21 +610,30 @@ fn collect_remote_inputs(
             });
             continue;
         }
-        let mut blockers = task.blockers.clone();
-        for dependency in &task.dependencies {
-            if !known_ids.contains(&dependency.to_ascii_lowercase()) {
-                blockers.push(format!(
-                    "dependency {dependency} is not evidenced in canonical TASKS.md"
-                ));
-            }
+        let blockers = task.blockers.clone();
+        let (failure_evidence, failure_error) =
+            match recent_failure_evidence(database, &project.id, &task.id) {
+                Ok(value) => (value, None),
+                Err(error) => (Vec::new(), Some(error)),
+            };
+        let verified_failure_urgency = verified_failure_urgency(&failure_evidence);
+        let mut evidence_uncertainty = Vec::new();
+        if let Some(error) = failure_error {
+            evidence_uncertainty.push(format!(
+                "linked failure evidence unavailable: {}",
+                bounded(&error)
+            ));
+            unavailable.push(format!(
+                "{} {} failure evidence unavailable",
+                project.name, task.id
+            ));
         }
-        let failure_evidence = recent_failure_evidence(database, &project.id, &task.id).unwrap_or_default();
-        let verified_failure_urgency = if failure_evidence.iter().any(|item| item.freshness == "CURRENT" && matches!(item.result.as_str(), "FAIL" | "FAILED" | "ERROR")) { 100 } else { 0 };
         inputs.push(CandidateInput {
             project_id: project.id.clone(),
             project_name: project.name.clone(),
             project_priority: project.priority,
             task_id: task.id.clone(),
+            explicit_task_id: Some(task.id.clone()),
             task_title: task.title.clone(),
             factual_state: task.status.clone(),
             task_priority: task.priority,
@@ -625,7 +644,7 @@ fn collect_remote_inputs(
             external_wait: task.external_wait.clone().or(task.owner_gate.clone()),
             evidence,
             evidence_freshness: "CURRENT".into(),
-            evidence_uncertainty: Vec::new(),
+            evidence_uncertainty,
             verified_failure_urgency,
             failure_evidence,
             context_switch_cost: if task.status.eq_ignore_ascii_case("IN_PROGRESS") {
@@ -640,41 +659,124 @@ fn collect_remote_inputs(
 
 fn build_candidate_set(inputs: Vec<CandidateInput>) -> CandidateSet {
     let mut set = CandidateSet::default();
-    let all_ids = inputs.iter().map(|input| {
-        ((input.project_id.clone(), input.task_id.to_ascii_lowercase()), input.factual_state.clone())
-    }).collect::<HashMap<_, _>>();
+    let all_states = inputs
+        .iter()
+        .map(|input| {
+            (
+                (input.project_id.clone(), input.task_id.to_ascii_lowercase()),
+                input.factual_state.clone(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut canonical_ids: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for input in &inputs {
+        for alias in [
+            Some(input.task_id.as_str()),
+            input.explicit_task_id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let ids = canonical_ids
+                .entry((input.project_id.clone(), alias.trim().to_ascii_lowercase()))
+                .or_default();
+            if !ids.contains(&input.task_id) {
+                ids.push(input.task_id.clone());
+            }
+        }
+    }
+    let mut normalized = Vec::with_capacity(inputs.len());
+    for mut input in inputs {
+        let dependency_refs = if input.dependencies.is_empty() {
+            input.dependency_task_ids.clone()
+        } else {
+            input.dependencies.clone()
+        };
+        input.dependency_task_ids.clear();
+        let mut derived_blockers = Vec::new();
+        for dependency in dependency_refs {
+            let matches = canonical_ids.get(&(
+                input.project_id.clone(),
+                dependency.trim().to_ascii_lowercase(),
+            ));
+            match matches {
+                Some(ids) if ids.len() == 1 => {
+                    let prerequisite = ids[0].clone();
+                    input.dependency_task_ids.push(prerequisite.clone());
+                    if all_states
+                        .get(&(input.project_id.clone(), prerequisite.to_ascii_lowercase()))
+                        .is_some_and(|state| !is_completed(state))
+                    {
+                        derived_blockers.push(format!(
+                            "dependency {dependency} is unfinished from canonical task state"
+                        ));
+                    }
+                }
+                Some(_) => derived_blockers.push(format!(
+                    "dependency {dependency} is ambiguous in canonical TASKS.md"
+                )),
+                None => derived_blockers.push(format!(
+                    "dependency {dependency} is not evidenced in canonical TASKS.md"
+                )),
+            }
+        }
+        let generated_blocker_count = derived_blockers.len();
+        input.blockers.extend(derived_blockers);
+        normalized.push((input, generated_blocker_count));
+    }
     let mut dependent_counts: HashMap<(String, String), HashSet<(String, String)>> = HashMap::new();
-    for dependent in &inputs {
-        let has_independent_blocker = dependent.blockers.iter().any(|blocker| {
-            !blocker.to_ascii_lowercase().contains("depend")
-        });
+    for (dependent, generated_blocker_count) in &normalized {
+        let has_independent_blocker = dependent.blockers.len() > *generated_blocker_count;
         if is_completed(&dependent.factual_state)
             || has_independent_blocker
-            || dependent.external_wait.as_deref().is_some_and(|wait| !wait.trim().is_empty())
-            || !matches!(normalize_actor(dependent.required_actor.as_deref()).as_deref(), Some("CODEX") | Some("CLAUDE"))
+            || dependent
+                .external_wait
+                .as_deref()
+                .is_some_and(|wait| !wait.trim().is_empty())
+            || !matches!(
+                normalize_actor(dependent.required_actor.as_deref()).as_deref(),
+                Some("CODEX") | Some("CLAUDE")
+            )
         {
             continue;
         }
-        let unmet = dependent.dependency_task_ids.iter().filter(|prerequisite| {
-            all_ids.get(&(dependent.project_id.clone(), prerequisite.to_ascii_lowercase()))
-                .is_some_and(|state| !is_completed(state))
-        }).collect::<HashSet<_>>();
+        let unmet = dependent
+            .dependency_task_ids
+            .iter()
+            .filter(|prerequisite| {
+                all_states
+                    .get(&(
+                        dependent.project_id.clone(),
+                        prerequisite.to_ascii_lowercase(),
+                    ))
+                    .is_some_and(|state| !is_completed(state))
+            })
+            .collect::<HashSet<_>>();
         if unmet.len() != 1 {
             continue;
         }
         let prerequisite = unmet.into_iter().next().unwrap();
         dependent_counts
-            .entry((dependent.project_id.clone(), prerequisite.to_ascii_lowercase()))
+            .entry((
+                dependent.project_id.clone(),
+                prerequisite.to_ascii_lowercase(),
+            ))
             .or_default()
-            .insert((dependent.project_id.clone(), dependent.task_id.to_ascii_lowercase()));
+            .insert((
+                dependent.project_id.clone(),
+                dependent.task_id.to_ascii_lowercase(),
+            ));
     }
-    for input in inputs {
+    for (input, _) in normalized {
         if is_completed(&input.factual_state) {
             continue;
         }
         let key = (input.project_id.clone(), input.task_id.to_ascii_lowercase());
         let candidate = Candidate {
-            unblocks: dependent_counts.get(&key).map(|items| items.len() as i64).unwrap_or_default(),
+            unblocks: dependent_counts
+                .get(&key)
+                .map(|items| items.len() as i64)
+                .unwrap_or_default(),
             actor_readiness: normalize_actor(input.required_actor.as_deref())
                 .unwrap_or_else(|| "UNKNOWN".into()),
             uncertainty: input.evidence_uncertainty.clone(),
@@ -831,7 +933,12 @@ fn score_candidates(candidates: Vec<Candidate>) -> Vec<ScoredCandidate> {
                     evidence: if input.failure_evidence.is_empty() {
                         "No linked audit/test evidence for this task".into()
                     } else {
-                        input.failure_evidence.iter().map(FailureEvidence::summary).collect::<Vec<_>>().join(" | ")
+                        input
+                            .failure_evidence
+                            .iter()
+                            .map(FailureEvidence::summary)
+                            .collect::<Vec<_>>()
+                            .join(" | ")
                     },
                 },
                 M19ScoreComponent {
@@ -986,22 +1093,29 @@ fn recent_failure_evidence(
         ("audits", "created_at"),
         ("test_runs", "COALESCE(finished_at, started_at)"),
     ] {
-        let sql = format!("SELECT result, {timestamp} FROM {table} WHERE project_id=?1 AND task_id=?2 ORDER BY {timestamp} DESC LIMIT 1");
-        let latest: Option<(String, Option<String>)> = connection
+        let sql = format!("SELECT id, result, {timestamp} FROM {table} WHERE project_id=?1 AND task_id=?2 ORDER BY {timestamp} DESC LIMIT 1");
+        let latest: Option<(String, String, Option<String>)> = connection
             .query_row(&sql, params![project_id, task_id], |row| {
-                Ok((row.get(0)?, row.get(1)?))
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
             })
             .optional()
             .map_err(|error| format!("{table} failure evidence query failed: {error}"))?;
-        let Some((result, at)) = latest else { continue };
+        let Some((evidence_id, result, at)) = latest else {
+            continue;
+        };
         let at = at.ok_or_else(|| format!("{table} failure timestamp is missing"))?;
         let parsed = DateTime::parse_from_rfc3339(&at)
             .map_err(|error| format!("{table} failure timestamp is malformed: {error}"))?
             .with_timezone(&Utc);
         let age = now.signed_duration_since(parsed);
         let result = result.trim().to_ascii_uppercase();
-        let freshness = if age >= Duration::zero() && age <= RECENT_FAILURE_WINDOW { "CURRENT" } else { "HISTORICAL" };
+        let freshness = if age >= Duration::zero() && age <= RECENT_FAILURE_WINDOW {
+            "CURRENT"
+        } else {
+            "HISTORICAL"
+        };
         evidence.push(FailureEvidence {
+            evidence_id,
             source: table.into(),
             result,
             occurred_at: at,
@@ -1010,6 +1124,19 @@ fn recent_failure_evidence(
         });
     }
     Ok(evidence)
+}
+
+fn verified_failure_urgency(evidence: &[FailureEvidence]) -> i64 {
+    let latest = evidence
+        .iter()
+        .max_by(|left, right| left.occurred_at.cmp(&right.occurred_at));
+    if latest.is_some_and(|item| {
+        item.freshness == "CURRENT" && matches!(item.result.as_str(), "FAIL" | "FAILED" | "ERROR")
+    }) {
+        100
+    } else {
+        0
+    }
 }
 
 fn is_exact_root_task(task: &ParsedTask) -> bool {
@@ -1044,10 +1171,7 @@ fn read_root_tasks(path: &Path) -> Result<(String, String), String> {
     Ok((hash, text))
 }
 
-fn compare(
-    database: &DatabaseState,
-    current: &M19Fingerprint,
-) -> (M19Comparison, Option<String>) {
+fn compare(database: &DatabaseState, current: &M19Fingerprint) -> (M19Comparison, Option<String>) {
     let connection = match database.open_connection() {
         Ok(connection) => connection,
         Err(error) => {
@@ -1090,8 +1214,26 @@ fn compare(
         Some(value) => {
             let previous = match serde_json::from_str::<M19Fingerprint>(value) {
                 Ok(previous) if previous.schema == 1 => previous,
-                Ok(previous) => return (M19Comparison { state: "UNAVAILABLE_INCOMPATIBLE_SCHEMA".into(), previous_generated_at: Some(previous.generated_at), changed: Vec::new() }, None),
-                Err(_) => return (M19Comparison { state: "UNAVAILABLE_INCOMPATIBLE_SCHEMA".into(), previous_generated_at: None, changed: Vec::new() }, None),
+                Ok(previous) => {
+                    return (
+                        M19Comparison {
+                            state: "UNAVAILABLE_INCOMPATIBLE_SCHEMA".into(),
+                            previous_generated_at: Some(previous.generated_at),
+                            changed: Vec::new(),
+                        },
+                        None,
+                    )
+                }
+                Err(_) => {
+                    return (
+                        M19Comparison {
+                            state: "UNAVAILABLE_INCOMPATIBLE_SCHEMA".into(),
+                            previous_generated_at: None,
+                            changed: Vec::new(),
+                        },
+                        None,
+                    )
+                }
             };
             let mut changed = Vec::new();
             if previous.recommendation != current.recommendation {
@@ -1132,12 +1274,42 @@ pub fn record_history(database: &DatabaseState, snapshot: &M19Snapshot) -> Resul
         generated_at: snapshot.generated_at.clone(),
         active_projects: snapshot.active_projects,
         candidate_count: snapshot.candidate_count,
-        recommendation: snapshot.recommended.as_ref().map(|item| format!("{}:{}", item.project_id, item.task_id)),
-        attention: snapshot.attention.iter().map(|item| format!("{}:{}:{}:{}", item.project_id, item.task_id.as_deref().unwrap_or(""), item.category, item.detail)).collect(),
-        actors: snapshot.actor_readiness.iter().map(|item| format!("{}:{}:{}", item.actor, item.state, item.available)).collect(),
-        fresh_failure_tasks: snapshot.recommended.iter().chain(snapshot.alternatives.iter()).filter(|item| item.score_components.iter().any(|component| component.key == "verified_failure" && component.points > 0)).map(|item| format!("{}:{}", item.project_id, item.task_id)).collect(),
+        recommendation: snapshot
+            .recommended
+            .as_ref()
+            .map(|item| format!("{}:{}", item.project_id, item.task_id)),
+        attention: snapshot
+            .attention
+            .iter()
+            .map(|item| {
+                format!(
+                    "{}:{}:{}:{}",
+                    item.project_id,
+                    item.task_id.as_deref().unwrap_or(""),
+                    item.category,
+                    item.detail
+                )
+            })
+            .collect(),
+        actors: snapshot
+            .actor_readiness
+            .iter()
+            .map(|item| format!("{}:{}:{}", item.actor, item.state, item.available))
+            .collect(),
+        fresh_failure_tasks: snapshot
+            .recommended
+            .iter()
+            .chain(snapshot.alternatives.iter())
+            .filter(|item| {
+                item.score_components
+                    .iter()
+                    .any(|component| component.key == "verified_failure" && component.points > 0)
+            })
+            .map(|item| format!("{}:{}", item.project_id, item.task_id))
+            .collect(),
     };
-    let json = serde_json::to_string(&fingerprint).map_err(|error| format!("serialize fingerprint: {error}"))?;
+    let json = serde_json::to_string(&fingerprint)
+        .map_err(|error| format!("serialize fingerprint: {error}"))?;
     let connection = database.open_connection()?;
     connection.execute("INSERT INTO settings (key,value_json,scope,created_at,updated_at) VALUES (?1,?2,'WORKSPACE',?3,?3) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", params![M19_FINGERPRINT_KEY, json, snapshot.generated_at]).map_err(|error| format!("persist fingerprint failed: {error}"))?;
     Ok(())
@@ -1239,6 +1411,7 @@ mod tests {
             project_name: project.into(),
             project_priority: 1,
             task_id: task.into(),
+            explicit_task_id: Some(task.into()),
             task_title: format!("{task} title"),
             factual_state: "PLANNED".into(),
             task_priority: None,
@@ -1328,16 +1501,37 @@ mod tests {
         let mut dependent = input("project", "B");
         dependent.dependencies = vec!["A".into()];
         dependent.dependency_task_ids = vec!["A".into()];
-        dependent.blockers.push("dependency unfinished".into());
         let set = build_candidate_set(vec![prerequisite, dependent]);
         assert_eq!(set.eligible.len(), 1);
         assert_eq!(set.eligible[0].unblocks, 1);
         assert_eq!(set.attention.len(), 1);
         let mut duplicate = input("project", "B");
         duplicate.dependency_task_ids = vec!["A".into(), "A".into()];
-        duplicate.blockers.push("dependency unfinished".into());
         let deduped = build_candidate_set(vec![input("project", "A"), duplicate]);
         assert_eq!(deduped.eligible[0].unblocks, 1);
+    }
+
+    #[test]
+    fn latest_pass_supersedes_an_older_failure_for_urgency() {
+        let evidence = vec![
+            FailureEvidence {
+                evidence_id: "audit-old".into(),
+                source: "audits".into(),
+                result: "FAIL".into(),
+                occurred_at: "2026-09-16T09:00:00Z".into(),
+                age_seconds: 60,
+                freshness: "CURRENT".into(),
+            },
+            FailureEvidence {
+                evidence_id: "test-new".into(),
+                source: "test_runs".into(),
+                result: "PASS".into(),
+                occurred_at: "2026-09-16T09:01:00Z".into(),
+                age_seconds: 0,
+                freshness: "CURRENT".into(),
+            },
+        ];
+        assert_eq!(verified_failure_urgency(&evidence), 0);
     }
 
     #[test]
@@ -1418,9 +1612,20 @@ mod tests {
     fn m19_snapshot_is_observational_until_history_is_explicitly_recorded() {
         let db_dir = tempdir().unwrap();
         let project_dir = tempdir().unwrap();
-        fs::write(project_dir.path().join("TASKS.md"), "- [ ] TASK-1 — Observe\n  Owner: Codex\n").unwrap();
+        fs::write(
+            project_dir.path().join("TASKS.md"),
+            "- [ ] TASK-1 — Observe\n  Owner: Codex\n",
+        )
+        .unwrap();
         let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
-        register_project(&database, RegisterProjectRequest { path: project_dir.path().to_string_lossy().into(), name: Some("Pure".into()) }).unwrap();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into(),
+                name: Some("Pure".into()),
+            },
+        )
+        .unwrap();
         let before = database.open_connection().unwrap().query_row("SELECT (SELECT COUNT(*) FROM settings)+(SELECT COUNT(*) FROM task_events)+(SELECT COUNT(*) FROM task_sources)", [], |row| row.get::<_, i64>(0)).unwrap();
         let _ = snapshot(&database).unwrap();
         let _ = snapshot(&database).unwrap();

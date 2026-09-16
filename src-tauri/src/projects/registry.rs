@@ -60,6 +60,22 @@ pub struct ProjectRecord {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RegistrationDisposition {
+    Created,
+    AlreadyActive,
+    RestoredArchived,
+    RestoredMissing,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterProjectResult {
+    pub project: ProjectRecord,
+    pub disposition: RegistrationDisposition,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryRecord {
     pub id: String,
@@ -121,32 +137,58 @@ pub fn register_project(
     database: &DatabaseState,
     request: RegisterProjectRequest,
 ) -> Result<ProjectRecord, String> {
+    Ok(register_project_with_disposition(database, request)?.project)
+}
+
+pub fn register_project_with_disposition(
+    database: &DatabaseState,
+    request: RegisterProjectRequest,
+) -> Result<RegisterProjectResult, String> {
     let validated = validate_project_path(&request.path)?;
     let git = detect_git_metadata(&validated.canonical_path);
     let connection = database.open_connection()?;
     let existing_ids = connection
         .prepare("SELECT id FROM projects WHERE normalized_path=?1 ORDER BY id")
         .map_err(db_error)?
-        .query_map([validated.normalized_path.as_str()], |row| row.get::<_, String>(0))
+        .query_map([validated.normalized_path.as_str()], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(db_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(db_error)?;
     if existing_ids.len() > 1 {
-        return Err("multiple registered projects share this normalized path; recovery is fail-closed".into());
+        return Err(
+            "multiple registered projects share this normalized path; recovery is fail-closed"
+                .into(),
+        );
     }
     if let Some(existing_id) = existing_ids.first() {
+        validate_repository_identity(&connection, existing_id, &git, &validated.canonical_path)?;
+        let previous_status = fetch_project(database, existing_id)?.status;
         let now = timestamp();
         let tx = connection.unchecked_transaction().map_err(db_error)?;
         tx.execute(
             "UPDATE projects SET local_path=?2, original_path=?3, normalized_path=?4, status='ACTIVE', archived_at=NULL, last_validated_at=?5, updated_at=?5 WHERE id=?1",
             params![existing_id, validated.canonical_path.to_string_lossy(), validated.display_path, validated.normalized_path, now],
         ).map_err(db_error)?;
-        if let (Some(owner), Some(repo), Some(branch)) = (git.github_owner.as_deref(), git.github_repo.as_deref(), git.default_branch.as_deref()) {
+        if let (Some(owner), Some(repo), Some(branch)) = (
+            git.github_owner.as_deref(),
+            git.github_repo.as_deref(),
+            git.default_branch.as_deref(),
+        ) {
             tx.execute("DELETE FROM github_project_exclusions WHERE lower(repository)=lower(?1) AND branch=?2", params![format!("{owner}/{repo}"), branch]).map_err(db_error)?;
         }
         crate::control_plane::mark_truth_dirty_tx(&tx, existing_id, "PROJECT_EXPLICIT_RECOVERY")?;
         tx.commit().map_err(db_error)?;
-        return fetch_project(database, existing_id);
+        let disposition = match previous_status.as_str() {
+            "ARCHIVED" => RegistrationDisposition::RestoredArchived,
+            "MISSING" => RegistrationDisposition::RestoredMissing,
+            _ => RegistrationDisposition::AlreadyActive,
+        };
+        return Ok(RegisterProjectResult {
+            project: fetch_project(database, existing_id)?,
+            disposition,
+        });
     }
     ensure_no_duplicate(&connection, &validated.normalized_path, None)?;
     let now = timestamp();
@@ -173,7 +215,10 @@ pub fn register_project(
     ).map_err(db_error)?;
     insert_repository(&tx, &project_id, &git, &now)?;
     tx.commit().map_err(db_error)?;
-    fetch_project(database, &project_id)
+    Ok(RegisterProjectResult {
+        project: fetch_project(database, &project_id)?,
+        disposition: RegistrationDisposition::Created,
+    })
 }
 
 pub fn fetch_project(database: &DatabaseState, project_id: &str) -> Result<ProjectRecord, String> {
@@ -228,6 +273,20 @@ pub fn refresh_repository_metadata(
         insert_repository(&tx, project_id, &git, &now)?;
         tx.commit().map_err(db_error)?;
     }
+    connection
+        .execute(
+            "UPDATE projects SET status=?2, last_validated_at=?3, updated_at=?3 WHERE id=?1",
+            params![
+                project_id,
+                if Path::new(&project.normalized_path).exists() {
+                    "ACTIVE"
+                } else {
+                    "MISSING"
+                },
+                now
+            ],
+        )
+        .map_err(db_error)?;
     fetch_project(database, project_id)
 }
 
@@ -301,51 +360,12 @@ pub fn repair_project_path(
         &validated.normalized_path,
         Some(&request.project_id),
     )?;
-    let existing_identity: Option<(i64, Option<String>, Option<String>)> = connection
-        .query_row(
-            "SELECT is_git_repository, remote_url, head_sha FROM repositories WHERE project_id = ?1",
-            [&request.project_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(db_error)?;
-    if existing_identity.is_none() && git.is_git_repository {
-        return Err("legacy registered project has no repository identity; Git repair is rejected until identity is explicitly recovered".to_string());
-    }
-    if let Some((old_is_git, old_remote, old_head)) = existing_identity {
-        if (old_is_git == 1) != git.is_git_repository {
-            return Err("repository type changed while repairing project path".to_string());
-        }
-        if git.is_git_repository {
-            match (old_remote.as_deref(), git.preferred_remote_url.as_deref()) {
-                (Some(old), Some(new)) if old != new => {
-                    return Err(
-                        "new path repository remote identity does not match the registered project"
-                            .to_string(),
-                    );
-                }
-                (None, Some(_)) | (Some(_), None) => {
-                    return Err("repository remote identity is ambiguous; repair requires an explicit matching remote".to_string());
-                }
-                _ => {}
-            }
-            // A matching sanitized remote is the durable repository identity; a moved
-            // checkout may legitimately advance its HEAD between registry observations.
-            // When no remote exists, the commit remains the only strong identity signal.
-            if old_remote.is_none() && git.preferred_remote_url.is_none() {
-                let old = old_head.as_deref().ok_or_else(|| {
-                    "repository identity is ambiguous; stored HEAD evidence is required".to_string()
-                })?;
-                let new = git.head_sha.as_deref().ok_or_else(|| {
-                    "repository identity is ambiguous; replacement HEAD evidence is required"
-                        .to_string()
-                })?;
-                if old != new && !is_ancestor(&validated.canonical_path, old, new) {
-                    return Err("repository identity is unrelated; stored HEAD is not an ancestor of replacement HEAD".to_string());
-                }
-            }
-        }
-    }
+    validate_repository_identity(
+        &connection,
+        &request.project_id,
+        &git,
+        &validated.canonical_path,
+    )?;
     let now = timestamp();
     let tx = connection.unchecked_transaction().map_err(db_error)?;
     if let (Some(owner), Some(repo), Some(branch)) = (
@@ -1155,13 +1175,21 @@ mod tests {
         let project_dir = tempdir().unwrap();
         git(project_dir.path(), &["init", "-q"]);
         git(project_dir.path(), &["config", "user.name", "Test"]);
-        git(project_dir.path(), &["config", "user.email", "test@example.com"]);
+        git(
+            project_dir.path(),
+            &["config", "user.email", "test@example.com"],
+        );
         std::fs::write(project_dir.path().join("README.md"), "fixture").unwrap();
         git(project_dir.path(), &["add", "README.md"]);
         git(project_dir.path(), &["commit", "-qm", "fixture"]);
         git(
             project_dir.path(),
-            &["remote", "add", "origin", "https://github.com/Sekiph82/example.git"],
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/Sekiph82/example.git",
+            ],
         );
         let project = register_project(
             &database,
@@ -1209,27 +1237,211 @@ mod tests {
     fn explicit_add_recovers_archived_identity_and_preserves_settings() {
         let (_db_dir, database) = database();
         let project_dir = tempdir().unwrap();
-        let original = register_project(&database, RegisterProjectRequest {
-            path: project_dir.path().to_string_lossy().into_owned(), name: Some("Beach Cocktails".into()),
-        }).unwrap();
-        update_project_settings(&database, UpdateProjectSettingsRequest {
-            project_id: original.id.clone(), priority: Some(2), preferred_builder: Some("Codex".into()),
-            preferred_auditor: Some("Claude".into()), task_source_policy: None, preferred_agent_provider: None,
-        }).unwrap();
+        let original = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into_owned(),
+                name: Some("Beach Cocktails".into()),
+            },
+        )
+        .unwrap();
+        update_project_settings(
+            &database,
+            UpdateProjectSettingsRequest {
+                project_id: original.id.clone(),
+                priority: Some(2),
+                preferred_builder: Some("Codex".into()),
+                preferred_auditor: Some("Claude".into()),
+                task_source_policy: None,
+                preferred_agent_provider: None,
+            },
+        )
+        .unwrap();
         archive_project(&database, &original.id).unwrap();
-        assert!(list_projects(&database, ProjectListQuery::default()).unwrap().is_empty());
-        let recovered = register_project(&database, RegisterProjectRequest {
-            path: project_dir.path().to_string_lossy().into_owned(), name: Some("Renamed input".into()),
-        }).unwrap();
+        assert!(list_projects(&database, ProjectListQuery::default())
+            .unwrap()
+            .is_empty());
+        let registration = register_project_with_disposition(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into_owned(),
+                name: Some("Renamed input".into()),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            registration.disposition,
+            RegistrationDisposition::RestoredArchived
+        ));
+        let recovered = registration.project;
         assert_eq!(recovered.id, original.id);
         assert_eq!(recovered.status, "ACTIVE");
         assert_eq!(recovered.priority, 2);
         assert_eq!(recovered.preferred_builder.as_deref(), Some("Codex"));
-        assert_eq!(list_projects(&database, ProjectListQuery::default()).unwrap().len(), 1);
-        let duplicate = register_project(&database, RegisterProjectRequest {
-            path: project_dir.path().to_string_lossy().into_owned(), name: Some("Again".into()),
-        }).unwrap();
+        assert_eq!(
+            list_projects(&database, ProjectListQuery::default())
+                .unwrap()
+                .len(),
+            1
+        );
+        let duplicate = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into_owned(),
+                name: Some("Again".into()),
+            },
+        )
+        .unwrap();
         assert_eq!(duplicate.id, original.id);
-        assert_eq!(list_projects(&database, ProjectListQuery { include_archived: Some(true), ..Default::default() }).unwrap().len(), 1);
+        assert_eq!(
+            list_projects(
+                &database,
+                ProjectListQuery {
+                    include_archived: Some(true),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .len(),
+            1
+        );
     }
+
+    #[test]
+    fn explicit_add_recovers_missing_identity_with_authoritative_disposition() {
+        let (_db_dir, database) = database();
+        let project_dir = tempdir().unwrap();
+        let path = project_dir.path().to_string_lossy().into_owned();
+        let original = register_project(
+            &database,
+            RegisterProjectRequest {
+                path: path.clone(),
+                name: Some("Missing recovery".into()),
+            },
+        )
+        .unwrap();
+        std::fs::remove_dir(project_dir.path()).unwrap();
+        assert_eq!(
+            refresh_repository_metadata(&database, &original.id)
+                .unwrap()
+                .status,
+            "MISSING"
+        );
+        std::fs::create_dir_all(&path).unwrap();
+        let registration = register_project_with_disposition(
+            &database,
+            RegisterProjectRequest {
+                path,
+                name: Some("Recovered".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(registration.project.id, original.id);
+        assert!(matches!(
+            registration.disposition,
+            RegistrationDisposition::RestoredMissing
+        ));
+    }
+
+    #[test]
+    fn explicit_add_rejects_incompatible_repository_identity() {
+        let (_db_dir, database) = database();
+        let project_dir = tempdir().unwrap();
+        git(project_dir.path(), &["init", "-q"]);
+        git(project_dir.path(), &["config", "user.name", "Test"]);
+        git(
+            project_dir.path(),
+            &["config", "user.email", "test@example.com"],
+        );
+        std::fs::write(project_dir.path().join("README.md"), "fixture").unwrap();
+        git(project_dir.path(), &["add", "README.md"]);
+        git(project_dir.path(), &["commit", "-qm", "fixture"]);
+        git(
+            project_dir.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/example/original.git",
+            ],
+        );
+        let path = project_dir.path().to_string_lossy().into_owned();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: path.clone(),
+                name: Some("Identity".into()),
+            },
+        )
+        .unwrap();
+        git(
+            project_dir.path(),
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                "https://github.com/example/incompatible.git",
+            ],
+        );
+        let error = register_project_with_disposition(
+            &database,
+            RegisterProjectRequest {
+                path,
+                name: Some("Replacement".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("identity"), "unexpected error: {error}");
+    }
+}
+
+fn validate_repository_identity(
+    connection: &Connection,
+    project_id: &str,
+    git: &GitMetadata,
+    candidate_root: &Path,
+) -> Result<(), String> {
+    let existing_identity: Option<(i64, Option<String>, Option<String>)> = connection
+        .query_row(
+            "SELECT is_git_repository, remote_url, head_sha FROM repositories WHERE project_id = ?1",
+            [project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if existing_identity.is_none() && git.is_git_repository {
+        return Err("legacy registered project has no repository identity; recovery is rejected until identity is explicitly recovered".to_string());
+    }
+    if let Some((old_is_git, old_remote, old_head)) = existing_identity {
+        if (old_is_git == 1) != git.is_git_repository {
+            return Err("repository type changed while recovering project path".to_string());
+        }
+        if git.is_git_repository {
+            match (old_remote.as_deref(), git.preferred_remote_url.as_deref()) {
+                (Some(old), Some(new)) if old != new => {
+                    return Err(
+                        "repository remote identity does not match the registered project"
+                            .to_string(),
+                    );
+                }
+                (None, Some(_)) | (Some(_), None) => {
+                    return Err("repository remote identity is ambiguous; recovery requires an explicit matching remote".to_string());
+                }
+                _ => {}
+            }
+            if old_remote.is_none() && git.preferred_remote_url.is_none() {
+                let old = old_head.as_deref().ok_or_else(|| {
+                    "repository identity is ambiguous; stored HEAD evidence is required".to_string()
+                })?;
+                let new = git.head_sha.as_deref().ok_or_else(|| {
+                    "repository identity is ambiguous; replacement HEAD evidence is required"
+                        .to_string()
+                })?;
+                if old != new && !is_ancestor(candidate_root, old, new) {
+                    return Err("repository identity is unrelated; stored HEAD is not an ancestor of replacement HEAD".to_string());
+                }
+            }
+        }
+    }
+    Ok(())
 }

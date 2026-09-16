@@ -8,6 +8,7 @@ import { LoadingState, MetricCard, SectionHeader, formatPercent } from "./compon
 import {
   getCommandCenterSnapshot,
   listenForGitHubTrackingUpdate,
+  recordNextBestTaskHistory,
   previewSnapshot,
   registryFallback,
   refreshGitHubTracking,
@@ -19,16 +20,22 @@ import { useProjectRegistry } from "./registryContext";
 
 const count = (value: number | null | undefined) => value == null ? "-" : String(value);
 
+export function semanticAttentionKey(item: { projectId?: string; taskId?: string | null; category?: string; state?: string; title?: string; detail?: string; evidence?: string[] }) {
+  const signal = `${item.category ?? ""} ${item.state ?? ""} ${item.detail ?? ""}`.toLowerCase();
+  const family = item.evidence?.length || item.detail?.trim() ? "evidence" : signal.includes("rate limit") || signal.includes("github 403") || signal.includes("github 429")
+    ? "rate_limit" : signal.includes("blocked") || signal.includes("blocker") || signal.includes("dependency")
+      ? "blocker" : signal.includes("wait") || signal.includes("human")
+        ? "wait" : signal.includes("fail") || signal.includes("error")
+          ? "failure" : "issue";
+  const evidence = (item.evidence ?? []).map((value) => value.toLowerCase().replace(/[^a-z0-9:/@._-]+/g, " ").trim()).filter(Boolean).join("|");
+  const detail = (item.detail ?? "").toLowerCase().replace(/[^a-z0-9:/@._-]+/g, " ").trim();
+  return `${item.projectId ?? ""}:${item.taskId ?? ""}:${family}:${evidence || detail || "no-source-evidence"}`;
+}
+
 function NextBestTaskPanel({ data }: { data: CommandCenterSnapshot }) {
   const m19 = data.engineeringBrief.m19 ?? data.m19;
   const recommendation = m19?.recommended;
-  const semanticKey = (item: { projectId?: string; taskId?: string | null; category?: string; state?: string; title?: string }) => {
-    const family = `${item.category ?? ""} ${item.state ?? ""}`.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
-      .replace(/rate limit|rate limited|github 403|github 429/g, "rate_limit")
-      .replace(/blocked|blocker|dependency/g, "blocker")
-      .replace(/wait|waiting|human/g, "wait");
-    return `${item.projectId ?? ""}:${item.taskId ?? ""}:${family}:${(item.title ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()}`;
-  };
+  const semanticKey = semanticAttentionKey;
   const seen = new Set<string>();
   const legacyAttention = data.attention.filter((item) => { const key = semanticKey(item); if (seen.has(key)) return false; seen.add(key); return true; });
   const m19Attention = (m19?.attention ?? []).filter((item) => { const key = semanticKey(item); if (seen.has(key)) return false; seen.add(key); return true; });
@@ -42,7 +49,7 @@ function NextBestTaskPanel({ data }: { data: CommandCenterSnapshot }) {
       <details className="system-detail"><summary>Why this is recommended</summary><div className="brief-line"><div><strong>Eligibility</strong><small>{recommendation.eligibilityReason}</small></div></div>{recommendation.scoreComponents.map((component) => <div className="brief-line" key={component.key}><div><strong>{component.label}: {component.points > 0 ? "+" : ""}{component.points}</strong><small>{component.evidence}</small></div></div>)}<div className="brief-line"><div><strong>Evidence</strong><small>{recommendation.evidence.join(" | ")}</small></div></div>{recommendation.uncertainty.length ? <div className="brief-line"><div><strong>Uncertainty</strong><small>{recommendation.uncertainty.join(" | ")}</small></div></div> : null}</details>
     </> : <div className="assistant-message">No eligible task can be recommended from current evidence.</div>}
     {m19.alternatives.length ? <details className="system-detail"><summary>Lower-ranked alternatives</summary>{m19.alternatives.map((alternative) => <div className="brief-line" key={`${alternative.projectId}:${alternative.taskId}`}><div><strong>#{alternative.rank} {alternative.projectName} · {alternative.taskTitle}</strong><small>{alternative.explanation}</small></div></div>)}</details> : null}
-    {m19Attention.length ? <details className="system-detail" open><summary>M19 attention</summary>{m19Attention.slice(0, 8).map((item) => <div className="brief-line" key={`${item.projectId}:${item.taskId}:${item.category}`}><div><strong>{item.projectName} · {item.title}</strong><small>{item.category} · {item.detail} · {item.evidence.join(" | ")}</small></div></div>)}</details> : null}
+    {m19Attention.length ? <details className="system-detail" open><summary>M19 attention</summary>{m19Attention.slice(0, 8).map((item) => <div className="brief-line" key={semanticKey(item)}><div><strong>{item.projectName} · {item.title}</strong><small>{item.category} · {item.detail} · {item.evidence.join(" | ")}</small></div></div>)}</details> : null}
     {m19.unavailableInputs.length ? <div className="assistant-message">Unavailable inputs: {m19.unavailableInputs.join(" | ")}</div> : null}</> : <div className="assistant-message">M19 decision inputs unavailable; only native factual inputs are currently available.</div>}
     {legacyAttention.length ? <details className="system-detail"><summary>Portfolio attention</summary>{legacyAttention.slice(0, 8).map((item) => <div className="brief-line" key={item.id}><div><strong>{item.projectName || "Portfolio evidence"} · {item.title}</strong><small>{item.state} · {item.category}</small></div></div>)}</details> : null}
   </section>;
@@ -123,7 +130,10 @@ export function CommandCenterLive() {
       return;
     }
     setLoading(true);
-    void refreshGitHubTracking().then(() => refresh()).catch(() => refresh());
+    void refreshGitHubTracking()
+      .then(() => recordNextBestTaskHistory())
+      .then(() => refresh())
+      .catch(() => refresh());
   }, [desktop, refresh]);
   return <div className="command-center" aria-label="Command Center overview">
     {error ? <div className="safe-notice" role="alert">{error}</div> : null}

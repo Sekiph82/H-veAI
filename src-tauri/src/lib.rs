@@ -623,6 +623,14 @@ mod app_commands {
     }
 
     #[tauri::command]
+    fn hiveai_project_register_with_disposition(
+        database: tauri::State<'_, DatabaseState>,
+        request: RegisterProjectRequest,
+    ) -> Result<projects::RegisterProjectResult, String> {
+        projects::register_project_with_disposition(&database, request)
+    }
+
+    #[tauri::command]
     fn hiveai_project_get(
         database: tauri::State<'_, DatabaseState>,
         project_id: String,
@@ -886,6 +894,7 @@ mod app_commands {
                 hiveai_audit_link_remediation_session,
                 hiveai_projects_list,
                 hiveai_project_register,
+                hiveai_project_register_with_disposition,
                 hiveai_project_get,
                 hiveai_project_update_settings,
                 hiveai_project_archive,

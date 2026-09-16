@@ -46,7 +46,7 @@ import {
   isTauriDesktop,
   listRegisteredProjects,
   refreshWatcherSet,
-  registerProject,
+  registerProjectWithDisposition,
   removeProject,
   repairProjectPath,
   updateProjectSettings,
@@ -774,21 +774,23 @@ export function Projects() {
           onClose={() => setDialog(null)}
           onSubmit={async (path, name) => {
             if (dialog === "register") {
-              const registered = await registerProject(path.trim(), name.trim());
-              const existing = records.find((item) => item.id === registered.id);
+              const registration = await registerProjectWithDisposition(path.trim(), name.trim());
+              const registered = registration.project;
               await refreshRegistry();
               setRecords((current) => [registered, ...current.filter((item) => item.id !== registered.id)]);
               setError(null);
               const githubIdentity = registered.repository?.githubOwner && registered.repository.githubRepo
                 ? `${registered.repository.githubOwner}/${registered.repository.githubRepo}`
                 : null;
-              setSuccess(existing?.status === "ARCHIVED"
-                ? `${registered.name} was already registered and has been restored with its existing identity.`
-                : existing
-                  ? `${registered.name} is already registered and remains visible with its existing identity.`
-                  : githubIdentity
-                    ? `${registered.name} was registered with GitHub identity ${githubIdentity} and is now visible in Projects.`
-                    : `${registered.name} was registered locally; GitHub identity is unavailable or not applicable.`);
+              const dispositionMessage = {
+                CREATED: githubIdentity
+                  ? `${registered.name} was registered with GitHub identity ${githubIdentity} and is now visible in Projects.`
+                  : `${registered.name} was registered locally; GitHub identity is unavailable or not applicable.`,
+                ALREADY_ACTIVE: `${registered.name} is already registered and remains visible with its existing identity.`,
+                RESTORED_ARCHIVED: `${registered.name} was already registered and has been restored with its existing identity.`,
+                RESTORED_MISSING: `${registered.name} was missing and has been restored with its existing identity.`,
+              } as const;
+              setSuccess(dispositionMessage[registration.disposition]);
               selectProject(registered.id, true);
               setRefresh((value) => value + 1);
             } else if (selected) {

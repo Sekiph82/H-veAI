@@ -8,18 +8,21 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
+#[cfg(not(test))]
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+#[cfg(not(test))]
+use std::hash::{Hash, Hasher};
 #[cfg(not(test))]
 use std::io::Read;
 #[cfg(not(test))]
 use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 #[cfg(not(test))]
 use std::thread;
 use std::time::Duration;
 #[cfg(not(test))]
 use std::time::Instant;
-#[cfg(not(test))]
-use std::sync::{Mutex, OnceLock};
 
 const CACHE_SCHEMA_VERSION: u32 = 2;
 const MAX_BRANCHES: usize = 25;
@@ -42,12 +45,42 @@ const MAX_COMMENTS: usize = 10;
 const MAX_BODY_CHARS: usize = 512;
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 const CACHE_MAX_AGE_SECONDS: i64 = 30;
+const PROCESS_REQUESTS_PER_HOUR: usize = 48;
+const COALESCE_WAIT_ATTEMPTS: usize = 20;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 const HTTP_STATUS_MARKER: &str = "__HIVEAI_HTTP_STATUS__";
 #[cfg(not(test))]
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(90);
 #[cfg(not(test))]
 static PORTFOLIO_RATE_LIMIT_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+#[cfg(not(test))]
+static PORTFOLIO_REQUEST_GOVERNOR: OnceLock<Mutex<ProcessRequestGovernor>> = OnceLock::new();
+
+#[cfg(not(test))]
+#[derive(Debug)]
+struct ProcessRequestGovernor {
+    window_started: Instant,
+    requests: usize,
+    in_flight: HashSet<u64>,
+}
+
+#[cfg(not(test))]
+impl Default for ProcessRequestGovernor {
+    fn default() -> Self {
+        Self {
+            window_started: Instant::now(),
+            requests: 0,
+            in_flight: HashSet::new(),
+        }
+    }
+}
+
+#[cfg(not(test))]
+enum RequestAdmission {
+    Owner(u64),
+    Coalesced,
+    BudgetExhausted,
+}
 
 const RESOURCE_REPOSITORY: &str = "GITHUB_REPOSITORY";
 const RESOURCE_BRANCHES: &str = "GITHUB_BRANCHES";
@@ -427,12 +460,16 @@ impl GitHubReadTransport for FixtureTransport {
         }
         let body = if url.ends_with("/actions/runs") || url.contains("/actions/runs?") {
             r#"{"workflow_runs":[]}"#
-        } else if url.contains("/repos/") && !url.contains("/branches") && !url.contains("/commits") {
+        } else if url.contains("/repos/") && !url.contains("/branches") && !url.contains("/commits")
+        {
             r#"{}"#
         } else {
             "[]"
         };
-        Ok(ReadResponse { status: 200, body: body.into() })
+        Ok(ReadResponse {
+            status: 200,
+            body: body.into(),
+        })
     }
 }
 
@@ -454,13 +491,7 @@ fn snapshot_with_transport<T: GitHubReadTransport>(
 ) -> Result<GitHubIntegrationSnapshot, String> {
     let identity = identity_from_project(project).map(identity_from_view)?;
     let now = utc_timestamp();
-    let resources = fetch_resources_with_transport(
-        database,
-        project,
-        &identity,
-        &now,
-        transport,
-    );
+    let resources = fetch_resources_with_transport(database, project, &identity, &now, transport);
 
     let repository_result = resources.iter().find(|r| r.kind == RESOURCE_REPOSITORY);
     let repository_value = repository_result.and_then(|r| r.value.as_ref());
@@ -672,9 +703,24 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
     let mut resources = Vec::with_capacity(PRIMARY_RESOURCE_KINDS.len());
     for (kind, url) in specs {
         let resource = if primary_circuit_open {
-            cached_after_rate_limit(database, project, &identity.full_name, &identity.branch, kind)
+            cached_after_rate_limit(
+                database,
+                project,
+                &identity.full_name,
+                &identity.branch,
+                kind,
+            )
         } else {
-            load_or_fetch(database, project, &identity.full_name, &identity.branch, kind, &url, now, transport)
+            load_or_fetch(
+                database,
+                project,
+                &identity.full_name,
+                &identity.branch,
+                kind,
+                &url,
+                now,
+                transport,
+            )
         };
         if resource.state == "RATE_LIMITED" {
             primary_circuit_open = true;
@@ -688,81 +734,86 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
         let base = format!("{repository_path}/pulls/{}", pr.number);
         resources.push(acquire_enrichment(
             &mut budget,
-                database,
-                project,
-                &identity.full_name,
-                &identity.branch,
-                &format!("GITHUB_PR_{}_DETAIL", pr.number),
-                &base,
-                now,
-                transport,
+            database,
+            project,
+            &identity.full_name,
+            &identity.branch,
+            &format!("GITHUB_PR_{}_DETAIL", pr.number),
+            &base,
+            now,
+            transport,
         ));
         resources.push(acquire_enrichment(
             &mut budget,
-                database,
-                project,
-                &identity.full_name,
-                &identity.branch,
-                &format!("GITHUB_PR_{}_FILES", pr.number),
-                &format!("{base}/files?per_page={MAX_PR_FILES}"),
-                now,
-                transport,
+            database,
+            project,
+            &identity.full_name,
+            &identity.branch,
+            &format!("GITHUB_PR_{}_FILES", pr.number),
+            &format!("{base}/files?per_page={MAX_PR_FILES}"),
+            now,
+            transport,
         ));
         resources.push(acquire_enrichment(
             &mut budget,
-                database,
-                project,
-                &identity.full_name,
-                &identity.branch,
-                &format!("GITHUB_PR_{}_REVIEWS", pr.number),
-                &format!("{base}/reviews?per_page={MAX_PR_REVIEWS}"),
-                now,
-                transport,
+            database,
+            project,
+            &identity.full_name,
+            &identity.branch,
+            &format!("GITHUB_PR_{}_REVIEWS", pr.number),
+            &format!("{base}/reviews?per_page={MAX_PR_REVIEWS}"),
+            now,
+            transport,
         ));
         resources.push(acquire_enrichment(
             &mut budget,
-                database,
-                project,
-                &identity.full_name,
-                &identity.branch,
-                &format!("GITHUB_PR_{}_COMMENTS", pr.number),
-                &format!("{repository_path}/issues/{}/comments?per_page={MAX_COMMENTS}", pr.number),
-                now,
-                transport,
+            database,
+            project,
+            &identity.full_name,
+            &identity.branch,
+            &format!("GITHUB_PR_{}_COMMENTS", pr.number),
+            &format!(
+                "{repository_path}/issues/{}/comments?per_page={MAX_COMMENTS}",
+                pr.number
+            ),
+            now,
+            transport,
         ));
         resources.push(acquire_enrichment(
             &mut budget,
-                database,
-                project,
-                &identity.full_name,
-                &identity.branch,
-                &format!("GITHUB_PR_{}_REVIEW_COMMENTS", pr.number),
-                &format!("{base}/comments?per_page={MAX_COMMENTS}"),
-                now,
-                transport,
+            database,
+            project,
+            &identity.full_name,
+            &identity.branch,
+            &format!("GITHUB_PR_{}_REVIEW_COMMENTS", pr.number),
+            &format!("{base}/comments?per_page={MAX_COMMENTS}"),
+            now,
+            transport,
         ));
         if let Some(head_sha) = pr.head_sha.as_deref() {
             resources.push(acquire_enrichment(
                 &mut budget,
-                    database,
-                    project,
-                    &identity.full_name,
-                    &identity.branch,
-                    &format!("GITHUB_PR_{}_CHECKS", pr.number),
-                    &format!("{repository_path}/commits/{head_sha}/check-runs?per_page={MAX_PR_CHECKS}"),
-                    now,
-                    transport,
+                database,
+                project,
+                &identity.full_name,
+                &identity.branch,
+                &format!("GITHUB_PR_{}_CHECKS", pr.number),
+                &format!(
+                    "{repository_path}/commits/{head_sha}/check-runs?per_page={MAX_PR_CHECKS}"
+                ),
+                now,
+                transport,
             ));
             resources.push(acquire_enrichment(
                 &mut budget,
-                    database,
-                    project,
-                    &identity.full_name,
-                    &identity.branch,
-                    &format!("GITHUB_PR_{}_STATUS", pr.number),
-                    &format!("{repository_path}/commits/{head_sha}/status?per_page={MAX_PR_CHECKS}"),
-                    now,
-                    transport,
+                database,
+                project,
+                &identity.full_name,
+                &identity.branch,
+                &format!("GITHUB_PR_{}_STATUS", pr.number),
+                &format!("{repository_path}/commits/{head_sha}/status?per_page={MAX_PR_CHECKS}"),
+                now,
+                transport,
             ));
         }
     }
@@ -776,7 +827,10 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
             &identity.full_name,
             &identity.branch,
             &kind,
-            &format!("{repository_path}/actions/runs/{}/jobs?per_page={MAX_ACTION_JOBS}", run.id),
+            &format!(
+                "{repository_path}/actions/runs/{}/jobs?per_page={MAX_ACTION_JOBS}",
+                run.id
+            ),
             now,
             transport,
         );
@@ -795,14 +849,14 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
             let kind = format!("GITHUB_ACTION_JOB_{}_LOG", job_id);
             resources.push(acquire_enrichment_text(
                 &mut budget,
-                    database,
-                    project,
-                    &identity.full_name,
-                    &identity.branch,
-                    &kind,
-                    &format!("{repository_path}/actions/jobs/{job_id}/logs"),
-                    now,
-                    transport,
+                database,
+                project,
+                &identity.full_name,
+                &identity.branch,
+                &kind,
+                &format!("{repository_path}/actions/jobs/{job_id}/logs"),
+                now,
+                transport,
             ));
         }
     }
@@ -821,8 +875,12 @@ fn acquire_enrichment<T: GitHubReadTransport>(
     transport: &mut T,
 ) -> ResourceResult {
     if budget.take() {
-        let result = load_or_fetch(database, project, repository, branch, kind, url, now, transport);
-        if result.state == "RATE_LIMITED" { budget.rate_limit_open = true; }
+        let result = load_or_fetch(
+            database, project, repository, branch, kind, url, now, transport,
+        );
+        if result.state == "RATE_LIMITED" {
+            budget.rate_limit_open = true;
+        }
         result
     } else {
         bounded_resource(kind)
@@ -841,8 +899,12 @@ fn acquire_enrichment_text<T: GitHubReadTransport>(
     transport: &mut T,
 ) -> ResourceResult {
     if budget.take() {
-        let result = load_or_fetch_text(database, project, repository, branch, kind, url, now, transport);
-        if result.state == "RATE_LIMITED" { budget.rate_limit_open = true; }
+        let result = load_or_fetch_text(
+            database, project, repository, branch, kind, url, now, transport,
+        );
+        if result.state == "RATE_LIMITED" {
+            budget.rate_limit_open = true;
+        }
         result
     } else {
         bounded_resource(kind)
@@ -866,7 +928,10 @@ fn portfolio_rate_limit_open() -> bool {
     let mut until = lock.lock().expect("rate limit circuit mutex poisoned");
     match *until {
         Some(deadline) if Instant::now() < deadline => true,
-        Some(_) => { *until = None; false }
+        Some(_) => {
+            *until = None;
+            false
+        }
         None => false,
     }
 }
@@ -874,19 +939,177 @@ fn portfolio_rate_limit_open() -> bool {
 #[cfg(not(test))]
 fn open_portfolio_rate_limit_circuit() {
     let lock = PORTFOLIO_RATE_LIMIT_UNTIL.get_or_init(|| Mutex::new(None));
-    *lock.lock().expect("rate limit circuit mutex poisoned") = Some(Instant::now() + RATE_LIMIT_BACKOFF);
+    *lock.lock().expect("rate limit circuit mutex poisoned") =
+        Some(Instant::now() + RATE_LIMIT_BACKOFF);
 }
 
 #[cfg(test)]
-fn portfolio_rate_limit_open() -> bool { false }
+fn portfolio_rate_limit_open() -> bool {
+    false
+}
 
 #[cfg(test)]
 fn open_portfolio_rate_limit_circuit() {}
 
+#[cfg(not(test))]
+fn request_key(project_id: &str, repository: &str, branch: &str, kind: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    project_id.hash(&mut hasher);
+    repository.hash(&mut hasher);
+    branch.hash(&mut hasher);
+    kind.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(not(test))]
+fn admit_process_request(key: u64) -> RequestAdmission {
+    let lock =
+        PORTFOLIO_REQUEST_GOVERNOR.get_or_init(|| Mutex::new(ProcessRequestGovernor::default()));
+    let mut governor = lock.lock().expect("request governor mutex poisoned");
+    if governor.window_started.elapsed() >= Duration::from_secs(3600) {
+        governor.window_started = Instant::now();
+        governor.requests = 0;
+        governor.in_flight.clear();
+    }
+    if governor.in_flight.contains(&key) {
+        return RequestAdmission::Coalesced;
+    }
+    if governor.requests >= PROCESS_REQUESTS_PER_HOUR {
+        return RequestAdmission::BudgetExhausted;
+    }
+    governor.requests += 1;
+    governor.in_flight.insert(key);
+    RequestAdmission::Owner(key)
+}
+
+#[cfg(not(test))]
+fn release_process_request(key: u64) {
+    if let Some(lock) = PORTFOLIO_REQUEST_GOVERNOR.get() {
+        lock.lock()
+            .expect("request governor mutex poisoned")
+            .in_flight
+            .remove(&key);
+    }
+}
+
+#[cfg(not(test))]
+fn guarded_resource<T: GitHubReadTransport>(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    repository: &str,
+    branch: &str,
+    kind: &str,
+    now: &str,
+    transport: &mut T,
+    request: impl FnOnce(&mut T) -> Result<Value, String>,
+) -> ResourceResult {
+    let key = request_key(&project.id, repository, branch, kind);
+    match admit_process_request(key) {
+        RequestAdmission::BudgetExhausted => stale_or_unavailable(
+            database,
+            project,
+            repository,
+            branch,
+            kind,
+            "GITHUB_PROCESS_REQUEST_BUDGET_EXHAUSTED",
+        ),
+        RequestAdmission::Coalesced => {
+            for _ in 0..COALESCE_WAIT_ATTEMPTS {
+                if let Ok(Some(cache)) = load_cache(database, &project.id, kind, repository, branch)
+                {
+                    return ResourceResult {
+                        kind: kind.into(),
+                        value: Some(cache.payload),
+                        state: "STALE".into(),
+                        fetched_at: Some(cache.fetched_at),
+                        last_known_good_at: Some(cache.last_known_good_at),
+                        error: Some("GITHUB_REQUEST_COALESCED".into()),
+                    };
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            ResourceResult {
+                kind: kind.into(),
+                value: None,
+                state: "UNAVAILABLE".into(),
+                fetched_at: None,
+                last_known_good_at: None,
+                error: Some("GITHUB_REQUEST_COALESCED_NO_CACHE".into()),
+            }
+        }
+        RequestAdmission::Owner(key) => {
+            let result = match request(transport) {
+                Ok(value) => {
+                    let cache = CacheEnvelope {
+                        schema_version: CACHE_SCHEMA_VERSION,
+                        resource_kind: kind.into(),
+                        repository: repository.into(),
+                        branch: branch.into(),
+                        fetched_at: now.into(),
+                        last_known_good_at: now.into(),
+                        payload: sanitize_value(&value, None),
+                    };
+                    let persist_error = persist_cache(database, &project.id, &cache).err();
+                    ResourceResult {
+                        kind: kind.into(),
+                        value: Some(cache.payload.clone()),
+                        state: "CURRENT".into(),
+                        fetched_at: Some(now.into()),
+                        last_known_good_at: Some(now.into()),
+                        error: persist_error,
+                    }
+                }
+                Err(error) => {
+                    stale_or_unavailable(database, project, repository, branch, kind, &error)
+                }
+            };
+            release_process_request(key);
+            result
+        }
+    }
+}
+
+#[cfg(not(test))]
+fn stale_or_unavailable(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    repository: &str,
+    branch: &str,
+    kind: &str,
+    error: &str,
+) -> ResourceResult {
+    match load_cache(database, &project.id, kind, repository, branch) {
+        Ok(Some(cache)) => ResourceResult {
+            kind: kind.into(),
+            value: Some(cache.payload),
+            state: "STALE".into(),
+            fetched_at: Some(cache.fetched_at),
+            last_known_good_at: Some(cache.last_known_good_at),
+            error: Some(error.into()),
+        },
+        _ => ResourceResult {
+            kind: kind.into(),
+            value: None,
+            state: classify_failure(error),
+            fetched_at: None,
+            last_known_good_at: None,
+            error: Some(error.into()),
+        },
+    }
+}
+
 fn grouped_warnings(resources: &[ResourceResult]) -> Vec<String> {
-    let rate_limited = resources.iter().filter(|resource| {
-        resource.state == "RATE_LIMITED" || resource.error.as_deref().is_some_and(|error| classify_failure(error) == "RATE_LIMITED" || error == "GITHUB_RATE_LIMIT_CIRCUIT_OPEN")
-    }).map(|resource| resource.kind.clone()).collect::<Vec<_>>();
+    let rate_limited = resources
+        .iter()
+        .filter(|resource| {
+            resource.state == "RATE_LIMITED"
+                || resource.error.as_deref().is_some_and(|error| {
+                    classify_failure(error) == "RATE_LIMITED"
+                        || error == "GITHUB_RATE_LIMIT_CIRCUIT_OPEN"
+                })
+        })
+        .map(|resource| resource.kind.clone())
+        .collect::<Vec<_>>();
     let mut warnings = Vec::new();
     if !rate_limited.is_empty() {
         warnings.push(format!(
@@ -894,7 +1117,10 @@ fn grouped_warnings(resources: &[ResourceResult]) -> Vec<String> {
             rate_limited.len(), rate_limited.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
         ));
     }
-    for error in resources.iter().filter_map(|resource| resource.error.as_deref()) {
+    for error in resources
+        .iter()
+        .filter_map(|resource| resource.error.as_deref())
+    {
         if classify_failure(error) == "RATE_LIMITED" || error == "GITHUB_RATE_LIMIT_CIRCUIT_OPEN" {
             continue;
         }
@@ -915,13 +1141,19 @@ fn cached_after_rate_limit(
 ) -> ResourceResult {
     match load_cache(database, &project.id, kind, repository, branch) {
         Ok(Some(cache)) => ResourceResult {
-            kind: kind.into(), value: Some(cache.payload), state: "STALE".into(),
-            fetched_at: Some(cache.fetched_at), last_known_good_at: Some(cache.last_known_good_at),
+            kind: kind.into(),
+            value: Some(cache.payload),
+            state: "STALE".into(),
+            fetched_at: Some(cache.fetched_at),
+            last_known_good_at: Some(cache.last_known_good_at),
             error: Some("GITHUB_RATE_LIMIT_CIRCUIT_OPEN".into()),
         },
         _ => ResourceResult {
-            kind: kind.into(), value: None, state: "RATE_LIMITED".into(),
-            fetched_at: None, last_known_good_at: None,
+            kind: kind.into(),
+            value: None,
+            state: "RATE_LIMITED".into(),
+            fetched_at: None,
+            last_known_good_at: None,
             error: Some("GITHUB_RATE_LIMIT_CIRCUIT_OPEN".into()),
         },
     }
@@ -949,6 +1181,18 @@ fn load_or_fetch<T: GitHubReadTransport>(
             };
         }
     }
+    #[cfg(not(test))]
+    return guarded_resource(
+        database,
+        project,
+        repository,
+        branch,
+        kind,
+        now,
+        transport,
+        |transport| request_json(transport, url),
+    );
+    #[cfg(test)]
     match request_json(transport, url) {
         Ok(value) => {
             let cache = CacheEnvelope {
@@ -1013,11 +1257,37 @@ fn load_or_fetch_text<T: GitHubReadTransport>(
             };
         }
     }
+    #[cfg(not(test))]
+    return guarded_resource(
+        database,
+        project,
+        repository,
+        branch,
+        kind,
+        now,
+        transport,
+        |transport| {
+            transport.get(url).and_then(|response| {
+                if (200..300).contains(&response.status) {
+                    Ok(sanitize_value(&Value::String(response.body), None))
+                } else {
+                    Err(format!(
+                        "GITHUB_HTTP_REMOTE_UNAVAILABLE: HTTP {}",
+                        response.status
+                    ))
+                }
+            })
+        },
+    );
+    #[cfg(test)]
     match transport.get(url).and_then(|response| {
         if (200..300).contains(&response.status) {
             Ok(sanitize_value(&Value::String(response.body), None))
         } else {
-            Err(format!("GITHUB_HTTP_REMOTE_UNAVAILABLE: HTTP {}", response.status))
+            Err(format!(
+                "GITHUB_HTTP_REMOTE_UNAVAILABLE: HTTP {}",
+                response.status
+            ))
         }
     }) {
         Ok(value) => {
@@ -1032,16 +1302,31 @@ fn load_or_fetch_text<T: GitHubReadTransport>(
             };
             let persist_error = persist_cache(database, &project.id, &cache).err();
             ResourceResult {
-                kind: kind.into(), value: Some(value), state: "CURRENT".into(),
-                fetched_at: Some(now.into()), last_known_good_at: Some(now.into()), error: persist_error,
+                kind: kind.into(),
+                value: Some(value),
+                state: "CURRENT".into(),
+                fetched_at: Some(now.into()),
+                last_known_good_at: Some(now.into()),
+                error: persist_error,
             }
         }
         Err(error) => match load_cache(database, &project.id, kind, repository, branch) {
             Ok(Some(cache)) => ResourceResult {
-                kind: kind.into(), value: Some(cache.payload), state: classify_failure(&error),
-                fetched_at: Some(cache.fetched_at), last_known_good_at: Some(cache.last_known_good_at), error: Some(sanitize_error(&error)),
+                kind: kind.into(),
+                value: Some(cache.payload),
+                state: classify_failure(&error),
+                fetched_at: Some(cache.fetched_at),
+                last_known_good_at: Some(cache.last_known_good_at),
+                error: Some(sanitize_error(&error)),
             },
-            _ => ResourceResult { kind: kind.into(), value: None, state: classify_failure(&error), fetched_at: None, last_known_good_at: None, error: Some(sanitize_error(&error)) },
+            _ => ResourceResult {
+                kind: kind.into(),
+                value: None,
+                state: classify_failure(&error),
+                fetched_at: None,
+                last_known_good_at: None,
+                error: Some(sanitize_error(&error)),
+            },
         },
     }
 }
@@ -1170,9 +1455,10 @@ fn overall_health(resources: &[ResourceResult]) -> String {
         "UNAVAILABLE",
     ] {
         if primary.iter().any(|r| r.state == status) {
-            if primary.iter().any(|r| {
-                r.state == status && r.value.is_some() && r.last_known_good_at.is_some()
-            }) {
+            if primary
+                .iter()
+                .any(|r| r.state == status && r.value.is_some() && r.last_known_good_at.is_some())
+            {
                 return "STALE".into();
             }
             return status.into();
@@ -1180,7 +1466,10 @@ fn overall_health(resources: &[ResourceResult]) -> String {
     }
     if primary.iter().any(|r| r.state == "STALE") {
         "STALE".into()
-    } else if optional.iter().any(|r| r.state != "CURRENT" && r.state != "NOT_REQUESTED") {
+    } else if optional
+        .iter()
+        .any(|r| r.state != "CURRENT" && r.state != "NOT_REQUESTED")
+    {
         // Optional enrichment is independently degraded. Keep repository
         // identity usable and make the uncertainty visible to the panel.
         "PARTIAL".into()
@@ -1191,7 +1480,10 @@ fn overall_health(resources: &[ResourceResult]) -> String {
 
 fn classify_failure(error: &str) -> String {
     let upper = error.to_ascii_uppercase();
-    if upper.contains("RATE_LIMIT") || upper.contains("HTTP_429") || upper.contains("HTTP_403") && upper.contains("API RATE") {
+    if upper.contains("RATE_LIMIT")
+        || upper.contains("HTTP_429")
+        || upper.contains("HTTP_403") && upper.contains("API RATE")
+    {
         "RATE_LIMITED".into()
     } else if upper.contains("HTTP_401") || upper.contains("AUTH") {
         "AUTH_REQUIRED".into()
@@ -1510,7 +1802,10 @@ fn authorization_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Optio
     if let Some(end) = redacted_marker_end(bytes, start) {
         return Some((start, end, None));
     }
-    let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
+    let quote = bytes
+        .get(start)
+        .copied()
+        .filter(|value| matches!(value, b'"' | b'\''));
     if let Some(quote) = quote {
         let value_start = start + 1;
         let end = quoted_end(bytes, value_start, quote);
@@ -1564,7 +1859,10 @@ fn credential_assignment_span(bytes: &[u8], index: usize) -> Option<(usize, usiz
     if let Some(end) = redacted_marker_end(bytes, start) {
         return Some((start, end, None));
     }
-    let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
+    let quote = bytes
+        .get(start)
+        .copied()
+        .filter(|value| matches!(value, b'"' | b'\''));
     if let Some(quote) = quote {
         let value_start = start + 1;
         let end = quoted_end(bytes, value_start, quote);
@@ -1589,7 +1887,10 @@ fn bearer_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)>
     if let Some(end) = redacted_marker_end(bytes, start) {
         return Some((start, end, None));
     }
-    let quote = bytes.get(start).copied().filter(|value| matches!(value, b'"' | b'\''));
+    let quote = bytes
+        .get(start)
+        .copied()
+        .filter(|value| matches!(value, b'"' | b'\''));
     if let Some(quote) = quote {
         start += 1;
         let end = quoted_end(bytes, start, quote);
@@ -1600,10 +1901,17 @@ fn bearer_span(bytes: &[u8], index: usize) -> Option<(usize, usize, Option<u8>)>
 }
 
 fn token_family_len(bytes: &[u8], index: usize) -> Option<usize> {
-    [b"github_pat_".as_slice(), b"ghp_", b"gho_", b"ghu_", b"ghs_", b"ghr_"]
-        .into_iter()
-        .find(|prefix| ascii_eq_at(bytes, index, prefix))
-        .map(<[u8]>::len)
+    [
+        b"github_pat_".as_slice(),
+        b"ghp_",
+        b"gho_",
+        b"ghu_",
+        b"ghs_",
+        b"ghr_",
+    ]
+    .into_iter()
+    .find(|prefix| ascii_eq_at(bytes, index, prefix))
+    .map(<[u8]>::len)
 }
 
 fn is_token_char(byte: u8) -> bool {
@@ -1612,7 +1920,10 @@ fn is_token_char(byte: u8) -> bool {
 
 fn credential_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    lower.contains("token") || lower.contains("authorization") || lower.contains("api_key") || lower == "apikey"
+    lower.contains("token")
+        || lower.contains("authorization")
+        || lower.contains("api_key")
+        || lower == "apikey"
 }
 
 fn sanitize_value(value: &Value, key: Option<&str>) -> Value {
@@ -1934,7 +2245,9 @@ fn canonical_project_task_ids(
     database: &DatabaseState,
     project: &ProjectRecord,
 ) -> HashSet<String> {
-    let Some(snapshot) = crate::github_tracking::cached_snapshot(database, project).ok().flatten()
+    let Some(snapshot) = crate::github_tracking::cached_snapshot(database, project)
+        .ok()
+        .flatten()
     else {
         return HashSet::new();
     };
@@ -1990,15 +2303,21 @@ fn enrich_pull_requests(pull_requests: &mut [GitHubPullRequest], resources: &[Re
         let number = pull_request.number;
         let detail_kind = format!("GITHUB_PR_{number}_DETAIL");
         pull_request.detail_state = resource_state(resources, &detail_kind);
-        if let Some(detail) = resource_result(resources, &detail_kind).and_then(|r| r.value.as_ref()) {
+        if let Some(detail) =
+            resource_result(resources, &detail_kind).and_then(|r| r.value.as_ref())
+        {
             pull_request.changed_files = detail.get("changed_files").and_then(Value::as_u64);
             pull_request.additions = detail.get("additions").and_then(Value::as_u64);
             pull_request.deletions = detail.get("deletions").and_then(Value::as_u64);
             pull_request.review_status = string(Some(detail), "review_status");
-            pull_request.source_branch = string(detail.get("head"), "ref").or_else(|| pull_request.source_branch.clone());
-            pull_request.target_branch = string(detail.get("base"), "ref").or_else(|| pull_request.target_branch.clone());
-            pull_request.head_sha = string(detail.get("head"), "sha").or_else(|| pull_request.head_sha.clone());
-            pull_request.base_sha = string(detail.get("base"), "sha").or_else(|| pull_request.base_sha.clone());
+            pull_request.source_branch =
+                string(detail.get("head"), "ref").or_else(|| pull_request.source_branch.clone());
+            pull_request.target_branch =
+                string(detail.get("base"), "ref").or_else(|| pull_request.target_branch.clone());
+            pull_request.head_sha =
+                string(detail.get("head"), "sha").or_else(|| pull_request.head_sha.clone());
+            pull_request.base_sha =
+                string(detail.get("base"), "sha").or_else(|| pull_request.base_sha.clone());
         }
 
         let files_kind = format!("GITHUB_PR_{number}_FILES");
@@ -2037,7 +2356,9 @@ fn enrich_pull_requests(pull_requests: &mut [GitHubPullRequest], resources: &[Re
             .and_then(|r| r.value.as_ref())
             .map(|value| bounded_comments(Some(value)))
             .unwrap_or_default();
-        if let Some(value) = resource_result(resources, &review_comments_kind).and_then(|r| r.value.as_ref()) {
+        if let Some(value) =
+            resource_result(resources, &review_comments_kind).and_then(|r| r.value.as_ref())
+        {
             comments.extend(bounded_comments(Some(value)));
         }
         comments.truncate(MAX_COMMENTS);
@@ -2060,7 +2381,8 @@ fn enrich_pull_requests(pull_requests: &mut [GitHubPullRequest], resources: &[Re
             .and_then(|r| r.value.as_ref())
             .map(parse_checks)
             .unwrap_or_default();
-        if let Some(value) = resource_result(resources, &status_kind).and_then(|r| r.value.as_ref()) {
+        if let Some(value) = resource_result(resources, &status_kind).and_then(|r| r.value.as_ref())
+        {
             checks.extend(parse_statuses(value));
         }
         checks.truncate(MAX_PR_CHECKS);
@@ -2075,14 +2397,17 @@ fn parse_pull_request_files(value: &Value) -> Vec<GitHubPullRequestFile> {
     array(Some(value))
         .into_iter()
         .take(MAX_PR_FILES)
-        .filter_map(|file| Some(GitHubPullRequestFile {
-            filename: bound_text(&string(Some(file), "filename")?, MAX_BODY_CHARS),
-            status: string(Some(file), "status"),
-            additions: file.get("additions").and_then(Value::as_u64),
-            deletions: file.get("deletions").and_then(Value::as_u64),
-            changes: file.get("changes").and_then(Value::as_u64),
-            patch_excerpt: string(Some(file), "patch").map(|patch| bound_text(&patch, MAX_BODY_CHARS)),
-        }))
+        .filter_map(|file| {
+            Some(GitHubPullRequestFile {
+                filename: bound_text(&string(Some(file), "filename")?, MAX_BODY_CHARS),
+                status: string(Some(file), "status"),
+                additions: file.get("additions").and_then(Value::as_u64),
+                deletions: file.get("deletions").and_then(Value::as_u64),
+                changes: file.get("changes").and_then(Value::as_u64),
+                patch_excerpt: string(Some(file), "patch")
+                    .map(|patch| bound_text(&patch, MAX_BODY_CHARS)),
+            })
+        })
         .collect()
 }
 
@@ -2090,50 +2415,104 @@ fn parse_reviews(value: &Value) -> Vec<GitHubPullRequestReview> {
     array(Some(value))
         .into_iter()
         .take(MAX_PR_REVIEWS)
-        .filter_map(|review| Some(GitHubPullRequestReview {
-            id: review.get("id")?.as_u64()?,
-            user: string(review.get("user"), "login"),
-            state: string(Some(review), "state").map(|value| value.to_ascii_uppercase()),
-            submitted_at: string(Some(review), "submitted_at"),
-            body_excerpt: string(Some(review), "body").map(|value| bound_text(&value, MAX_BODY_CHARS)),
-        }))
+        .filter_map(|review| {
+            Some(GitHubPullRequestReview {
+                id: review.get("id")?.as_u64()?,
+                user: string(review.get("user"), "login"),
+                state: string(Some(review), "state").map(|value| value.to_ascii_uppercase()),
+                submitted_at: string(Some(review), "submitted_at"),
+                body_excerpt: string(Some(review), "body")
+                    .map(|value| bound_text(&value, MAX_BODY_CHARS)),
+            })
+        })
         .collect()
 }
 
 fn parse_checks(value: &Value) -> Vec<GitHubCheck> {
-    let records = value.get("check_runs").and_then(Value::as_array).cloned().unwrap_or_default();
-    records.into_iter().take(MAX_PR_CHECKS).filter_map(|check| Some(GitHubCheck {
-        id: check.get("id")?.as_u64()?,
-        name: string(Some(&check), "name").map(|value| bound_text(&value, MAX_BODY_CHARS)),
-        status: string(Some(&check), "status").map(|value| value.to_ascii_uppercase()),
-        conclusion: string(Some(&check), "conclusion").map(|value| value.to_ascii_uppercase()),
-        details_url: string(Some(&check), "details_url"),
-    })).collect()
+    let records = value
+        .get("check_runs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    records
+        .into_iter()
+        .take(MAX_PR_CHECKS)
+        .filter_map(|check| {
+            Some(GitHubCheck {
+                id: check.get("id")?.as_u64()?,
+                name: string(Some(&check), "name").map(|value| bound_text(&value, MAX_BODY_CHARS)),
+                status: string(Some(&check), "status").map(|value| value.to_ascii_uppercase()),
+                conclusion: string(Some(&check), "conclusion")
+                    .map(|value| value.to_ascii_uppercase()),
+                details_url: string(Some(&check), "details_url"),
+            })
+        })
+        .collect()
 }
 
 fn parse_statuses(value: &Value) -> Vec<GitHubCheck> {
-    value.get("statuses").and_then(Value::as_array).cloned().unwrap_or_default()
-        .into_iter().take(MAX_PR_CHECKS).enumerate().map(|(index, status)| GitHubCheck {
-            id: status.get("id").and_then(Value::as_u64).unwrap_or(index as u64),
+    value
+        .get("statuses")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_PR_CHECKS)
+        .enumerate()
+        .map(|(index, status)| GitHubCheck {
+            id: status
+                .get("id")
+                .and_then(Value::as_u64)
+                .unwrap_or(index as u64),
             name: string(Some(&status), "context").map(|value| bound_text(&value, MAX_BODY_CHARS)),
             status: string(Some(&status), "state").map(|value| value.to_ascii_uppercase()),
             conclusion: string(Some(&status), "state").map(|value| value.to_ascii_uppercase()),
             details_url: string(Some(&status), "target_url"),
-        }).collect()
+        })
+        .collect()
 }
 
 fn review_summary(reviews: &[GitHubPullRequestReview]) -> String {
-    if reviews.is_empty() { return "NO_REVIEWS".into(); }
-    if reviews.iter().any(|review| review.state.as_deref() == Some("CHANGES_REQUESTED")) { return "CHANGES_REQUESTED".into(); }
-    if reviews.iter().any(|review| review.state.as_deref() == Some("APPROVED")) { return "APPROVED".into(); }
+    if reviews.is_empty() {
+        return "NO_REVIEWS".into();
+    }
+    if reviews
+        .iter()
+        .any(|review| review.state.as_deref() == Some("CHANGES_REQUESTED"))
+    {
+        return "CHANGES_REQUESTED".into();
+    }
+    if reviews
+        .iter()
+        .any(|review| review.state.as_deref() == Some("APPROVED"))
+    {
+        return "APPROVED".into();
+    }
     "REVIEWED".into()
 }
 
 fn check_summary(checks: &[GitHubCheck]) -> String {
-    if checks.is_empty() { return "NO_CHECKS".into(); }
-    if checks.iter().any(|check| matches!(check.conclusion.as_deref(), Some("FAILURE" | "ERROR"))) { return "FAILURE".into(); }
-    if checks.iter().any(|check| matches!(check.status.as_deref(), Some("IN_PROGRESS" | "QUEUED"))) { return "PENDING".into(); }
-    if checks.iter().all(|check| check.conclusion.as_deref() == Some("SUCCESS")) { return "SUCCESS".into(); }
+    if checks.is_empty() {
+        return "NO_CHECKS".into();
+    }
+    if checks
+        .iter()
+        .any(|check| matches!(check.conclusion.as_deref(), Some("FAILURE" | "ERROR")))
+    {
+        return "FAILURE".into();
+    }
+    if checks
+        .iter()
+        .any(|check| matches!(check.status.as_deref(), Some("IN_PROGRESS" | "QUEUED")))
+    {
+        return "PENDING".into();
+    }
+    if checks
+        .iter()
+        .all(|check| check.conclusion.as_deref() == Some("SUCCESS"))
+    {
+        return "SUCCESS".into();
+    }
     "COMPLETED".into()
 }
 
@@ -2148,7 +2527,11 @@ fn enrich_actions(actions: &mut [GitHubActionRun], resources: &[ResourceResult])
         run.failed_log_summary = None;
         run.failed_log_evidence.clear();
         if run.jobs_state != "CURRENT" || run.jobs.is_empty() {
-            run.logs_state = if run.jobs_state == "CURRENT" { "NOT_APPLICABLE".into() } else { run.jobs_state.clone() };
+            run.logs_state = if run.jobs_state == "CURRENT" {
+                "NOT_APPLICABLE".into()
+            } else {
+                run.jobs_state.clone()
+            };
             continue;
         }
         let eligible_jobs = run
@@ -2181,14 +2564,26 @@ fn enrich_actions(actions: &mut [GitHubActionRun], resources: &[ResourceResult])
                         run.failed_log_summary = Some(format!(
                             "Job #{}{}: {}",
                             job.id,
-                            job.name.as_deref().map(|name| format!(" {name}")).unwrap_or_default(),
+                            job.name
+                                .as_deref()
+                                .map(|name| format!(" {name}"))
+                                .unwrap_or_default(),
                             excerpt
                         ));
                     }
                 }
             }
         }
-        run.logs_state = if log_states.iter().all(|state| state == "CURRENT") { "CURRENT".into() } else if log_states.iter().any(|state| state == "CURRENT") { "PARTIAL".into() } else { log_states.first().cloned().unwrap_or_else(|| "NOT_APPLICABLE".into()) };
+        run.logs_state = if log_states.iter().all(|state| state == "CURRENT") {
+            "CURRENT".into()
+        } else if log_states.iter().any(|state| state == "CURRENT") {
+            "PARTIAL".into()
+        } else {
+            log_states
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "NOT_APPLICABLE".into())
+        };
     }
 }
 
@@ -2196,23 +2591,49 @@ fn is_action_failure_job(job: &GitHubActionJob) -> bool {
     [job.conclusion.as_deref(), job.status.as_deref()]
         .into_iter()
         .flatten()
-        .any(|value| matches!(value, "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"))
+        .any(|value| {
+            matches!(
+                value,
+                "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+            )
+        })
 }
 
 fn parse_action_jobs(value: &Value) -> Vec<GitHubActionJob> {
-    value.get("jobs").and_then(Value::as_array).cloned().unwrap_or_default()
-        .into_iter().take(MAX_ACTION_JOBS).filter_map(|job| Some(GitHubActionJob {
-            id: job.get("id")?.as_u64()?,
-            name: string(Some(&job), "name"),
-            status: string(Some(&job), "status").map(|value| value.to_ascii_uppercase()),
-            conclusion: string(Some(&job), "conclusion").map(|value| value.to_ascii_uppercase()),
-            steps: job.get("steps").and_then(Value::as_array).cloned().unwrap_or_default().into_iter().take(MAX_ACTION_STEPS).map(|step| GitHubActionStep {
-                name: string(Some(&step), "name").map(|value| bound_text(&value, MAX_BODY_CHARS)),
-                status: string(Some(&step), "status").map(|value| value.to_ascii_uppercase()),
-                conclusion: string(Some(&step), "conclusion").map(|value| value.to_ascii_uppercase()),
-                number: step.get("number").and_then(Value::as_u64),
-            }).collect(),
-        })).collect()
+    value
+        .get("jobs")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_ACTION_JOBS)
+        .filter_map(|job| {
+            Some(GitHubActionJob {
+                id: job.get("id")?.as_u64()?,
+                name: string(Some(&job), "name"),
+                status: string(Some(&job), "status").map(|value| value.to_ascii_uppercase()),
+                conclusion: string(Some(&job), "conclusion")
+                    .map(|value| value.to_ascii_uppercase()),
+                steps: job
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(MAX_ACTION_STEPS)
+                    .map(|step| GitHubActionStep {
+                        name: string(Some(&step), "name")
+                            .map(|value| bound_text(&value, MAX_BODY_CHARS)),
+                        status: string(Some(&step), "status")
+                            .map(|value| value.to_ascii_uppercase()),
+                        conclusion: string(Some(&step), "conclusion")
+                            .map(|value| value.to_ascii_uppercase()),
+                        number: step.get("number").and_then(Value::as_u64),
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 fn parse_releases(value: Option<&Value>) -> Vec<GitHubRelease> {
@@ -2300,7 +2721,7 @@ fn explicit_links(text: &str) -> Vec<String> {
             valid_milestone(token)
         };
         if valid && !links.iter().any(|existing| existing == token) {
-                links.push(token.to_string());
+            links.push(token.to_string());
         }
     }
     links
@@ -2321,9 +2742,8 @@ fn valid_milestone(value: &str) -> bool {
     if rest.is_empty() || rest.starts_with('.') || rest.ends_with('.') {
         return false;
     }
-    rest.split('.').all(|part| {
-        !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())
-    })
+    rest.split('.')
+        .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn local_evidence(database: &DatabaseState, project: &ProjectRecord) -> LocalGitHubEvidence {
@@ -2391,7 +2811,13 @@ pub fn reconcile(
         "REMOTE_STALE"
     } else if matches!(
         remote_health,
-        "UNAVAILABLE" | "AUTH_REQUIRED" | "RATE_LIMITED" | "OFFLINE" | "TIMEOUT" | "MALFORMED" | "PARTIAL"
+        "UNAVAILABLE"
+            | "AUTH_REQUIRED"
+            | "RATE_LIMITED"
+            | "OFFLINE"
+            | "TIMEOUT"
+            | "MALFORMED"
+            | "PARTIAL"
     ) {
         evidence.push(format!("remote health is {remote_health}"));
         "REMOTE_UNAVAILABLE"
@@ -2505,21 +2931,24 @@ mod tests {
             remote_health: "CURRENT".into(),
             error: None,
             recent_events: Vec::new(),
-            task_rows: vec![crate::github_tracking::RemoteTaskRow {
-                id: "M18.10.01".into(),
-                title: "Current task".into(),
-                status: "IN_PROGRESS".into(),
-                source_path: "TASKS.md".into(),
-                source_line: 1,
-                ..Default::default()
-            }, crate::github_tracking::RemoteTaskRow {
-                id: "TASK-42".into(),
-                title: "Next task".into(),
-                status: "PLANNED".into(),
-                source_path: "TASKS.md".into(),
-                source_line: 2,
-                ..Default::default()
-            }],
+            task_rows: vec![
+                crate::github_tracking::RemoteTaskRow {
+                    id: "M18.10.01".into(),
+                    title: "Current task".into(),
+                    status: "IN_PROGRESS".into(),
+                    source_path: "TASKS.md".into(),
+                    source_line: 1,
+                    ..Default::default()
+                },
+                crate::github_tracking::RemoteTaskRow {
+                    id: "TASK-42".into(),
+                    title: "Next task".into(),
+                    status: "PLANNED".into(),
+                    source_path: "TASKS.md".into(),
+                    source_line: 2,
+                    ..Default::default()
+                },
+            ],
         }
     }
 
@@ -2629,7 +3058,8 @@ mod tests {
 
     #[test]
     fn strict_link_grammar_rejects_prose_and_accepts_canonical_refs() {
-        let links = explicit_links("Model5 May2026 Mfoo7bar M18.10.01 TASK-42 SESSION-abc other-project-7");
+        let links =
+            explicit_links("Model5 May2026 Mfoo7bar M18.10.01 TASK-42 SESSION-abc other-project-7");
         assert_eq!(links, vec!["M18.10.01", "TASK-42", "SESSION-abc"]);
         assert!(!explicit_links("M18.10.01x M.18 M18..1").contains(&"M18.10.01x".into()));
     }
@@ -2639,7 +3069,8 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
         let repo = "https://api.github.com/repos/Sekiph82/H-veAI";
         let pr_list = format!("{repo}/pulls?state=all&per_page={MAX_PULL_REQUESTS}");
         let detail = format!("{repo}/pulls/12");
@@ -2671,11 +3102,33 @@ mod tests {
         assert_eq!(pr.review_status.as_deref(), Some("APPROVED"));
         assert_eq!(pr.check_status.as_deref(), Some("SUCCESS"));
         assert_eq!(pr.comments.len(), 2);
-        assert_eq!(snapshot.actions[0].jobs[0].steps[0].name.as_deref(), Some("compile"));
-        assert_eq!(snapshot.actions[0].failed_log_summary.as_deref(), Some("Job #56 build: compile failed"));
+        assert_eq!(
+            snapshot.actions[0].jobs[0].steps[0].name.as_deref(),
+            Some("compile")
+        );
+        assert_eq!(
+            snapshot.actions[0].failed_log_summary.as_deref(),
+            Some("Job #56 build: compile failed")
+        );
         assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 56);
-        for expected in [detail, files, reviews, comments, review_comments, checks, status, jobs, logs] {
-            assert!(transport.requests.iter().any(|request| request == &expected), "missing request {expected}");
+        for expected in [
+            detail,
+            files,
+            reviews,
+            comments,
+            review_comments,
+            checks,
+            status,
+            jobs,
+            logs,
+        ] {
+            assert!(
+                transport
+                    .requests
+                    .iter()
+                    .any(|request| request == &expected),
+                "missing request {expected}"
+            );
         }
         assert!(transport.requests.len() <= MAX_SUBRESOURCE_REQUESTS + 8);
     }
@@ -2686,7 +3139,8 @@ mod tests {
             let database_dir = tempfile::tempdir().unwrap();
             let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
             crate::github_tracking::ensure_portfolio(&database).unwrap();
-            let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+            let project =
+                crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
             let repo = "https://api.github.com/repos/Sekiph82/H-veAI";
             let action_url = format!("{repo}/actions/runs?per_page={MAX_ACTION_RUNS}");
             let jobs_url = format!("{repo}/actions/runs/55/jobs?per_page={MAX_ACTION_JOBS}");
@@ -2694,7 +3148,11 @@ mod tests {
                 .response(&action_url, 200, r#"{"workflow_runs":[{"id":55,"name":"CI","status":"completed","conclusion":"failure"}]}"#)
                 .response(&jobs_url, jobs_status, &jobs.to_string());
             for (job_id, status, body) in logs {
-                transport = transport.response(&format!("{repo}/actions/jobs/{job_id}/logs"), status, &body);
+                transport = transport.response(
+                    &format!("{repo}/actions/jobs/{job_id}/logs"),
+                    status,
+                    &body,
+                );
             }
             let snapshot = snapshot_with_transport(&database, &project, &mut transport).unwrap();
             (snapshot, transport, jobs_url)
@@ -2709,8 +3167,14 @@ mod tests {
             vec![(2, 200, "failure log".into())],
         );
         assert!(transport.requests.contains(&jobs_url));
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/2/logs")));
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/1/logs")));
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/2/logs")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/1/logs")));
         assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 2);
 
         let (_, transport, _) = action_case(
@@ -2722,17 +3186,32 @@ mod tests {
             ]}),
             vec![(3, 200, "third failure log".into())],
         );
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/3/logs")));
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/1/logs")));
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/2/logs")));
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/3/logs")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/1/logs")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/2/logs")));
 
-        for (job_id, status, conclusion) in [(10, "cancelled", "cancelled"), (11, "completed", "timed_out")] {
+        for (job_id, status, conclusion) in [
+            (10, "cancelled", "cancelled"),
+            (11, "completed", "timed_out"),
+        ] {
             let (snapshot, transport, _) = action_case(
                 200,
                 json!({"jobs":[{"id":job_id,"name":status,"status":status,"conclusion":conclusion}]}),
                 vec![(job_id, 200, format!("{status} log"))],
             );
-            assert!(transport.requests.iter().any(|url| url.ends_with(&format!("/actions/jobs/{job_id}/logs"))));
+            assert!(transport
+                .requests
+                .iter()
+                .any(|url| url.ends_with(&format!("/actions/jobs/{job_id}/logs"))));
             assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, job_id);
         }
         let (snapshot, transport, _) = action_case(
@@ -2740,7 +3219,10 @@ mod tests {
             json!({"jobs":[{"id":12,"name":"action required","status":"action_required"}]}),
             vec![(12, 200, "action required log".into())],
         );
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/12/logs")));
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/12/logs")));
         assert_eq!(snapshot.actions[0].failed_log_evidence[0].job_id, 12);
 
         let (snapshot, transport, _) = action_case(
@@ -2749,12 +3231,28 @@ mod tests {
                 {"id":20,"name":"first failure","status":"completed","conclusion":"failure"},
                 {"id":21,"name":"second failure","status":"completed","conclusion":"failure"}
             ]}),
-            vec![(20, 500, "unavailable".into()), (21, 200, "second current".into())],
+            vec![
+                (20, 500, "unavailable".into()),
+                (21, 200, "second current".into()),
+            ],
         );
         assert_eq!(snapshot.actions[0].logs_state, "PARTIAL");
-        assert_eq!(snapshot.actions[0].failed_log_evidence.iter().map(|item| item.job_id).collect::<Vec<_>>(), vec![21]);
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/20/logs")));
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/21/logs")));
+        assert_eq!(
+            snapshot.actions[0]
+                .failed_log_evidence
+                .iter()
+                .map(|item| item.job_id)
+                .collect::<Vec<_>>(),
+            vec![21]
+        );
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/20/logs")));
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/21/logs")));
 
         let (snapshot, transport, _) = action_case(
             503,
@@ -2764,7 +3262,10 @@ mod tests {
         assert_eq!(snapshot.actions[0].jobs_state, "UNAVAILABLE");
         assert_eq!(snapshot.actions[0].logs_state, "UNAVAILABLE");
         assert!(snapshot.actions[0].failed_log_evidence.is_empty());
-        assert!(!transport.requests.iter().any(|url| url.contains("/actions/jobs/")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.contains("/actions/jobs/")));
 
         let (snapshot, transport, _) = action_case(
             200,
@@ -2772,11 +3273,17 @@ mod tests {
                 {"id":40,"name":"success","status":"completed","conclusion":"success"},
                 {"id":41,"name":"skipped","status":"completed","conclusion":"skipped"}
             ]}),
-            vec![(40, 200, "must not be requested".into()), (41, 200, "must not be requested".into())],
+            vec![
+                (40, 200, "must not be requested".into()),
+                (41, 200, "must not be requested".into()),
+            ],
         );
         assert_eq!(snapshot.actions[0].logs_state, "NOT_APPLICABLE");
         assert!(snapshot.actions[0].failed_log_evidence.is_empty());
-        assert!(!transport.requests.iter().any(|url| url.contains("/actions/jobs/")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.contains("/actions/jobs/")));
 
         let long_excerpt = "x".repeat(MAX_ACTION_LOG_CHARS + 100);
         let (snapshot, transport, _) = action_case(
@@ -2786,13 +3293,32 @@ mod tests {
                 {"id":51,"name":"second","status":"completed","conclusion":"failure"},
                 {"id":52,"name":"third","status":"completed","conclusion":"failure"}
             ]}),
-            vec![(50, 200, long_excerpt), (51, 200, "second".into()), (52, 200, "third".into())],
+            vec![
+                (50, 200, long_excerpt),
+                (51, 200, "second".into()),
+                (52, 200, "third".into()),
+            ],
         );
         assert_eq!(snapshot.actions[0].failed_log_evidence.len(), 2);
-        assert_eq!(snapshot.actions[0].failed_log_evidence[0].excerpt.chars().count(), MAX_ACTION_LOG_CHARS);
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/50/logs")));
-        assert!(transport.requests.iter().any(|url| url.ends_with("/actions/jobs/51/logs")));
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/52/logs")));
+        assert_eq!(
+            snapshot.actions[0].failed_log_evidence[0]
+                .excerpt
+                .chars()
+                .count(),
+            MAX_ACTION_LOG_CHARS
+        );
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/50/logs")));
+        assert!(transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/51/logs")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/52/logs")));
     }
 
     #[test]
@@ -2800,23 +3326,82 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
-        let url = format!("https://api.github.com/repos/Sekiph82/H-veAI/issues?state=all&per_page={MAX_ISSUES}");
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let url = format!(
+            "https://api.github.com/repos/Sekiph82/H-veAI/issues?state=all&per_page={MAX_ISSUES}"
+        );
         let secret_body = "https://example.test/callback?access_token=URL_SECRET&token=QUERY_SECRET Authorization:Bearer BEARER_NOSPACE_SECRET Authorization: Bearer BEARER_SPACED_SECRET Authorization:Basic BASIC_NOSPACE_SECRET Authorization: Basic BASIC_SPACED_SECRET {\"Authorization\":\"Basic QUOTED_AUTH_SECRET\",\"token\":\"QUOTED_TOKEN_SECRET\",\"api_key\":\"QUOTED_API_KEY_SECRET\"} github_pat_test-secret ghp_GHP_SECRET gho_OAUTH_SECRET ghu_USER_SECRET ghs_SERVER_SECRET ghr_REFRESH_SECRET";
-        let issue_payload = json!([{"number":3,"title":"M18.03","body":secret_body,"state":"open"}]);
-        let mut transport = FixtureTransport::default().response(&url, 200, &issue_payload.to_string());
+        let issue_payload =
+            json!([{"number":3,"title":"M18.03","body":secret_body,"state":"open"}]);
+        let mut transport =
+            FixtureTransport::default().response(&url, 200, &issue_payload.to_string());
         let snapshot = snapshot_with_transport(&database, &project, &mut transport).unwrap();
         let issue = &snapshot.issues[0];
         let returned = serde_json::to_string(issue).unwrap();
-        for secret in ["URL_SECRET", "QUERY_SECRET", "BEARER_NOSPACE_SECRET", "BEARER_SPACED_SECRET", "BASIC_NOSPACE_SECRET", "BASIC_SPACED_SECRET", "QUOTED_AUTH_SECRET", "QUOTED_TOKEN_SECRET", "QUOTED_API_KEY_SECRET", "test-secret", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
-            assert!(!returned.contains(secret), "DTO leaked {secret}: {returned}");
+        for secret in [
+            "URL_SECRET",
+            "QUERY_SECRET",
+            "BEARER_NOSPACE_SECRET",
+            "BEARER_SPACED_SECRET",
+            "BASIC_NOSPACE_SECRET",
+            "BASIC_SPACED_SECRET",
+            "QUOTED_AUTH_SECRET",
+            "QUOTED_TOKEN_SECRET",
+            "QUOTED_API_KEY_SECRET",
+            "test-secret",
+            "GHP_SECRET",
+            "OAUTH_SECRET",
+            "USER_SECRET",
+            "SERVER_SECRET",
+            "REFRESH_SECRET",
+        ] {
+            assert!(
+                !returned.contains(secret),
+                "DTO leaked {secret}: {returned}"
+            );
         }
-        let metadata: Vec<String> = database.open_connection().unwrap().prepare("SELECT metadata_json FROM github_sync_state WHERE project_id=?1").unwrap().query_map([&project.id], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        let metadata: Vec<String> = database
+            .open_connection()
+            .unwrap()
+            .prepare("SELECT metadata_json FROM github_sync_state WHERE project_id=?1")
+            .unwrap()
+            .query_map([&project.id], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         let persisted = metadata.join("\n");
-        for secret in ["URL_SECRET", "QUERY_SECRET", "BEARER_NOSPACE_SECRET", "BEARER_SPACED_SECRET", "BASIC_NOSPACE_SECRET", "BASIC_SPACED_SECRET", "QUOTED_AUTH_SECRET", "QUOTED_TOKEN_SECRET", "QUOTED_API_KEY_SECRET", "test-secret", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
-            assert!(!persisted.contains(secret), "cache leaked {secret}: {persisted}");
+        for secret in [
+            "URL_SECRET",
+            "QUERY_SECRET",
+            "BEARER_NOSPACE_SECRET",
+            "BEARER_SPACED_SECRET",
+            "BASIC_NOSPACE_SECRET",
+            "BASIC_SPACED_SECRET",
+            "QUOTED_AUTH_SECRET",
+            "QUOTED_TOKEN_SECRET",
+            "QUOTED_API_KEY_SECRET",
+            "test-secret",
+            "GHP_SECRET",
+            "OAUTH_SECRET",
+            "USER_SECRET",
+            "SERVER_SECRET",
+            "REFRESH_SECRET",
+        ] {
+            assert!(
+                !persisted.contains(secret),
+                "cache leaked {secret}: {persisted}"
+            );
         }
-        assert!(load_cache(&database, &project.id, RESOURCE_ISSUES, "Sekiph82/H-veAI", "main").unwrap().is_some());
+        assert!(load_cache(
+            &database,
+            &project.id,
+            RESOURCE_ISSUES,
+            "Sekiph82/H-veAI",
+            "main"
+        )
+        .unwrap()
+        .is_some());
     }
 
     #[test]
@@ -2870,7 +3455,10 @@ mod tests {
         let cache = cache_status(&resources, "2026-09-15T00:00:01Z");
         assert_eq!(cache.state, "CURRENT");
         assert_eq!(cache.resources.len(), 8);
-        assert!(!cache.resources.iter().any(|resource| resource.kind == "GITHUB_PR_12_FILES"));
+        assert!(!cache
+            .resources
+            .iter()
+            .any(|resource| resource.kind == "GITHUB_PR_12_FILES"));
     }
 
     #[test]
@@ -2892,14 +3480,33 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
         let first = "https://api.github.com/repos/Sekiph82/H-veAI";
-        let mut transport = FixtureTransport::default().response(first, 403, r#"{"message":"API rate limit exceeded"}"#);
+        let mut transport = FixtureTransport::default().response(
+            first,
+            403,
+            r#"{"message":"API rate limit exceeded"}"#,
+        );
         let snapshot = snapshot_with_transport(&database, &project, &mut transport).unwrap();
-        assert_eq!(transport.requests.len(), 1, "primary acquisition must stop after first rate-limit response");
+        assert_eq!(
+            transport.requests.len(),
+            1,
+            "primary acquisition must stop after first rate-limit response"
+        );
         assert_eq!(snapshot.remote_health, "RATE_LIMITED");
-        assert_eq!(snapshot.warnings.iter().filter(|warning| warning.contains("rate limit reached")).count(), 1);
-        assert!(snapshot.warnings.iter().all(|warning| !warning.contains("API rate limit exceeded")));
+        assert_eq!(
+            snapshot
+                .warnings
+                .iter()
+                .filter(|warning| warning.contains("rate limit reached"))
+                .count(),
+            1
+        );
+        assert!(snapshot
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("API rate limit exceeded")));
     }
 
     #[test]
@@ -2927,12 +3534,11 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(
-            &database,
-            "github:Sekiph82/Bulk-Edit@main",
-        )
-        .unwrap();
-        let identity = identity_from_project(&project).map(identity_from_view).unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/Bulk-Edit@main").unwrap();
+        let identity = identity_from_project(&project)
+            .map(identity_from_view)
+            .unwrap();
         let repository = format!(
             "https://api.github.com/repos/{}/{}",
             identity.owner, identity.repo
@@ -2947,7 +3553,11 @@ mod tests {
             .collect::<Vec<_>>();
         let mut transport = FixtureTransport::default()
             .response(&pull_url, 200, &serde_json::to_string(&pulls).unwrap())
-            .response(&action_url, 200, &json!({"workflow_runs": runs}).to_string());
+            .response(
+                &action_url,
+                200,
+                &json!({"workflow_runs": runs}).to_string(),
+            );
         for id in 1..=5 {
             transport = transport.response(
                 &format!("{repository}/actions/runs/{id}/jobs?per_page={MAX_ACTION_JOBS}"),
@@ -2963,7 +3573,12 @@ mod tests {
             &mut transport,
         );
         assert_eq!(resources.len(), 8 + MAX_SUBRESOURCE_REQUESTS);
-        assert_eq!(cache_status(&resources, "2026-09-15T00:00:01Z").resources.len(), 8);
+        assert_eq!(
+            cache_status(&resources, "2026-09-15T00:00:01Z")
+                .resources
+                .len(),
+            8
+        );
         assert_eq!(overall_health(&resources), "CURRENT");
     }
 
@@ -3095,9 +3710,34 @@ mod tests {
             r#"{"Authorization":"Basic QUOTED_AUTH_SECRET","authorization": "Bearer QUOTED_BEARER_SECRET","token":"JSON_SECRET","api_key":"JSON_KEY","nested":{"access-token":"NESTED_SECRET"}}"#,
             "github_pat_PAT_SECRET ghp_GHP_SECRET gho_OAUTH_SECRET ghu_USER_SECRET ghs_SERVER_SECRET ghr_REFRESH_SECRET",
         ];
-        let redacted = samples.iter().map(|sample| sanitize_error(sample)).collect::<Vec<_>>().join(" ");
-        for secret in ["URL_SECRET", "QUERY_SECRET", "NOSPACE_SECRET", "SPACE_SECRET", "BASIC_NOSPACE_SECRET", "BASIC_SPACED_SECRET", "QUOTED_AUTH_SECRET", "QUOTED_BEARER_SECRET", "JSON_SECRET", "JSON_KEY", "NESTED_SECRET", "PAT_SECRET", "GHP_SECRET", "OAUTH_SECRET", "USER_SECRET", "SERVER_SECRET", "REFRESH_SECRET"] {
-            assert!(!redacted.contains(secret), "secret leaked: {secret}; output={redacted}");
+        let redacted = samples
+            .iter()
+            .map(|sample| sanitize_error(sample))
+            .collect::<Vec<_>>()
+            .join(" ");
+        for secret in [
+            "URL_SECRET",
+            "QUERY_SECRET",
+            "NOSPACE_SECRET",
+            "SPACE_SECRET",
+            "BASIC_NOSPACE_SECRET",
+            "BASIC_SPACED_SECRET",
+            "QUOTED_AUTH_SECRET",
+            "QUOTED_BEARER_SECRET",
+            "JSON_SECRET",
+            "JSON_KEY",
+            "NESTED_SECRET",
+            "PAT_SECRET",
+            "GHP_SECRET",
+            "OAUTH_SECRET",
+            "USER_SECRET",
+            "SERVER_SECRET",
+            "REFRESH_SECRET",
+        ] {
+            assert!(
+                !redacted.contains(secret),
+                "secret leaked: {secret}; output={redacted}"
+            );
         }
     }
 
@@ -3106,7 +3746,8 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
         let legacy = CacheEnvelope {
             schema_version: 1,
             resource_kind: RESOURCE_REPOSITORY.into(),
@@ -3117,12 +3758,30 @@ mod tests {
             payload: json!({"full_name":"Sekiph82/H-veAI"}),
         };
         persist_cache(&database, &project.id, &legacy).unwrap();
-        assert!(load_cache(&database, &project.id, RESOURCE_REPOSITORY, "Sekiph82/H-veAI", "main").unwrap().is_none());
+        assert!(load_cache(
+            &database,
+            &project.id,
+            RESOURCE_REPOSITORY,
+            "Sekiph82/H-veAI",
+            "main"
+        )
+        .unwrap()
+        .is_none());
         database.open_connection().unwrap().execute(
             "UPDATE github_sync_state SET metadata_json=?1 WHERE project_id=?2 AND resource_kind=?3",
             params!["{malformed", project.id, RESOURCE_REPOSITORY],
         ).unwrap();
-        assert_eq!(load_cache(&database, &project.id, RESOURCE_REPOSITORY, "Sekiph82/H-veAI", "main").unwrap_err(), "GITHUB_CACHE_MALFORMED");
+        assert_eq!(
+            load_cache(
+                &database,
+                &project.id,
+                RESOURCE_REPOSITORY,
+                "Sekiph82/H-veAI",
+                "main"
+            )
+            .unwrap_err(),
+            "GITHUB_CACHE_MALFORMED"
+        );
     }
 
     #[test]
@@ -3130,8 +3789,10 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
-        let foreign_project = crate::projects::fetch_project(&database, "github:Sekiph82/FormuLab@main").unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let foreign_project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/FormuLab@main").unwrap();
         let tracking = current_tracking_snapshot();
         database.open_connection().unwrap().execute(
             "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, 'GITHUB_TASKS_REMOTE', 'head', ?3, ?4)",
@@ -3145,7 +3806,12 @@ mod tests {
         foreign_tracking.project_key = "github:Sekiph82/FormuLab@main".into();
         foreign_tracking.repository = "Sekiph82/FormuLab".into();
         foreign_tracking.task_rows = vec![crate::github_tracking::RemoteTaskRow {
-            id: "TASK-FORMULAB-01".into(), title: "Foreign task".into(), status: "PLANNED".into(), source_path: "TASKS.md".into(), source_line: 1, ..Default::default()
+            id: "TASK-FORMULAB-01".into(),
+            title: "Foreign task".into(),
+            status: "PLANNED".into(),
+            source_path: "TASKS.md".into(),
+            source_line: 1,
+            ..Default::default()
         }];
         database.open_connection().unwrap().execute(
             "INSERT INTO github_sync_state (id, project_id, resource_kind, resource_cursor, last_synced_at, metadata_json) VALUES (?1, ?2, 'GITHUB_TASKS_REMOTE', 'foreign-head', ?3, ?4)",
@@ -3165,30 +3831,67 @@ mod tests {
         assert_eq!(issues[0].task_links, vec!["M18.10.01", "TASK-42"]);
         assert_eq!(issues[0].session_links, vec!["SESSION-owned"]);
         assert!(prs[0].raw_task_references.contains(&"M19".into()));
-        assert!(prs[0].raw_task_references.contains(&"TASK-FORMULAB-01".into()));
+        assert!(prs[0]
+            .raw_task_references
+            .contains(&"TASK-FORMULAB-01".into()));
         assert!(prs[0].raw_task_references.contains(&"TASK-foreign".into()));
-        assert!(prs[0].raw_session_references.contains(&"SESSION-FORMULAB-01".into()));
-        assert!(prs[0].raw_session_references.contains(&"SESSION-foreign".into()));
+        assert!(prs[0]
+            .raw_session_references
+            .contains(&"SESSION-FORMULAB-01".into()));
+        assert!(prs[0]
+            .raw_session_references
+            .contains(&"SESSION-foreign".into()));
     }
 
     #[test]
     fn failed_job_selection_skips_success_and_skipped_jobs_and_preserves_provenance() {
         let mut actions = parse_actions(Some(&json!({"workflow_runs":[{"id":1,"name":"CI"}]})));
         let resources = vec![
-            ResourceResult { kind: "GITHUB_ACTION_1_JOBS".into(), value: Some(json!({"jobs":[
-                {"id":1,"name":"success","status":"completed","conclusion":"success"},
-                {"id":2,"name":"skipped","status":"completed","conclusion":"skipped"},
-                {"id":3,"name":"failed","status":"completed","conclusion":"failure"},
-                {"id":4,"name":"cancelled","status":"completed","conclusion":"cancelled"},
-                {"id":5,"name":"timed out","status":"completed","conclusion":"timed_out"},
-                {"id":6,"name":"action required","status":"action_required"}
-            ]})), state: "CURRENT".into(), fetched_at: None, last_known_good_at: None, error: None },
-            ResourceResult { kind: "GITHUB_ACTION_JOB_3_LOG".into(), value: Some(Value::String("failed log".into())), state: "CURRENT".into(), fetched_at: None, last_known_good_at: None, error: None },
-            ResourceResult { kind: "GITHUB_ACTION_JOB_4_LOG".into(), value: Some(Value::String("cancelled log".into())), state: "CURRENT".into(), fetched_at: None, last_known_good_at: None, error: None },
+            ResourceResult {
+                kind: "GITHUB_ACTION_1_JOBS".into(),
+                value: Some(json!({"jobs":[
+                    {"id":1,"name":"success","status":"completed","conclusion":"success"},
+                    {"id":2,"name":"skipped","status":"completed","conclusion":"skipped"},
+                    {"id":3,"name":"failed","status":"completed","conclusion":"failure"},
+                    {"id":4,"name":"cancelled","status":"completed","conclusion":"cancelled"},
+                    {"id":5,"name":"timed out","status":"completed","conclusion":"timed_out"},
+                    {"id":6,"name":"action required","status":"action_required"}
+                ]})),
+                state: "CURRENT".into(),
+                fetched_at: None,
+                last_known_good_at: None,
+                error: None,
+            },
+            ResourceResult {
+                kind: "GITHUB_ACTION_JOB_3_LOG".into(),
+                value: Some(Value::String("failed log".into())),
+                state: "CURRENT".into(),
+                fetched_at: None,
+                last_known_good_at: None,
+                error: None,
+            },
+            ResourceResult {
+                kind: "GITHUB_ACTION_JOB_4_LOG".into(),
+                value: Some(Value::String("cancelled log".into())),
+                state: "CURRENT".into(),
+                fetched_at: None,
+                last_known_good_at: None,
+                error: None,
+            },
         ];
         enrich_actions(&mut actions, &resources);
-        assert_eq!(actions[0].failed_log_evidence.iter().map(|item| item.job_id).collect::<Vec<_>>(), vec![3, 4]);
-        assert_eq!(actions[0].failed_log_summary.as_deref(), Some("Job #3 failed: failed log"));
+        assert_eq!(
+            actions[0]
+                .failed_log_evidence
+                .iter()
+                .map(|item| item.job_id)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(
+            actions[0].failed_log_summary.as_deref(),
+            Some("Job #3 failed: failed log")
+        );
         assert_eq!(actions[0].logs_state, "CURRENT");
     }
 
@@ -3197,28 +3900,86 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let project = crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
-        let identity = identity_from_project(&project).map(identity_from_view).unwrap();
+        let project =
+            crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
+        let identity = identity_from_project(&project)
+            .map(identity_from_view)
+            .unwrap();
         let repo = "https://api.github.com/repos/Sekiph82/H-veAI";
         let pull_url = format!("{repo}/pulls?state=all&per_page={MAX_PULL_REQUESTS}");
         let action_url = format!("{repo}/actions/runs?per_page={MAX_ACTION_RUNS}");
         let pulls = (1..=5).map(|number| json!({"number":number,"title":format!("M18.10.{number:02}"),"head":{"sha":format!("sha-{number}")}})).collect::<Vec<_>>();
-        let runs = (1..=5).map(|id| json!({"id":id,"name":format!("run-{id}")})).collect::<Vec<_>>();
+        let runs = (1..=5)
+            .map(|id| json!({"id":id,"name":format!("run-{id}")}))
+            .collect::<Vec<_>>();
         let mut transport = FixtureTransport::default()
             .response(&pull_url, 200, &serde_json::to_string(&pulls).unwrap())
-            .response(&action_url, 200, &serde_json::json!({"workflow_runs":runs}).to_string());
+            .response(
+                &action_url,
+                200,
+                &serde_json::json!({"workflow_runs":runs}).to_string(),
+            );
         for number in 1..=5 {
             let jobs_url = format!("{repo}/actions/runs/{number}/jobs?per_page={MAX_ACTION_JOBS}");
             transport = transport.response(&jobs_url, 200, &format!(r#"{{"jobs":[{{"id":{},"name":"failed","status":"completed","conclusion":"failure"}}]}}"#, 100 + number));
         }
-        let resources = fetch_resources_with_transport(&database, &project, &identity, "2026-09-15T00:00:00Z", &mut transport);
-        assert_eq!(transport.requests.iter().filter(|url| url.contains("/actions/jobs/")).count(), 2, "requests={:?}", transport.requests);
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/103/logs")));
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/104/logs")));
-        assert!(!transport.requests.iter().any(|url| url.ends_with("/actions/jobs/105/logs")));
+        let resources = fetch_resources_with_transport(
+            &database,
+            &project,
+            &identity,
+            "2026-09-15T00:00:00Z",
+            &mut transport,
+        );
+        assert_eq!(
+            transport
+                .requests
+                .iter()
+                .filter(|url| url.contains("/actions/jobs/"))
+                .count(),
+            2,
+            "requests={:?}",
+            transport.requests
+        );
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/103/logs")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/104/logs")));
+        assert!(!transport
+            .requests
+            .iter()
+            .any(|url| url.ends_with("/actions/jobs/105/logs")));
         assert_eq!(transport.requests.len(), 8 + MAX_SUBRESOURCE_REQUESTS);
-        assert_eq!(resources.iter().filter(|resource| resource.kind.contains("_LOG")).count(), 3);
-        let log_states = resources.iter().filter(|resource| resource.kind.contains("_LOG")).map(|resource| resource.state.as_str()).collect::<Vec<_>>();
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|resource| resource.kind.contains("_LOG"))
+                .count(),
+            3
+        );
+        let log_states = resources
+            .iter()
+            .filter(|resource| resource.kind.contains("_LOG"))
+            .map(|resource| resource.state.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(log_states, vec!["CURRENT", "CURRENT", "UNAVAILABLE"]);
+    }
+
+    #[test]
+    fn process_budget_is_below_unauthenticated_quota_for_required_portfolios() {
+        for projects in [8usize, 9, 10, 20] {
+            let cold_primary_demand = projects * PRIMARY_RESOURCE_KINDS.len();
+            let admitted = cold_primary_demand.min(PROCESS_REQUESTS_PER_HOUR);
+            assert!(admitted <= PROCESS_REQUESTS_PER_HOUR);
+            assert!(
+                admitted < 60,
+                "portfolio size {projects} exceeded unauthenticated quota"
+            );
+            let optional_demand = projects * MAX_SUBRESOURCE_REQUESTS;
+            assert!(admitted + optional_demand >= cold_primary_demand);
+        }
     }
 }
