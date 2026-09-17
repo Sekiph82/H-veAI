@@ -42,7 +42,7 @@ Idle is cache-only for detailed resources. Selected and Manual are explicitly sc
 | 10 | 10 | 10 | 30 | 30 | 21 | 63 | 40 |
 | 20 | 20 | 20 | 60 | 40 | 31 | 93 | 40 |
 
-The scheduler cadence is 3600s for background projects and 300s for the selected project. A changed HEAD has 3 sequential bounded stages. M19 uses a 3680s portfolio hard validation horizon and a 380s selected target horizon; failed validation never advances validation freshness.
+The scheduler cadence is 3600s for background projects. Selected projects have a 300s scheduler target, while M19 has one 3680s portfolio hard validation horizon for all projects. A changed HEAD has 3 sequential bounded stages; failed validation never advances validation freshness.
 
 ## Failure/backoff evidence
 
