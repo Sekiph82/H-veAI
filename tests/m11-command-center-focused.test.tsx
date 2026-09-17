@@ -118,20 +118,19 @@ describe("M11 Command Center evidence surface", () => {
     await screen.findByText("Canonical task");
     invoke.mockClear();
     let completeRefresh: (() => void) | undefined;
-    const refreshInFlight = new Promise<void>((resolve) => { completeRefresh = resolve; });
+    const refreshInFlight = new Promise<unknown>((resolve) => { completeRefresh = resolve; });
     invoke.mockImplementation((command: string) => {
-      if (command === "hiveai_github_tracking_refresh") return refreshInFlight;
+      if (command === "hiveai_next_best_task_refresh_and_compare") return refreshInFlight;
       if (command === "hiveai_command_center_snapshot") return Promise.resolve(snapshot);
       return Promise.resolve(undefined);
     });
     fireEvent.click(screen.getByRole("button", { name: /^Refresh$/i }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_github_tracking_refresh"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_next_best_task_refresh_and_compare", { projectId: "project-1" }));
     expect(invoke).not.toHaveBeenCalledWith("hiveai_next_best_task_record_history");
     completeRefresh?.();
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("hiveai_next_best_task_record_history"));
     const commands = invoke.mock.calls.map(([command]) => command);
-    expect(commands.indexOf("hiveai_github_tracking_refresh")).toBeGreaterThanOrEqual(0);
-    expect(commands.indexOf("hiveai_next_best_task_record_history")).toBeGreaterThan(commands.indexOf("hiveai_github_tracking_refresh"));
+    expect(commands.indexOf("hiveai_next_best_task_refresh_and_compare")).toBeGreaterThanOrEqual(0);
+    expect(commands.indexOf("hiveai_next_best_task_record_history")).toBe(-1);
   });
 
   it("deduplicates actual legacy and M19 shapes while preserving distinct facts", () => {

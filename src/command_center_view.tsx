@@ -8,10 +8,9 @@ import { LoadingState, MetricCard, SectionHeader, formatPercent } from "./compon
 import {
   getCommandCenterSnapshot,
   listenForGitHubTrackingUpdate,
-  recordNextBestTaskHistory,
   previewSnapshot,
   registryFallback,
-  refreshGitHubTracking,
+  refreshNextBestTaskAndCompare,
   selectGitHubTrackingProject,
   type CommandCenterSnapshot,
 } from "./commandCenter";
@@ -131,11 +130,15 @@ export function CommandCenterLive() {
       return;
     }
     setLoading(true);
-    void refreshGitHubTracking()
-      .then(() => recordNextBestTaskHistory())
+    const projectId = selectedProjectId ?? data.projects[0]?.projectId;
+    if (!projectId) {
+      refresh();
+      return;
+    }
+    void refreshNextBestTaskAndCompare(projectId)
       .then(() => refresh())
       .catch(() => refresh());
-  }, [desktop, refresh]);
+  }, [data.projects, desktop, refresh, selectedProjectId]);
   return <div className="command-center" aria-label="Command Center overview">
     {error ? <div className="safe-notice" role="alert">{error}</div> : null}
     {data.warnings.slice(0, 3).map((warning) => <div className="safe-notice" role="alert" key={warning}>{warning}</div>)}

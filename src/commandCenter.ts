@@ -164,7 +164,8 @@ export type CommandCenterRefreshEvent = { projectId: string; category: string; g
 export const getCommandCenterSnapshot = () => invoke<CommandCenterSnapshot>("hiveai_command_center_snapshot");
 export const getNextBestTaskSnapshot = () => invoke<M19Snapshot>("hiveai_next_best_task_snapshot");
 export const recordNextBestTaskHistory = () => invoke<void>("hiveai_next_best_task_record_history");
-export const refreshGitHubTracking = () => invoke<number>("hiveai_github_tracking_refresh");
+export const refreshGitHubTracking = (projectId: string) => invoke<number>("hiveai_github_tracking_refresh", { projectId });
+export const refreshNextBestTaskAndCompare = (projectId: string) => invoke<M19Snapshot>("hiveai_next_best_task_refresh_and_compare", { projectId });
 export const selectGitHubTrackingProject = (projectId: string | null) =>
   invoke<void>("hiveai_github_tracking_select_project", { projectId });
 export const listenForCommandCenterRefresh = (handler: (event: CommandCenterRefreshEvent) => void): Promise<UnlistenFn> =>

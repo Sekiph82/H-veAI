@@ -218,8 +218,19 @@ mod app_commands {
     #[tauri::command]
     fn hiveai_github_tracking_refresh(
         manager: tauri::State<'_, GitHubTrackingManager>,
+        project_id: String,
     ) -> Result<usize, String> {
-        manager.refresh_now()
+        manager.refresh_selected(project_id)
+    }
+
+    #[tauri::command]
+    fn hiveai_next_best_task_refresh_and_compare(
+        database: tauri::State<'_, DatabaseState>,
+        manager: tauri::State<'_, GitHubTrackingManager>,
+        project_id: String,
+    ) -> Result<next_best_task::M19Snapshot, String> {
+        github_tracking::ensure_portfolio(&database)?;
+        next_best_task::refresh_and_compare(&database, || manager.refresh_selected(project_id).map(|_| ()))
     }
 
     #[tauri::command]
@@ -229,6 +240,23 @@ mod app_commands {
     ) -> Result<GitHubIntegrationSnapshot, String> {
         let project = projects::fetch_project(&database, &project_id)?;
         github_integration::snapshot(&database, &project)
+    }
+
+    #[tauri::command]
+    fn hiveai_github_portfolio_snapshots(
+        database: tauri::State<'_, DatabaseState>,
+        intent: String,
+        selected_project: Option<String>,
+    ) -> Result<Vec<GitHubIntegrationSnapshot>, String> {
+        let intent = match intent.to_ascii_uppercase().as_str() {
+            "IDLE" => github_integration::GitHubAcquisitionIntent::Idle,
+            "SELECTED" => github_integration::GitHubAcquisitionIntent::Selected,
+            "NAVIGATION" => github_integration::GitHubAcquisitionIntent::Navigation,
+            "MANUAL" => github_integration::GitHubAcquisitionIntent::Manual,
+            _ => return Err("GITHUB_ACQUISITION_INTENT_INVALID".into()),
+        };
+        github_tracking::ensure_portfolio(&database)?;
+        github_integration::portfolio_snapshots(&database, intent, selected_project)
     }
 
     #[tauri::command]
@@ -852,9 +880,11 @@ mod app_commands {
                 hiveai_command_center_snapshot,
                 hiveai_next_best_task_snapshot,
                 hiveai_next_best_task_record_history,
+                hiveai_next_best_task_refresh_and_compare,
                 hiveai_github_tracking_select_project,
                 hiveai_github_tracking_refresh,
                 hiveai_github_integration_snapshot,
+                hiveai_github_portfolio_snapshots,
                 hiveai_project_dashboard_resolve,
                 hiveai_project_cockpit_snapshot,
                 hiveai_control_plane_snapshot,

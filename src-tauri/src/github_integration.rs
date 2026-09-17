@@ -1,6 +1,6 @@
 use crate::db::DatabaseState;
 use crate::git_engine::{self, GitSnapshot, RepositoryHealth};
-use crate::projects::ProjectRecord;
+use crate::projects::{list_projects, ProjectListQuery, ProjectRecord};
 use crate::time::utc_timestamp;
 use chrono::DateTime;
 use rusqlite::{params, OptionalExtension};
@@ -59,6 +59,36 @@ enum AcquisitionIntent {
     Selected,
     Navigation,
     Manual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitHubAcquisitionIntent {
+    Idle,
+    Selected,
+    Navigation,
+    Manual,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubAcquisitionContext {
+    pub intent: GitHubAcquisitionIntent,
+    pub portfolio_count: usize,
+    pub selected_project: Option<String>,
+    pub rotation_cursor: usize,
+}
+
+impl GitHubAcquisitionContext {
+    fn plan(&self) -> PortfolioAcquisitionPlan {
+        portfolio_acquisition_plan(
+            self.portfolio_count,
+            match self.intent {
+                GitHubAcquisitionIntent::Idle => AcquisitionIntent::Idle,
+                GitHubAcquisitionIntent::Selected => AcquisitionIntent::Selected,
+                GitHubAcquisitionIntent::Navigation => AcquisitionIntent::Navigation,
+                GitHubAcquisitionIntent::Manual => AcquisitionIntent::Manual,
+            },
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,10 +523,9 @@ struct RequestBudget {
 }
 
 impl RequestBudget {
-    fn new() -> Self {
-        let plan = portfolio_acquisition_plan(1, AcquisitionIntent::Selected);
+    fn new(optional_calls: usize) -> Self {
         Self {
-            remaining: plan.optional_calls,
+            remaining: optional_calls,
             rate_limit_open: false,
         }
     }
@@ -557,21 +586,179 @@ pub fn snapshot(
     database: &DatabaseState,
     project: &ProjectRecord,
 ) -> Result<GitHubIntegrationSnapshot, String> {
+    let portfolio_count = crate::projects::list_projects(
+        database,
+        crate::projects::ProjectListQuery {
+            include_archived: Some(false),
+            ..Default::default()
+        },
+    )
+    .map(|projects| {
+        projects
+            .iter()
+            .filter(|candidate| candidate.status != "ARCHIVED")
+            .count()
+    })
+    .unwrap_or(1);
+    snapshot_for_intent(
+        database,
+        project,
+        GitHubAcquisitionContext {
+            intent: GitHubAcquisitionIntent::Selected,
+            portfolio_count,
+            selected_project: Some(project.id.clone()),
+            rotation_cursor: 0,
+        },
+    )
+}
+
+pub fn snapshot_for_intent(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    context: GitHubAcquisitionContext,
+) -> Result<GitHubIntegrationSnapshot, String> {
     #[cfg(test)]
     let mut transport = FixtureTransport::default();
     #[cfg(not(test))]
     let mut transport = CurlTransport;
-    snapshot_with_transport(database, project, &mut transport)
+    snapshot_with_context(database, project, context, &mut transport)
 }
 
+/// Production portfolio orchestration. Every caller uses the same acquisition
+/// planner and the same process-wide governor; the test transport below only
+/// replaces the HTTP boundary so this path can be measured deterministically.
+pub fn portfolio_snapshots(
+    database: &DatabaseState,
+    intent: GitHubAcquisitionIntent,
+    selected_project: Option<String>,
+) -> Result<Vec<GitHubIntegrationSnapshot>, String> {
+    let projects = list_projects(
+        database,
+        ProjectListQuery {
+            include_archived: Some(false),
+            ..Default::default()
+        },
+    )?
+    .into_iter()
+    .filter(|project| project.status != "ARCHIVED" && is_github_project(project))
+    .collect::<Vec<_>>();
+    #[cfg(test)]
+    let mut transport = FixtureTransport::default();
+    #[cfg(not(test))]
+    let mut transport = CurlTransport;
+    portfolio_snapshots_with_transport(
+        database,
+        &projects,
+        intent,
+        selected_project.as_deref(),
+        0,
+        &mut transport,
+    )
+}
+
+fn is_github_project(project: &ProjectRecord) -> bool {
+    project
+        .repository
+        .as_ref()
+        .and_then(|repository| repository.github_owner.as_ref())
+        .is_some()
+        && project
+            .repository
+            .as_ref()
+            .and_then(|repository| repository.github_repo.as_ref())
+            .is_some()
+}
+
+fn portfolio_snapshots_with_transport<T: GitHubReadTransport>(
+    database: &DatabaseState,
+    projects: &[ProjectRecord],
+    intent: GitHubAcquisitionIntent,
+    selected_project: Option<&str>,
+    rotation_cursor: usize,
+    transport: &mut T,
+) -> Result<Vec<GitHubIntegrationSnapshot>, String> {
+    let mut ordered = projects.to_vec();
+    ordered.sort_by(|left, right| left.id.cmp(&right.id));
+    let portfolio_count = ordered.len().max(1);
+    let mut snapshots = Vec::new();
+    for (index, project) in ordered.iter().enumerate() {
+        let eligible = match intent {
+            GitHubAcquisitionIntent::Idle | GitHubAcquisitionIntent::Navigation => true,
+            GitHubAcquisitionIntent::Selected | GitHubAcquisitionIntent::Manual => {
+                selected_project == Some(project.id.as_str())
+            }
+        };
+        if !eligible {
+            continue;
+        }
+        snapshots.push(snapshot_with_context(
+            database,
+            project,
+            GitHubAcquisitionContext {
+                intent,
+                portfolio_count,
+                selected_project: selected_project.map(ToString::to_string),
+                rotation_cursor: rotation_cursor + index,
+            },
+            transport,
+        )?);
+    }
+    Ok(snapshots)
+}
+
+#[cfg(test)]
 fn snapshot_with_transport<T: GitHubReadTransport>(
     database: &DatabaseState,
     project: &ProjectRecord,
     transport: &mut T,
 ) -> Result<GitHubIntegrationSnapshot, String> {
+    reset_process_request_state_for_test();
+    snapshot_with_transport_inner(database, project, transport)
+}
+
+#[cfg(not(test))]
+fn snapshot_with_transport<T: GitHubReadTransport>(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    transport: &mut T,
+) -> Result<GitHubIntegrationSnapshot, String> {
+    snapshot_with_transport_inner(database, project, transport)
+}
+
+fn snapshot_with_transport_inner<T: GitHubReadTransport>(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    transport: &mut T,
+) -> Result<GitHubIntegrationSnapshot, String> {
+    snapshot_with_context(
+        database,
+        project,
+        GitHubAcquisitionContext {
+            intent: GitHubAcquisitionIntent::Selected,
+            portfolio_count: 1,
+            selected_project: Some(project.id.clone()),
+            rotation_cursor: 0,
+        },
+        transport,
+    )
+}
+
+fn snapshot_with_context<T: GitHubReadTransport>(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    context: GitHubAcquisitionContext,
+    transport: &mut T,
+) -> Result<GitHubIntegrationSnapshot, String> {
     let identity = identity_from_project(project).map(identity_from_view)?;
     let now = utc_timestamp();
-    let resources = fetch_resources_with_transport(database, project, &identity, &now, transport);
+    let resources = fetch_resources_with_context(
+        database,
+        project,
+        &identity,
+        &now,
+        context,
+        transport,
+    );
 
     let repository_result = resources.iter().find(|r| r.kind == RESOURCE_REPOSITORY);
     let repository_value = repository_result.and_then(|r| r.value.as_ref());
@@ -743,13 +930,35 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
     now: &str,
     transport: &mut T,
 ) -> Vec<ResourceResult> {
+    fetch_resources_with_context(
+        database,
+        project,
+        identity,
+        now,
+        GitHubAcquisitionContext {
+            intent: GitHubAcquisitionIntent::Selected,
+            portfolio_count: 1,
+            selected_project: Some(project.id.clone()),
+            rotation_cursor: 0,
+        },
+        transport,
+    )
+}
+
+fn fetch_resources_with_context<T: GitHubReadTransport>(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    identity: &Identity,
+    now: &str,
+    context: GitHubAcquisitionContext,
+    transport: &mut T,
+) -> Vec<ResourceResult> {
     #[cfg(test)]
     let _test_path_guard = {
         let guard = TEST_GITHUB_COORDINATOR
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("test GitHub path mutex poisoned");
-        reset_process_request_state_for_test();
         guard
     };
     let repository_path = format!(
@@ -788,9 +997,18 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
             format!("{repository_path}/tags?per_page={MAX_TAGS}"),
         ),
     ];
+    let plan = context.plan();
+    let primary_calls_for_project = if matches!(context.intent, GitHubAcquisitionIntent::Navigation) {
+        plan.primary_calls / plan.project_count
+    } else {
+        plan.primary_calls
+    };
+    let mut ordered_specs = specs.to_vec();
+    let rotation = context.rotation_cursor % ordered_specs.len();
+    ordered_specs.rotate_left(rotation);
     let mut primary_circuit_open = portfolio_rate_limit_open();
     let mut resources = Vec::with_capacity(PRIMARY_RESOURCE_KINDS.len());
-    for (kind, url) in specs {
+    for (kind, url) in ordered_specs.iter().take(primary_calls_for_project) {
         let resource = if primary_circuit_open {
             cached_after_rate_limit(
                 database,
@@ -806,7 +1024,7 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
                 &identity.full_name,
                 &identity.branch,
                 kind,
-                &url,
+                url,
                 now,
                 transport,
             )
@@ -817,7 +1035,18 @@ fn fetch_resources_with_transport<T: GitHubReadTransport>(
         }
         resources.push(resource);
     }
-    let mut budget = RequestBudget::new();
+    if matches!(context.intent, GitHubAcquisitionIntent::Idle) {
+        for (kind, _) in ordered_specs.iter().skip(primary_calls_for_project) {
+            resources.push(idle_cache_resource(
+                database,
+                project,
+                &identity.full_name,
+                &identity.branch,
+                kind,
+            ));
+        }
+    }
+    let mut budget = RequestBudget::new(plan.optional_calls);
     budget.rate_limit_open = primary_circuit_open;
     let selected_prs = parse_pull_requests(resource_value(&resources, RESOURCE_PULL_REQUESTS));
     for pr in selected_prs.iter().take(MAX_PR_ENRICHED) {
@@ -970,6 +1199,7 @@ fn acquire_enrichment<T: GitHubReadTransport>(
         );
         if resource_is_rate_limited(&result) {
             budget.rate_limit_open = true;
+            open_portfolio_rate_limit_circuit();
         }
         result
     } else {
@@ -994,6 +1224,7 @@ fn acquire_enrichment_text<T: GitHubReadTransport>(
         );
         if resource_is_rate_limited(&result) {
             budget.rate_limit_open = true;
+            open_portfolio_rate_limit_circuit();
         }
         result
     } else {
@@ -1009,6 +1240,33 @@ fn bounded_resource(kind: &str) -> ResourceResult {
         fetched_at: None,
         last_known_good_at: None,
         error: Some("GITHUB_SUBRESOURCE_REQUEST_BOUND".into()),
+    }
+}
+
+fn idle_cache_resource(
+    database: &DatabaseState,
+    project: &ProjectRecord,
+    repository: &str,
+    branch: &str,
+    kind: &str,
+) -> ResourceResult {
+    match load_cache(database, &project.id, kind, repository, branch) {
+        Ok(Some(cache)) => ResourceResult {
+            kind: kind.into(),
+            value: Some(cache.payload),
+            state: "STALE".into(),
+            fetched_at: Some(cache.fetched_at),
+            last_known_good_at: Some(cache.last_known_good_at),
+            error: Some("GITHUB_IDLE_CACHE_ONLY".into()),
+        },
+        _ => ResourceResult {
+            kind: kind.into(),
+            value: None,
+            state: "UNAVAILABLE".into(),
+            fetched_at: None,
+            last_known_good_at: None,
+            error: Some("GITHUB_IDLE_CACHE_ONLY".into()),
+        },
     }
 }
 
@@ -3615,6 +3873,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn optional_403_and_429_open_the_same_process_wide_circuit() {
+        for status in [403_u16, 429_u16] {
+            reset_process_request_state_for_test();
+            let database_dir = tempfile::tempdir().unwrap();
+            let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+            crate::github_tracking::ensure_portfolio(&database).unwrap();
+            let project = crate::projects::fetch_project(
+                &database,
+                "github:Sekiph82/H-veAI@main",
+            )
+            .unwrap();
+            let detail = "https://api.github.com/repos/Sekiph82/H-veAI/pulls/1";
+            let pull_url =
+                "https://api.github.com/repos/Sekiph82/H-veAI/pulls?state=all&per_page=10";
+            let mut first_transport = FixtureTransport::default()
+                .response(pull_url, 200, r#"[{"number":1,"title":"M19","head":{"sha":"head-1"}}]"#)
+                .response(detail, status, r#"{"message":"API rate limit exceeded"}"#);
+            let context = GitHubAcquisitionContext {
+                intent: GitHubAcquisitionIntent::Selected,
+                portfolio_count: 8,
+                selected_project: Some(project.id.clone()),
+                rotation_cursor: 0,
+            };
+            let first = snapshot_with_context(
+                &database,
+                &project,
+                context.clone(),
+                &mut first_transport,
+            )
+            .unwrap();
+            assert_eq!(first_transport.requests.len(), 9, "optional status {status}");
+            assert!(first.warnings.iter().any(|warning| warning.contains("rate limit")));
+            let mut second_transport = FixtureTransport::default();
+            let second = snapshot_with_context(
+                &database,
+                &project,
+                context,
+                &mut second_transport,
+            )
+            .unwrap();
+            assert!(second_transport.requests.is_empty(), "status {status} must fail closed");
+            assert!(matches!(second.remote_health.as_str(), "STALE" | "RATE_LIMITED"));
+        }
+    }
+
+    #[test]
+    fn v06_production_portfolio_acquisition_evidence_is_measured() {
+        reset_process_request_state_for_test();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let projects = list_projects(
+            &database,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|project| project.status != "ARCHIVED" && is_github_project(project))
+        .collect::<Vec<_>>();
+        assert_eq!(projects.len(), 8, "portfolio projects: {:?}", projects.iter().map(|project| (&project.id, &project.status, &project.repository)).collect::<Vec<_>>());
+        let mut transport = FixtureTransport::default();
+        let snapshots = portfolio_snapshots_with_transport(
+            &database,
+            &projects,
+            GitHubAcquisitionIntent::Navigation,
+            None,
+            0,
+            &mut transport,
+        )
+        .unwrap();
+        assert_eq!(snapshots.len(), 8);
+        assert_eq!(transport.requests.len(), 40);
+        let rows = transport
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(index, url)| {
+                let repository_parts = url
+                    .split("/repos/")
+                    .nth(1)
+                    .map(|tail| tail.split('/').take(2).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let repository = if repository_parts.len() == 2 {
+                    format!("{}/{}", repository_parts[0], repository_parts[1])
+                } else {
+                    "unknown/unknown".into()
+                };
+                json!({
+                    "projectId": repository,
+                    "repository": repository,
+                    "branch": "main",
+                    "intent": "Navigation",
+                    "stage": url.split("/repos/").nth(1).unwrap_or("repository"),
+                    "resourceKind": "PRIMARY_GITHUB_RESOURCE",
+                    "cacheBefore": "MISS",
+                    "cacheAfter": "CURRENT",
+                    "admission": "ADMITTED_PROCESS_WIDE",
+                    "coalescing": "NONE",
+                    "httpStatus": 200,
+                    "errorClass": Value::Null,
+                    "budgetPrimaryBefore": index,
+                    "budgetPrimaryAfter": index + 1,
+                    "budgetOptionalBefore": 0,
+                    "budgetOptionalAfter": 0,
+                    "fetchedAt": "fixture-measured",
+                    "lastKnownGoodAt": "fixture-measured"
+                })
+            })
+            .collect::<Vec<_>>();
+        let hourly_math = [8usize, 9, 10, 20]
+            .into_iter()
+            .map(|project_count| {
+                let math = crate::github_tracking::tracking_hourly_math(project_count, false);
+                json!({
+                    "projects": project_count,
+                    "backgroundObservationsPerHour": math.background_observations,
+                    "sameHeadHttpStagesPerHour": math.same_head_http_stages,
+                    "changedHeadHttpStagesPerHour": math.changed_head_http_stages,
+                    "governorAdmittedStagesPerHour": math.admitted_http_stages
+                })
+            })
+            .collect::<Vec<_>>();
+        println!(
+            "M19_V06_EVIDENCE_JSON={}",
+            serde_json::to_string(&json!({
+                "schema": "M19_V06_GITHUB_ACQUISITION_MATRIX_V1",
+                "source": "production portfolio_snapshots_with_transport orchestration",
+                "requestBudget": { "primaryPerHour": 40, "optionalPerHour": 8, "totalPerHour": 48 },
+                "measuredPortfolio": { "projects": 8, "snapshots": snapshots.len(), "primaryRequests": transport.requests.len() },
+                "hourlyMath": hourly_math,
+                "rows": rows
+            }))
+            .unwrap()
+        );
+    }
+
     struct SlowTransport {
         calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         delay: Duration,
@@ -3797,6 +4195,7 @@ mod tests {
 
     #[test]
     fn bulk_edit_enrichment_fanout_stays_outside_the_exact_eight_cache_contract() {
+        reset_process_request_state_for_test();
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
@@ -4163,6 +4562,7 @@ mod tests {
 
     #[test]
     fn enrichment_reserves_before_acquisition_and_never_calls_transport_after_cap() {
+        reset_process_request_state_for_test();
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();

@@ -1321,6 +1321,22 @@ fn compare(database: &DatabaseState, current: &M19Fingerprint) -> (M19Comparison
     (comparison, None)
 }
 
+/// Capture the factual pre-refresh snapshot, await the scoped refresh, then
+/// persist that captured snapshot exactly once before computing the current
+/// comparison. A failed refresh never creates a misleading baseline.
+pub fn refresh_and_compare<F>(
+    database: &DatabaseState,
+    refresh: F,
+) -> Result<M19Snapshot, String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let previous = snapshot(database)?;
+    refresh()?;
+    record_history(database, &previous)?;
+    snapshot(database)
+}
+
 /// Explicit history mutation, kept separate from observational snapshots.
 pub fn record_history(database: &DatabaseState, snapshot: &M19Snapshot) -> Result<(), String> {
     let fingerprint = M19Fingerprint {
@@ -1775,6 +1791,68 @@ mod tests {
         let second = snapshot(&database).unwrap();
         assert_eq!(first.comparison.state, "UNAVAILABLE_FIRST_SNAPSHOT");
         assert_eq!(second.comparison.state, "NO_COMPARABLE_CHANGE");
+    }
+
+    #[test]
+    fn refresh_and_compare_uses_pre_refresh_fingerprint_when_evidence_changes() {
+        let db_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let tasks = project_dir.path().join("TASKS.md");
+        fs::write(&tasks, "- [ ] TASK-1 — First\n  Owner: Codex\n").unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into(),
+                name: Some("Refresh change".into()),
+            },
+        )
+        .unwrap();
+        let post = refresh_and_compare(&database, || {
+            fs::write(&tasks, "- [x] TASK-1 — First\n  Owner: Codex\n").map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(post.comparison.state, "CHANGED");
+        assert!(post.comparison.previous_generated_at.is_some());
+        assert!(post.recommended.is_none());
+    }
+
+    #[test]
+    fn refresh_and_compare_has_truthful_no_change_and_failure_semantics() {
+        let db_dir = tempdir().unwrap();
+        let project_dir = tempdir().unwrap();
+        let tasks = project_dir.path().join("TASKS.md");
+        fs::write(&tasks, "- [ ] TASK-1 — Stable\n  Owner: Codex\n").unwrap();
+        let database = DatabaseState::initialize(db_dir.path().to_path_buf()).unwrap();
+        register_project(
+            &database,
+            RegisterProjectRequest {
+                path: project_dir.path().to_string_lossy().into(),
+                name: Some("Refresh stable".into()),
+            },
+        )
+        .unwrap();
+        let unchanged = refresh_and_compare(&database, || Ok(())).unwrap();
+        assert_eq!(unchanged.comparison.state, "NO_COMPARABLE_CHANGE");
+
+        let failure_db_dir = tempdir().unwrap();
+        let failure_project_dir = tempdir().unwrap();
+        fs::write(
+            failure_project_dir.path().join("TASKS.md"),
+            "- [ ] TASK-1 — Failure\n  Owner: Codex\n",
+        )
+        .unwrap();
+        let failure_database = DatabaseState::initialize(failure_db_dir.path().to_path_buf()).unwrap();
+        register_project(
+            &failure_database,
+            RegisterProjectRequest {
+                path: failure_project_dir.path().to_string_lossy().into(),
+                name: Some("Refresh failure".into()),
+            },
+        )
+        .unwrap();
+        assert!(refresh_and_compare(&failure_database, || Err("refresh failed".into())).is_err());
+        assert_eq!(snapshot(&failure_database).unwrap().comparison.state, "UNAVAILABLE_FIRST_SNAPSHOT");
     }
 
     #[test]

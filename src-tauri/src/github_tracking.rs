@@ -27,8 +27,90 @@ use tauri::Emitter;
 
 pub const GITHUB_TASKS_ONLY_POLICY: &str = "GITHUB_TASKS_ONLY";
 const REMOTE_TASKS_RESOURCE_KIND: &str = "GITHUB_TASKS_REMOTE";
-pub const SELECTED_PROJECT_REFRESH_SECONDS: u64 = 10;
-pub const PORTFOLIO_REFRESH_SECONDS: u64 = 30;
+/// Selected-owner validation is bounded to twelve observations/hour. The
+/// five-minute M19 validation horizon therefore never relies on a 10-second
+/// request storm.
+pub const SELECTED_PROJECT_REFRESH_SECONDS: u64 = 300;
+/// Background projects receive one HEAD validation/hour. Same-HEAD
+/// validation is one HTTP stage; a changed HEAD adds raw TASKS + commit-feed
+/// stages, all subject to the shared tracking governor.
+pub const PORTFOLIO_REFRESH_SECONDS: u64 = 3600;
+pub const TRACKING_REQUESTS_PER_HOUR: usize = 40;
+const TRACKING_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+static TRACKING_REQUEST_GOVERNOR: std::sync::OnceLock<Mutex<TrackingRequestGovernor>> =
+    std::sync::OnceLock::new();
+
+#[derive(Debug)]
+struct TrackingRequestGovernor {
+    window_started: std::time::Instant,
+    requests: usize,
+}
+
+impl Default for TrackingRequestGovernor {
+    fn default() -> Self {
+        Self {
+            window_started: std::time::Instant::now(),
+            requests: 0,
+        }
+    }
+}
+
+impl TrackingRequestGovernor {
+    fn admit_at(&mut self, now: std::time::Instant) -> bool {
+        if now.duration_since(self.window_started) >= Duration::from_secs(3600) {
+            self.window_started = now;
+            self.requests = 0;
+        }
+        if self.requests >= TRACKING_REQUESTS_PER_HOUR {
+            return false;
+        }
+        self.requests += 1;
+        true
+    }
+}
+
+fn admit_tracking_request() -> Result<(), String> {
+    let lock = TRACKING_REQUEST_GOVERNOR
+        .get_or_init(|| Mutex::new(TrackingRequestGovernor::default()));
+    let mut governor = lock
+        .lock()
+        .map_err(|_| "GitHub tracking request governor lock poisoned".to_string())?;
+    if !governor.admit_at(std::time::Instant::now()) {
+        return Err("GITHUB_TRACKING_BUDGET_WAIT".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrackingHourlyMath {
+    pub project_count: usize,
+    pub background_observations: usize,
+    pub selected_observations: usize,
+    pub same_head_http_stages: usize,
+    pub changed_head_http_stages: usize,
+    pub admitted_http_stages: usize,
+}
+
+pub fn tracking_hourly_math(project_count: usize, selected: bool) -> TrackingHourlyMath {
+    let projects = project_count.max(1);
+    let selected_observations = if selected {
+        (3600 / SELECTED_PROJECT_REFRESH_SECONDS) as usize
+    } else {
+        0
+    };
+    let selected_project_count = if selected { 1 } else { 0 };
+    let background_observations = projects.saturating_sub(selected_project_count)
+        * (3600 / PORTFOLIO_REFRESH_SECONDS) as usize;
+    let observations = background_observations + selected_observations;
+    TrackingHourlyMath {
+        project_count: projects,
+        background_observations,
+        selected_observations,
+        same_head_http_stages: observations,
+        changed_head_http_stages: observations * 3,
+        admitted_http_stages: TRACKING_REQUESTS_PER_HOUR.min(observations * 3),
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct RefreshRequestGate(std::sync::atomic::AtomicBool);
@@ -40,6 +122,21 @@ impl RefreshRequestGate {
 
     pub fn take(&self) -> bool {
         self.0.swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct RefreshScopeGate(Mutex<Option<String>>);
+
+impl RefreshScopeGate {
+    pub fn request(&self, project_id: String) {
+        if let Ok(mut scope) = self.0.lock() {
+            *scope = Some(project_id);
+        }
+    }
+
+    fn take(&self) -> Option<String> {
+        self.0.lock().ok().and_then(|mut scope| scope.take())
     }
 }
 
@@ -699,6 +796,7 @@ fn github_url_part(value: &str) -> Result<String, String> {
 }
 
 fn run_http(url: &str) -> Result<String, String> {
+    admit_tracking_request()?;
     let mut child = crate::process_policy::background_command("curl.exe")
         .args([
             "-L",
@@ -706,7 +804,7 @@ fn run_http(url: &str) -> Result<String, String> {
             "--silent",
             "--show-error",
             "--max-time",
-            "30",
+            &TRACKING_HTTP_TIMEOUT.as_secs().to_string(),
             url,
         ])
         .stdin(Stdio::null())
@@ -732,7 +830,7 @@ fn run_http(url: &str) -> Result<String, String> {
         let result = stderr.read_to_end(&mut bytes);
         (result, bytes)
     });
-    let deadline = std::time::Instant::now() + Duration::from_secs(35);
+    let deadline = std::time::Instant::now() + TRACKING_HTTP_TIMEOUT + Duration::from_secs(5);
     let status;
     loop {
         match child
@@ -1269,6 +1367,7 @@ pub struct GitHubTrackingManager {
     app_handle: tauri::AppHandle,
     selected_project: Arc<Mutex<Option<String>>>,
     refresh_requested: Arc<RefreshRequestGate>,
+    refresh_scope: Arc<RefreshScopeGate>,
     refresh_completion: Arc<RefreshCompletion>,
     stop: Arc<AtomicBool>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
@@ -1283,6 +1382,7 @@ impl GitHubTrackingManager {
             app_handle,
             selected_project: Arc::new(Mutex::new(None)),
             refresh_requested: Arc::new(RefreshRequestGate::default()),
+            refresh_scope: Arc::new(RefreshScopeGate::default()),
             refresh_completion: Arc::new(RefreshCompletion::default()),
             stop: Arc::new(AtomicBool::new(false)),
             worker: Mutex::new(None),
@@ -1291,6 +1391,7 @@ impl GitHubTrackingManager {
         let app_handle = manager.app_handle.clone();
         let selected_project = Arc::clone(&manager.selected_project);
         let refresh_requested = Arc::clone(&manager.refresh_requested);
+        let refresh_scope = Arc::clone(&manager.refresh_scope);
         let refresh_completion = Arc::clone(&manager.refresh_completion);
         let stop = Arc::clone(&manager.stop);
         let worker = thread::Builder::new()
@@ -1301,6 +1402,7 @@ impl GitHubTrackingManager {
                     app_handle,
                     selected_project,
                     refresh_requested,
+                    refresh_scope,
                     refresh_completion,
                     stop,
                 )
@@ -1317,11 +1419,14 @@ impl GitHubTrackingManager {
         if let Ok(mut selected) = self.selected_project.lock() {
             *selected = project_id;
         }
-        self.refresh_requested.request();
     }
 
-    pub fn refresh_now(&self) -> Result<usize, String> {
+    pub fn refresh_selected(&self, project_id: String) -> Result<usize, String> {
+        if project_id.trim().is_empty() {
+            return Err("GITHUB_REFRESH_PROJECT_REQUIRED".into());
+        }
         let generation = self.refresh_completion.request();
+        self.refresh_scope.request(project_id);
         self.refresh_requested.request();
         self.refresh_completion
             .wait(generation, Duration::from_secs(30))?;
@@ -1347,6 +1452,7 @@ fn polling_loop(
     app_handle: tauri::AppHandle,
     selected_project: Arc<Mutex<Option<String>>>,
     refresh_requested: Arc<RefreshRequestGate>,
+    refresh_scope: Arc<RefreshScopeGate>,
     refresh_completion: Arc<RefreshCompletion>,
     stop: Arc<AtomicBool>,
 ) {
@@ -1409,6 +1515,8 @@ fn polling_loop(
     let mut signatures = HashMap::<String, (Option<String>, String)>::new();
     let mut in_flight = HashSet::<String>::new();
     let mut pending_generation = 0_u64;
+    let mut pending_scope: Option<String> = None;
+    let mut rotation_cursor = 0usize;
     while !stop.load(Ordering::Acquire) {
         while let Ok((project_id, result)) = result_rx.try_recv() {
             in_flight.remove(&project_id);
@@ -1469,16 +1577,36 @@ fn polling_loop(
         let now = std::time::Instant::now();
         if refresh_requested.take() {
             pending_generation = pending_generation.max(refresh_completion.requested());
-            for due in next_due.values_mut() {
-                *due = now;
+            pending_scope = refresh_scope.take();
+            if let Some(scope) = pending_scope.as_deref() {
+                if let Some(due) = next_due.get_mut(scope) {
+                    *due = now;
+                }
+            } else {
+                for due in next_due.values_mut() {
+                    *due = now;
+                }
             }
         }
         let mut live_ids = std::collections::HashSet::new();
+        let mut projects = projects;
+        projects.sort_by(|left, right| left.id.cmp(&right.id));
+        if !projects.is_empty() {
+            let offset = rotation_cursor % projects.len();
+            projects.rotate_left(offset);
+            rotation_cursor = rotation_cursor.wrapping_add(1);
+        }
         for project in projects {
             if !is_github_tasks_project(&project) {
                 continue;
             }
             live_ids.insert(project.id.clone());
+            if pending_scope
+                .as_deref()
+                .is_some_and(|scope| scope != project.id.as_str())
+            {
+                continue;
+            }
             let interval = Duration::from_secs(refresh_interval_seconds(
                 selected.as_deref() == Some(project.id.as_str()),
             ));
@@ -1501,8 +1629,9 @@ fn polling_loop(
         if pending_generation > 0 && in_flight.is_empty() {
             refresh_completion.complete(pending_generation);
             pending_generation = 0;
+            pending_scope = None;
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_secs(1));
     }
     drop(job_tx);
     for worker in workers {
@@ -1973,14 +2102,56 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_cadence_is_ten_seconds_selected_and_thirty_seconds_portfolio() {
+    fn scheduler_cadence_is_bounded_selected_and_portfolio() {
         assert_eq!(
             refresh_interval_seconds(true),
             SELECTED_PROJECT_REFRESH_SECONDS
         );
         assert_eq!(refresh_interval_seconds(false), PORTFOLIO_REFRESH_SECONDS);
-        assert_eq!(SELECTED_PROJECT_REFRESH_SECONDS, 10);
-        assert_eq!(PORTFOLIO_REFRESH_SECONDS, 30);
+        assert_eq!(SELECTED_PROJECT_REFRESH_SECONDS, 300);
+        assert_eq!(PORTFOLIO_REFRESH_SECONDS, 3600);
+    }
+
+    #[test]
+    fn hourly_math_matches_real_eight_nine_ten_twenty_portfolios() {
+        for projects in [8usize, 9, 10, 20] {
+            let idle = tracking_hourly_math(projects, false);
+            assert_eq!(idle.background_observations, projects);
+            assert_eq!(idle.same_head_http_stages, projects);
+            assert_eq!(idle.changed_head_http_stages, projects * 3);
+            assert_eq!(idle.admitted_http_stages, (projects * 3).min(40));
+        }
+        let selected = tracking_hourly_math(20, true);
+        assert_eq!(selected.selected_observations, 12);
+        assert_eq!(selected.background_observations, 19);
+        assert_eq!(selected.changed_head_http_stages, 31 * 3);
+        assert_eq!(selected.admitted_http_stages, 40);
+    }
+
+    #[test]
+    fn tracking_governor_resets_only_at_injected_hour_boundary() {
+        let start = std::time::Instant::now();
+        let mut governor = TrackingRequestGovernor {
+            window_started: start,
+            requests: 0,
+        };
+        for _ in 0..TRACKING_REQUESTS_PER_HOUR {
+            assert!(governor.admit_at(start));
+        }
+        assert!(!governor.admit_at(start + Duration::from_secs(3599)));
+        assert!(governor.admit_at(start + Duration::from_secs(3600)));
+        assert_eq!(governor.requests, 1);
+    }
+
+    #[test]
+    fn manual_refresh_scope_targets_one_project() {
+        let gate = RefreshScopeGate::default();
+        gate.request("github:Sekiph82/Bulk-Edit@main".into());
+        assert_eq!(
+            gate.take().as_deref(),
+            Some("github:Sekiph82/Bulk-Edit@main")
+        );
+        assert_eq!(gate.take(), None);
     }
 
     #[test]
