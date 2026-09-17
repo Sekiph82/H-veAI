@@ -680,9 +680,7 @@ fn remote_validation_is_fresh(
         .is_some_and(|(validated, now)| {
             now.signed_duration_since(validated) >= Duration::zero()
                 && now.signed_duration_since(validated)
-                    <= Duration::seconds(
-                        github_tracking::validation_horizon_seconds(false) as i64,
-                    )
+                    <= Duration::seconds(github_tracking::m19_validation_horizon_seconds() as i64)
         })
 }
 
@@ -1325,10 +1323,7 @@ fn compare(database: &DatabaseState, current: &M19Fingerprint) -> (M19Comparison
 /// Capture the factual pre-refresh snapshot, await the scoped refresh, then
 /// persist that captured snapshot exactly once before computing the current
 /// comparison. A failed refresh never creates a misleading baseline.
-pub fn refresh_and_compare<F>(
-    database: &DatabaseState,
-    refresh: F,
-) -> Result<M19Snapshot, String>
+pub fn refresh_and_compare<F>(database: &DatabaseState, refresh: F) -> Result<M19Snapshot, String>
 where
     F: FnOnce() -> Result<(), String>,
 {
@@ -1639,7 +1634,12 @@ mod tests {
     }
 
     #[test]
-    fn remote_validation_timestamp_uses_scheduler_compatible_hard_horizon() {
+    fn remote_validation_uses_one_portfolio_hard_horizon_and_selected_scheduler_target() {
+        assert_eq!(
+            github_tracking::m19_validation_horizon_seconds(),
+            github_tracking::M19_HARD_VALIDATION_HORIZON_SECONDS
+        );
+        assert_eq!(github_tracking::SELECTED_PROJECT_REFRESH_SECONDS, 300);
         let remote = github_tracking::RemoteTrackingSnapshot {
             project_key: "github:owner/repo@main".into(),
             display_name: "repo".into(),
@@ -1692,6 +1692,14 @@ mod tests {
         assert!(!remote_validation_is_fresh(
             &remote,
             DateTime::parse_from_rfc3339("2026-09-16T01:10:21Z")
+                .ok()
+                .map(|value| value.with_timezone(&Utc))
+        ));
+        let mut unvalidated = remote.clone();
+        unvalidated.validated_at = None;
+        assert!(!remote_validation_is_fresh(
+            &unvalidated,
+            DateTime::parse_from_rfc3339("2026-09-16T00:09:01Z")
                 .ok()
                 .map(|value| value.with_timezone(&Utc))
         ));
@@ -1810,7 +1818,8 @@ mod tests {
         )
         .unwrap();
         let post = refresh_and_compare(&database, || {
-            fs::write(&tasks, "- [x] TASK-1 — First\n  Owner: Codex\n").map_err(|error| error.to_string())
+            fs::write(&tasks, "- [x] TASK-1 — First\n  Owner: Codex\n")
+                .map_err(|error| error.to_string())
         })
         .unwrap();
         assert_eq!(post.comparison.state, "CHANGED");
@@ -1843,7 +1852,8 @@ mod tests {
             "- [ ] TASK-1 — Failure\n  Owner: Codex\n",
         )
         .unwrap();
-        let failure_database = DatabaseState::initialize(failure_db_dir.path().to_path_buf()).unwrap();
+        let failure_database =
+            DatabaseState::initialize(failure_db_dir.path().to_path_buf()).unwrap();
         register_project(
             &failure_database,
             RegisterProjectRequest {
@@ -1853,7 +1863,10 @@ mod tests {
         )
         .unwrap();
         assert!(refresh_and_compare(&failure_database, || Err("refresh failed".into())).is_err());
-        assert_eq!(snapshot(&failure_database).unwrap().comparison.state, "UNAVAILABLE_FIRST_SNAPSHOT");
+        assert_eq!(
+            snapshot(&failure_database).unwrap().comparison.state,
+            "UNAVAILABLE_FIRST_SNAPSHOT"
+        );
     }
 
     #[test]

@@ -78,7 +78,7 @@ Idle is cache-only for detailed resources. Selected and Manual are explicitly sc
 |---:|---:|---:|---:|---:|---:|---:|---:|
 ${tracking}
 
-The scheduler cadence is ${evidence.freshness.backgroundCadenceSeconds}s for background projects and ${evidence.freshness.selectedCadenceSeconds}s for the selected project. A changed HEAD has ${evidence.freshness.changedHeadStages} sequential bounded stages. M19 uses a ${evidence.freshness.backgroundHardHorizonSeconds}s portfolio hard validation horizon and a ${evidence.freshness.selectedHardHorizonSeconds}s selected target horizon; failed validation never advances validation freshness.
+The scheduler cadence is ${evidence.freshness.backgroundCadenceSeconds}s for background projects. Selected projects have a ${evidence.freshness.selectedSchedulerTargetSeconds}s scheduler target, while M19 has one ${evidence.freshness.m19HardHorizonSeconds}s portfolio hard validation horizon for all projects. A changed HEAD has ${evidence.freshness.changedHeadStages} sequential bounded stages; failed validation never advances validation freshness.
 
 ## Failure/backoff evidence
 

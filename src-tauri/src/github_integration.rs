@@ -765,14 +765,8 @@ fn snapshot_with_context<T: GitHubReadTransport>(
 ) -> Result<GitHubIntegrationSnapshot, String> {
     let identity = identity_from_project(project).map(identity_from_view)?;
     let now = utc_timestamp();
-    let resources = fetch_resources_with_context(
-        database,
-        project,
-        &identity,
-        &now,
-        context,
-        transport,
-    );
+    let resources =
+        fetch_resources_with_context(database, project, &identity, &now, context, transport);
 
     let repository_result = resources.iter().find(|r| r.kind == RESOURCE_REPOSITORY);
     let repository_value = repository_result.and_then(|r| r.value.as_ref());
@@ -1012,7 +1006,8 @@ fn fetch_resources_with_context<T: GitHubReadTransport>(
         ),
     ];
     let plan = context.plan();
-    let primary_calls_for_project = if matches!(context.intent, GitHubAcquisitionIntent::Navigation) {
+    let primary_calls_for_project = if matches!(context.intent, GitHubAcquisitionIntent::Navigation)
+    {
         plan.primary_calls / plan.project_count
     } else {
         plan.primary_calls
@@ -3897,16 +3892,17 @@ mod tests {
             let database_dir = tempfile::tempdir().unwrap();
             let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
             crate::github_tracking::ensure_portfolio(&database).unwrap();
-            let project = crate::projects::fetch_project(
-                &database,
-                "github:Sekiph82/H-veAI@main",
-            )
-            .unwrap();
+            let project =
+                crate::projects::fetch_project(&database, "github:Sekiph82/H-veAI@main").unwrap();
             let detail = "https://api.github.com/repos/Sekiph82/H-veAI/pulls/1";
             let pull_url =
                 "https://api.github.com/repos/Sekiph82/H-veAI/pulls?state=all&per_page=10";
             let mut first_transport = FixtureTransport::default()
-                .response(pull_url, 200, r#"[{"number":1,"title":"M19","head":{"sha":"head-1"}}]"#)
+                .response(
+                    pull_url,
+                    200,
+                    r#"[{"number":1,"title":"M19","head":{"sha":"head-1"}}]"#,
+                )
                 .response(detail, status, r#"{"message":"API rate limit exceeded"}"#);
             let context = GitHubAcquisitionContext {
                 intent: GitHubAcquisitionIntent::Selected,
@@ -3914,25 +3910,29 @@ mod tests {
                 selected_project: Some(project.id.clone()),
                 rotation_cursor: 0,
             };
-            let first = snapshot_with_context(
-                &database,
-                &project,
-                context.clone(),
-                &mut first_transport,
-            )
-            .unwrap();
-            assert_eq!(first_transport.requests.len(), 9, "optional status {status}");
-            assert!(first.warnings.iter().any(|warning| warning.contains("rate limit")));
+            let first =
+                snapshot_with_context(&database, &project, context.clone(), &mut first_transport)
+                    .unwrap();
+            assert_eq!(
+                first_transport.requests.len(),
+                9,
+                "optional status {status}"
+            );
+            assert!(first
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("rate limit")));
             let mut second_transport = FixtureTransport::default();
-            let second = snapshot_with_context(
-                &database,
-                &project,
-                context,
-                &mut second_transport,
-            )
-            .unwrap();
-            assert!(second_transport.requests.is_empty(), "status {status} must fail closed");
-            assert!(matches!(second.remote_health.as_str(), "STALE" | "RATE_LIMITED"));
+            let second =
+                snapshot_with_context(&database, &project, context, &mut second_transport).unwrap();
+            assert!(
+                second_transport.requests.is_empty(),
+                "status {status} must fail closed"
+            );
+            assert!(matches!(
+                second.remote_health.as_str(),
+                "STALE" | "RATE_LIMITED"
+            ));
         }
     }
 
@@ -3953,7 +3953,15 @@ mod tests {
         .into_iter()
         .filter(|project| project.status != "ARCHIVED" && is_github_project(project))
         .collect::<Vec<_>>();
-        assert_eq!(projects.len(), 8, "portfolio projects: {:?}", projects.iter().map(|project| (&project.id, &project.status, &project.repository)).collect::<Vec<_>>());
+        assert_eq!(
+            projects.len(),
+            8,
+            "portfolio projects: {:?}",
+            projects
+                .iter()
+                .map(|project| (&project.id, &project.status, &project.repository))
+                .collect::<Vec<_>>()
+        );
         let mut transport = FixtureTransport::default();
         let snapshots = portfolio_snapshots_with_transport(
             &database,
@@ -4036,12 +4044,24 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let first = portfolio_snapshots(&database, GitHubAcquisitionIntent::Navigation, None).unwrap();
-        let second = portfolio_snapshots(&database, GitHubAcquisitionIntent::Navigation, None).unwrap();
+        let first =
+            portfolio_snapshots(&database, GitHubAcquisitionIntent::Navigation, None).unwrap();
+        let second =
+            portfolio_snapshots(&database, GitHubAcquisitionIntent::Navigation, None).unwrap();
         assert_eq!(first.len(), 8);
         assert_eq!(second.len(), 8);
-        let first_kinds = first[0].cache.resources.iter().map(|resource| resource.kind.as_str()).collect::<Vec<_>>();
-        let second_kinds = second[0].cache.resources.iter().map(|resource| resource.kind.as_str()).collect::<Vec<_>>();
+        let first_kinds = first[0]
+            .cache
+            .resources
+            .iter()
+            .map(|resource| resource.kind.as_str())
+            .collect::<Vec<_>>();
+        let second_kinds = second[0]
+            .cache
+            .resources
+            .iter()
+            .map(|resource| resource.kind.as_str())
+            .collect::<Vec<_>>();
         assert_eq!(first_kinds.len(), 5);
         assert_eq!(second_kinds.len(), 5);
         assert_ne!(first_kinds, second_kinds);
@@ -4049,14 +4069,23 @@ mod tests {
     }
 
     fn evidence_resource_kind(url: &str) -> &'static str {
-        if url.contains("/branches") { RESOURCE_BRANCHES }
-        else if url.contains("/commits") { RESOURCE_COMMITS }
-        else if url.contains("/pulls") { RESOURCE_PULL_REQUESTS }
-        else if url.contains("/issues") { RESOURCE_ISSUES }
-        else if url.contains("/actions") { RESOURCE_ACTIONS }
-        else if url.contains("/releases") { RESOURCE_RELEASES }
-        else if url.contains("/tags") { RESOURCE_TAGS }
-        else { RESOURCE_REPOSITORY }
+        if url.contains("/branches") {
+            RESOURCE_BRANCHES
+        } else if url.contains("/commits") {
+            RESOURCE_COMMITS
+        } else if url.contains("/pulls") {
+            RESOURCE_PULL_REQUESTS
+        } else if url.contains("/issues") {
+            RESOURCE_ISSUES
+        } else if url.contains("/actions") {
+            RESOURCE_ACTIONS
+        } else if url.contains("/releases") {
+            RESOURCE_RELEASES
+        } else if url.contains("/tags") {
+            RESOURCE_TAGS
+        } else {
+            RESOURCE_REPOSITORY
+        }
     }
 
     #[test]
@@ -4065,11 +4094,28 @@ mod tests {
         let database_dir = tempfile::tempdir().unwrap();
         let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
         crate::github_tracking::ensure_portfolio(&database).unwrap();
-        let projects = list_projects(&database, ProjectListQuery { include_archived: Some(false), ..Default::default() })
-            .unwrap().into_iter().filter(|project| project.status != "ARCHIVED" && is_github_project(project)).collect::<Vec<_>>();
+        let projects = list_projects(
+            &database,
+            ProjectListQuery {
+                include_archived: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|project| project.status != "ARCHIVED" && is_github_project(project))
+        .collect::<Vec<_>>();
         assert_eq!(projects.len(), 8);
         let mut transport = FixtureTransport::default();
-        let snapshots = portfolio_snapshots_with_transport(&database, &projects, GitHubAcquisitionIntent::Navigation, None, 0, &mut transport).unwrap();
+        let snapshots = portfolio_snapshots_with_transport(
+            &database,
+            &projects,
+            GitHubAcquisitionIntent::Navigation,
+            None,
+            0,
+            &mut transport,
+        )
+        .unwrap();
         assert_eq!(snapshots.len(), 8);
         assert_eq!(transport.requests.len(), PRIMARY_REQUESTS_PER_HOUR);
         let rows = transport.requests.iter().enumerate().map(|(index, url)| {
@@ -4100,7 +4146,7 @@ mod tests {
             "schema": "M19_V07_GITHUB_ACQUISITION_MATRIX_V1", "source": "production portfolio_snapshots_with_transport orchestration",
             "requestBudget": { "primaryPerHour": PRIMARY_REQUESTS_PER_HOUR, "optionalPerHour": OPTIONAL_REQUESTS_PER_HOUR, "totalPerHour": PROCESS_REQUESTS_PER_HOUR },
             "measuredPortfolio": { "projects": projects.len(), "snapshots": snapshots.len(), "networkRequests": transport.requests.len() }, "detailedIntegrationDemand": detailed, "trackingDemand": tracking, "failureBackoff": backoff,
-            "freshness": { "selectedCadenceSeconds": crate::github_tracking::SELECTED_PROJECT_REFRESH_SECONDS, "backgroundCadenceSeconds": crate::github_tracking::PORTFOLIO_REFRESH_SECONDS, "selectedHardHorizonSeconds": crate::github_tracking::SELECTED_VALIDATION_HORIZON_SECONDS, "backgroundHardHorizonSeconds": crate::github_tracking::BACKGROUND_VALIDATION_HORIZON_SECONDS, "changedHeadStages": crate::github_tracking::TRACKING_MAX_SCOPED_STAGES }, "rows": rows
+            "freshness": { "selectedSchedulerTargetSeconds": crate::github_tracking::SELECTED_PROJECT_REFRESH_SECONDS, "backgroundCadenceSeconds": crate::github_tracking::PORTFOLIO_REFRESH_SECONDS, "m19HardHorizonSeconds": crate::github_tracking::M19_HARD_VALIDATION_HORIZON_SECONDS, "changedHeadStages": crate::github_tracking::TRACKING_MAX_SCOPED_STAGES }, "rows": rows
         })).unwrap());
     }
 

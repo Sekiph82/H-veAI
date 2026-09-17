@@ -4,10 +4,7 @@ use crate::time::utc_timestamp;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(not(test))]
 use std::collections::HashMap;
-#[cfg(not(test))]
-use std::collections::HashSet;
 use std::io::Read;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -27,9 +24,8 @@ use tauri::Emitter;
 
 pub const GITHUB_TASKS_ONLY_POLICY: &str = "GITHUB_TASKS_ONLY";
 const REMOTE_TASKS_RESOURCE_KIND: &str = "GITHUB_TASKS_REMOTE";
-/// Selected-owner validation is bounded to twelve observations/hour. The
-/// five-minute M19 validation horizon therefore never relies on a 10-second
-/// request storm.
+/// Selected-owner validation is bounded to twelve observations/hour. This is
+/// a scheduler target only; M19 uses one portfolio hard freshness horizon.
 pub const SELECTED_PROJECT_REFRESH_SECONDS: u64 = 300;
 /// Background projects receive one HEAD validation/hour. Same-HEAD
 /// validation is one HTTP stage; a changed HEAD adds raw TASKS + commit-feed
@@ -39,13 +35,15 @@ pub const TRACKING_REQUESTS_PER_HOUR: usize = 40;
 pub const TRACKING_HTTP_TIMEOUT_SECONDS: u64 = 20;
 pub const TRACKING_HTTP_PROCESS_GRACE_SECONDS: u64 = 5;
 pub const TRACKING_MAX_SCOPED_STAGES: u64 = 3;
+pub const TRACKING_WORKER_CAPACITY: usize = 4;
+pub const TRACKING_SCHEDULER_TICK_SECONDS: u64 = 1;
 pub const TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS: u64 = TRACKING_MAX_SCOPED_STAGES
     * (TRACKING_HTTP_TIMEOUT_SECONDS + TRACKING_HTTP_PROCESS_GRACE_SECONDS)
     + TRACKING_HTTP_PROCESS_GRACE_SECONDS;
-pub const BACKGROUND_VALIDATION_HORIZON_SECONDS: u64 =
+pub const M19_HARD_VALIDATION_HORIZON_SECONDS: u64 =
     PORTFOLIO_REFRESH_SECONDS + TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS;
-pub const SELECTED_VALIDATION_HORIZON_SECONDS: u64 =
-    SELECTED_PROJECT_REFRESH_SECONDS + TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS;
+pub const TRACKING_REFRESH_ADMISSION_TIMEOUT_SECONDS: u64 =
+    TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS + TRACKING_SCHEDULER_TICK_SECONDS;
 const TRACKING_HTTP_TIMEOUT: Duration = Duration::from_secs(TRACKING_HTTP_TIMEOUT_SECONDS);
 const MAX_PENDING_REFRESH_GENERATIONS: usize = 32;
 const FAILURE_BACKOFF_MAX_SECONDS: u64 = 24 * 60 * 60;
@@ -82,8 +80,8 @@ impl TrackingRequestGovernor {
 }
 
 fn admit_tracking_request() -> Result<(), String> {
-    let lock = TRACKING_REQUEST_GOVERNOR
-        .get_or_init(|| Mutex::new(TrackingRequestGovernor::default()));
+    let lock =
+        TRACKING_REQUEST_GOVERNOR.get_or_init(|| Mutex::new(TrackingRequestGovernor::default()));
     let mut governor = lock
         .lock()
         .map_err(|_| "GitHub tracking request governor lock poisoned".to_string())?;
@@ -141,6 +139,7 @@ impl RefreshRequestGate {
 struct RefreshScopeRequest {
     generation: u64,
     project_id: String,
+    accepted_epoch: u64,
 }
 
 #[derive(Debug, Default)]
@@ -162,6 +161,7 @@ impl RefreshScopeGate {
             scope.push_back(RefreshScopeRequest {
                 generation,
                 project_id,
+                accepted_epoch: generation,
             });
             return Ok(());
         }
@@ -204,26 +204,51 @@ impl RefreshGenerationCoordinator {
             .any(|request| request.project_id == project_id)
     }
 
+    fn take_for_project<F>(
+        &mut self,
+        project_id: &str,
+        mut is_active: F,
+    ) -> Vec<RefreshScopeRequest>
+    where
+        F: FnMut(u64) -> bool,
+    {
+        let mut requests = Vec::new();
+        let mut retained = Vec::new();
+        for request in self.pending.drain(..) {
+            if request.project_id == project_id && is_active(request.generation) {
+                requests.push(request);
+            } else if is_active(request.generation) {
+                retained.push(request);
+            }
+        }
+        self.pending = retained;
+        requests
+    }
+
+    #[allow(dead_code)]
     fn settle_project(&mut self, project_id: &str) -> Vec<u64> {
-        let generations = self
-            .pending
-            .iter()
-            .filter(|request| request.project_id == project_id)
+        self.take_for_project(project_id, |_| true)
+            .into_iter()
             .map(|request| request.generation)
-            .collect::<Vec<_>>();
-        self.pending
-            .retain(|request| request.project_id != project_id);
-        generations
+            .collect()
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshGenerationState {
+    Pending,
+    Admitted { observation_id: u64 },
+    Settled,
+}
+
 /// Coordinates an intentional refresh generation with the scheduler. The
-/// frontend command resolves only after the generation has drained all queued
-/// observations, so history cannot be recorded merely because work was queued.
+/// frontend command resolves only after a qualifying observation settles. The
+/// state also exposes a separate admission wait so queue delay cannot consume
+/// the observation execution budget.
 #[derive(Debug, Default)]
 pub struct RefreshCompletion {
     requested: AtomicU64,
-    completed: Mutex<std::collections::HashMap<u64, Result<(), String>>>,
+    completed: Mutex<std::collections::HashMap<u64, (RefreshGenerationState, Result<(), String>)>>,
     changed: Condvar,
 }
 
@@ -242,12 +267,20 @@ impl RefreshCompletion {
             return Err("GITHUB_REFRESH_QUEUE_FULL".into());
         }
         let generation = self.requested.fetch_add(1, AtomicOrdering::AcqRel) + 1;
-        completed.insert(generation, Err("GITHUB_REFRESH_PENDING".into()));
+        completed.insert(generation, (RefreshGenerationState::Pending, Ok(())));
         Ok(generation)
     }
 
-    fn requested(&self) -> u64 {
-        self.requested.load(AtomicOrdering::Acquire)
+    fn mark_admitted(&self, generation: u64, observation_id: u64) {
+        if let Ok(mut completed) = self.completed.lock() {
+            if let Some((state, result)) = completed.get_mut(&generation) {
+                if *state == RefreshGenerationState::Pending {
+                    *state = RefreshGenerationState::Admitted { observation_id };
+                    *result = Ok(());
+                    self.changed.notify_all();
+                }
+            }
+        }
     }
 
     fn complete(&self, generation: u64) {
@@ -256,11 +289,79 @@ impl RefreshCompletion {
 
     fn complete_with_result(&self, generation: u64, result: Result<(), String>) {
         if let Ok(mut completed) = self.completed.lock() {
-            if completed.contains_key(&generation) {
-                completed.insert(generation, result);
-                self.changed.notify_all();
+            if let Some((state, stored)) = completed.get_mut(&generation) {
+                if matches!(
+                    *state,
+                    RefreshGenerationState::Pending | RefreshGenerationState::Admitted { .. }
+                ) {
+                    *state = RefreshGenerationState::Settled;
+                    *stored = result;
+                    self.changed.notify_all();
+                }
             }
         }
+    }
+
+    fn cancel(&self, generation: u64, error: String) {
+        if let Ok(mut completed) = self.completed.lock() {
+            if completed.get(&generation).is_some_and(|(state, _)| {
+                matches!(
+                    state,
+                    RefreshGenerationState::Pending | RefreshGenerationState::Admitted { .. }
+                )
+            }) {
+                completed.remove(&generation);
+                self.changed.notify_all();
+                log::debug!("GitHub refresh generation {generation} cancelled: {error}");
+            }
+        }
+    }
+
+    fn is_active(&self, generation: u64) -> bool {
+        self.completed
+            .lock()
+            .ok()
+            .and_then(|completed| completed.get(&generation).map(|(state, _)| *state))
+            .is_some_and(|state| {
+                matches!(
+                    state,
+                    RefreshGenerationState::Pending | RefreshGenerationState::Admitted { .. }
+                )
+            })
+    }
+
+    fn wait_for_admission(&self, generation: u64, timeout: Duration) -> Result<(), String> {
+        let completed = self
+            .completed
+            .lock()
+            .map_err(|_| "GitHub refresh completion lock poisoned".to_string())?;
+        let (completed, result) = self
+            .changed
+            .wait_timeout_while(completed, timeout, |value| {
+                value
+                    .get(&generation)
+                    .is_some_and(|(state, _)| *state == RefreshGenerationState::Pending)
+            })
+            .map_err(|_| "GitHub refresh admission wait poisoned".to_string())?;
+        match completed
+            .get(&generation)
+            .map(|(state, result)| (state, result))
+        {
+            Some((RefreshGenerationState::Admitted { .. }, _)) => Ok(()),
+            Some((RefreshGenerationState::Settled, result)) => result.clone(),
+            Some((RefreshGenerationState::Pending, _)) if result.timed_out() => {
+                Err("GITHUB_REFRESH_BACKPRESSURE".into())
+            }
+            _ => Err("GITHUB_REFRESH_ADMISSION_ENDED".into()),
+        }
+    }
+
+    fn was_admitted(&self, generation: u64) -> bool {
+        self.completed
+            .lock()
+            .ok()
+            .and_then(|completed| completed.get(&generation).map(|(state, _)| *state))
+            .is_some_and(|state| matches!(state, RefreshGenerationState::Admitted { .. }))
     }
 
     pub fn wait(&self, generation: u64, timeout: Duration) -> Result<(), String> {
@@ -271,23 +372,163 @@ impl RefreshCompletion {
         let (next, result) = self
             .changed
             .wait_timeout_while(completed, timeout, |value| {
-                value.get(&generation).is_none_or(|result| {
-                    result
-                        .as_ref()
-                        .is_err_and(|error| error == "GITHUB_REFRESH_PENDING")
-                })
+                value
+                    .get(&generation)
+                    .is_some_and(|(state, _)| *state != RefreshGenerationState::Settled)
             })
             .map_err(|_| "GitHub refresh completion wait poisoned".to_string())?;
         completed = next;
         match completed.remove(&generation) {
-            Some(Ok(())) => Ok(()),
-            Some(Err(error)) if error != "GITHUB_REFRESH_PENDING" => Err(error),
-            _ if result.timed_out() => Err(
+            Some((RefreshGenerationState::Settled, result)) => result,
+            Some(_) if result.timed_out() => Err(
                 "GitHub refresh completion timed out before the requested generation settled"
                     .into(),
             ),
-            _ => Err("GitHub refresh completion ended before the requested generation settled".into()),
+            _ => Err(
+                "GitHub refresh completion ended before the requested generation settled".into(),
+            ),
         }
+    }
+
+    fn pending_state(&self, generation: u64) -> Option<RefreshGenerationState> {
+        self.completed
+            .lock()
+            .ok()
+            .and_then(|completed| completed.get(&generation).map(|(state, _)| *state))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ObservationIdentity {
+    observation_id: u64,
+    project_id: String,
+    started_epoch: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TrackingObservationJob {
+    database: DatabaseState,
+    project: ProjectRecord,
+    identity: ObservationIdentity,
+    refreshes: Vec<RefreshScopeRequest>,
+}
+
+#[derive(Debug)]
+struct TrackingObservationResult {
+    job: TrackingObservationJob,
+    result: Result<(RemoteTrackingSnapshot, RemoteObservationChange), String>,
+    completed_epoch: u64,
+}
+
+/// Shared admission/result state machine used by the production polling loop
+/// and deterministic native scheduler evidence tests.
+#[derive(Debug, Default)]
+struct SchedulerLifecycleState {
+    next_observation_id: u64,
+    next_epoch: u64,
+    in_flight: HashMap<String, ObservationIdentity>,
+    pending_refreshes: RefreshGenerationCoordinator,
+}
+
+impl SchedulerLifecycleState {
+    fn enqueue_refresh(&mut self, request: RefreshScopeRequest) {
+        self.pending_refreshes.enqueue(request);
+    }
+
+    fn is_in_flight(&self, project_id: &str) -> bool {
+        self.in_flight.contains_key(project_id)
+    }
+
+    fn in_flight_len(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    fn has_pending_refresh(&self, project_id: &str) -> bool {
+        self.pending_refreshes.is_pending_for(project_id)
+    }
+
+    fn admit(
+        &mut self,
+        database: DatabaseState,
+        project: ProjectRecord,
+        completion: &RefreshCompletion,
+    ) -> Option<TrackingObservationJob> {
+        if self.in_flight.len() >= TRACKING_WORKER_CAPACITY || self.is_in_flight(&project.id) {
+            return None;
+        }
+        self.next_observation_id = self.next_observation_id.saturating_add(1);
+        self.next_epoch = self.next_epoch.saturating_add(1);
+        let identity = ObservationIdentity {
+            observation_id: self.next_observation_id,
+            project_id: project.id.clone(),
+            started_epoch: self.next_epoch,
+        };
+        let refreshes = self
+            .pending_refreshes
+            .take_for_project(&project.id, |generation| completion.is_active(generation));
+        for refresh in &refreshes {
+            completion.mark_admitted(refresh.generation, identity.observation_id);
+        }
+        self.in_flight.insert(project.id.clone(), identity.clone());
+        Some(TrackingObservationJob {
+            database,
+            project,
+            identity,
+            refreshes,
+        })
+    }
+
+    fn abort(
+        &mut self,
+        job: &TrackingObservationJob,
+        completion: &RefreshCompletion,
+        error: String,
+    ) {
+        let identity = &job.identity;
+        if self
+            .in_flight
+            .get(&identity.project_id)
+            .is_some_and(|current| current == identity)
+        {
+            self.in_flight.remove(&identity.project_id);
+            for generation in job.refreshes.iter().map(|request| request.generation) {
+                completion.complete_with_result(generation, Err(error.clone()));
+            }
+        }
+    }
+
+    fn complete(
+        &mut self,
+        result: TrackingObservationResult,
+        completion: &RefreshCompletion,
+    ) -> bool {
+        let identity = &result.job.identity;
+        if self
+            .in_flight
+            .get(&identity.project_id)
+            .is_none_or(|current| current != identity)
+        {
+            return false;
+        }
+        self.in_flight.remove(&identity.project_id);
+        let outcome = result
+            .result
+            .as_ref()
+            .map(|(snapshot, _)| {
+                if snapshot.remote_health == "CURRENT" {
+                    Ok(())
+                } else {
+                    Err(snapshot
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "GITHUB_REMOTE_VALIDATION_FAILED".into()))
+                }
+            })
+            .unwrap_or_else(|error| Err(error.clone()));
+        for refresh in &result.job.refreshes {
+            completion.complete_with_result(refresh.generation, outcome.clone());
+        }
+        true
     }
 }
 
@@ -676,12 +917,10 @@ pub fn refresh_interval_seconds(selected: bool) -> u64 {
     }
 }
 
-pub fn validation_horizon_seconds(selected: bool) -> u64 {
-    if selected {
-        SELECTED_VALIDATION_HORIZON_SECONDS
-    } else {
-        BACKGROUND_VALIDATION_HORIZON_SECONDS
-    }
+/// One M19 hard acceptance horizon for the portfolio. Selected cadence is a
+/// scheduler target and does not create a second M19 eligibility contract.
+pub fn m19_validation_horizon_seconds() -> u64 {
+    M19_HARD_VALIDATION_HORIZON_SECONDS
 }
 
 pub fn tracking_refresh_completion_timeout() -> Duration {
@@ -734,7 +973,7 @@ pub fn observe_project(
         return Err("remote observation is disabled for local unit fixtures".into());
     }
     let repository_name = format!("{owner}/{repo}");
-    let fetched_at = utc_timestamp();
+    let content_fetched_at = utc_timestamp();
     let previous = cached(database, project, "")?;
     match fetch_github_head(&repository_name, &branch) {
         Ok(head) => {
@@ -746,7 +985,13 @@ pub fn observe_project(
                 }
             }
             match fetch_github_root_tasks(&repository_name, &branch, &head).and_then(|raw| {
-                parse_root_tasks(&raw, &repository_name, &branch, fetched_at.clone())
+                parse_root_tasks_with_lifecycle(
+                    &raw,
+                    &repository_name,
+                    &branch,
+                    content_fetched_at.clone(),
+                    utc_timestamp(),
+                )
             }) {
                 Ok(snapshot) => {
                     let changed = previous
@@ -764,8 +1009,14 @@ pub fn observe_project(
                     ))
                 }
                 Err(error) => {
-                    let snapshot =
-                        remote_error(&repository_name, &branch, Some(head), error, fetched_at);
+                    let snapshot = remote_error_from_previous(
+                        previous.as_ref(),
+                        &repository_name,
+                        &branch,
+                        Some(head),
+                        error,
+                        content_fetched_at,
+                    );
                     persist(database, project, &snapshot)?;
                     Ok((snapshot, RemoteObservationChange::Changed))
                 }
@@ -779,7 +1030,7 @@ pub fn observe_project(
                 Ok((snapshot, RemoteObservationChange::Unchanged))
             }
             None => {
-                let snapshot = unavailable(&repository_name, &branch, error, fetched_at);
+                let snapshot = unavailable(&repository_name, &branch, error, content_fetched_at);
                 persist(database, project, &snapshot)?;
                 Ok((snapshot, RemoteObservationChange::Changed))
             }
@@ -1186,6 +1437,16 @@ fn parse_root_tasks(
     branch: &str,
     fetched_at: String,
 ) -> Result<RemoteTrackingSnapshot, String> {
+    parse_root_tasks_with_lifecycle(raw, repository, branch, fetched_at.clone(), fetched_at)
+}
+
+fn parse_root_tasks_with_lifecycle(
+    raw: &RootTasksRemote,
+    repository: &str,
+    branch: &str,
+    content_fetched_at_value: String,
+    validated_at_value: String,
+) -> Result<RemoteTrackingSnapshot, String> {
     let display_name = repository
         .split('/')
         .nth(1)
@@ -1307,8 +1568,9 @@ fn parse_root_tasks(
     } else {
         Some(completed as f64 * 100.0 / total as f64)
     };
-    let content_fetched_at = Some(fetched_at.clone());
-    let validated_at = Some(fetched_at.clone());
+    let content_fetched_at = Some(content_fetched_at_value);
+    let fetched_at = content_fetched_at.clone().unwrap_or_default();
+    let validated_at = Some(validated_at_value);
     Ok(RemoteTrackingSnapshot {
         project_key: format!("github:{repository}@{branch}"),
         display_name,
@@ -1385,9 +1647,6 @@ fn cached(
             if snapshot.content_fetched_at.is_none() {
                 snapshot.content_fetched_at = Some(snapshot.fetched_at.clone());
             }
-            if snapshot.validated_at.is_none() && snapshot.remote_health == "CURRENT" {
-                snapshot.validated_at = Some(snapshot.fetched_at.clone());
-            }
             if !error.is_empty() {
                 snapshot.error = Some(error.into());
             }
@@ -1456,16 +1715,21 @@ fn unavailable(
     }
 }
 
-fn remote_error(
+fn remote_error_from_previous(
+    previous: Option<&RemoteTrackingSnapshot>,
     repository: &str,
     branch: &str,
     head: Option<String>,
     error: String,
-    fetched_at: String,
+    observed_at: String,
 ) -> RemoteTrackingSnapshot {
-    let mut snapshot = unavailable(repository, branch, error, fetched_at);
-    snapshot.remote_head = head;
+    let mut snapshot = previous
+        .cloned()
+        .unwrap_or_else(|| unavailable(repository, branch, error.clone(), observed_at.clone()));
+    snapshot.remote_head = head.or(snapshot.remote_head);
+    snapshot.fetched_at = observed_at;
     snapshot.remote_health = "ERROR".into();
+    snapshot.error = Some(error);
     snapshot
 }
 
@@ -1557,8 +1821,20 @@ impl GitHubTrackingManager {
             return Err(error);
         }
         self.refresh_requested.request();
-        self.refresh_completion
-            .wait(generation, tracking_refresh_completion_timeout())?;
+        if let Err(error) = self.refresh_completion.wait_for_admission(
+            generation,
+            Duration::from_secs(TRACKING_REFRESH_ADMISSION_TIMEOUT_SECONDS),
+        ) {
+            self.refresh_completion.cancel(generation, error.clone());
+            return Err(error);
+        }
+        if let Err(error) = self
+            .refresh_completion
+            .wait(generation, tracking_refresh_completion_timeout())
+        {
+            self.refresh_completion.cancel(generation, error.clone());
+            return Err(error);
+        }
         Ok(generation as usize)
     }
 }
@@ -1608,11 +1884,8 @@ fn polling_loop(
         }
         let _ = app_handle.emit("hiveai-command-center-refresh", ());
     }
-    let (job_tx, job_rx) = mpsc::channel::<(DatabaseState, ProjectRecord)>();
-    let (result_tx, result_rx) = mpsc::channel::<(
-        String,
-        Result<(RemoteTrackingSnapshot, RemoteObservationChange), String>,
-    )>();
+    let (job_tx, job_rx) = mpsc::channel::<TrackingObservationJob>();
+    let (result_tx, result_rx) = mpsc::channel::<TrackingObservationResult>();
     let shared_job_rx = Arc::new(Mutex::new(job_rx));
     let mut workers = Vec::new();
     for index in 0..4 {
@@ -1627,12 +1900,15 @@ fn polling_loop(
                         .lock()
                         .ok()
                         .and_then(|receiver| receiver.recv_timeout(Duration::from_secs(1)).ok());
-                    let Some((database, project)) = job else {
+                    let Some(job) = job else {
                         continue;
                     };
-                    let project_id = project.id.clone();
-                    let result = observe_project(&database, &project);
-                    let _ = worker_tx.send((project_id, result));
+                    let result = observe_project(&job.database, &job.project);
+                    let _ = worker_tx.send(TrackingObservationResult {
+                        job,
+                        result,
+                        completed_epoch: 0,
+                    });
                 }
             })
             .expect("start GitHub tracking worker");
@@ -1642,20 +1918,28 @@ fn polling_loop(
     let mut next_due = HashMap::<String, std::time::Instant>::new();
     let mut failures = HashMap::<String, u32>::new();
     let mut signatures = HashMap::<String, (Option<String>, String)>::new();
-    let mut in_flight = HashSet::<String>::new();
-    let mut pending_refreshes = RefreshGenerationCoordinator::default();
+    let mut lifecycle = SchedulerLifecycleState::default();
     let mut rotation_cursor = 0usize;
     while !stop.load(Ordering::Acquire) {
-        while let Ok((project_id, result)) = result_rx.try_recv() {
-            in_flight.remove(&project_id);
+        while let Ok(result) = result_rx.try_recv() {
+            let project_id = result.job.identity.project_id.clone();
+            let snapshot = result
+                .result
+                .as_ref()
+                .ok()
+                .map(|(snapshot, _)| snapshot.clone());
+            let observation_error = result.result.as_ref().err().cloned();
+            if !lifecycle.complete(result, &refresh_completion) {
+                continue;
+            }
             let selected_for_backoff = selected_project
                 .lock()
                 .ok()
                 .and_then(|value| value.clone())
                 .as_deref()
                 == Some(project_id.as_str());
-            match result {
-                Ok((snapshot, _change)) => {
+            match snapshot {
+                Some(snapshot) => {
                     if snapshot.remote_health == "CURRENT" {
                         failures.remove(&project_id);
                     } else {
@@ -1683,10 +1967,6 @@ fn polling_loop(
                             .error
                             .unwrap_or_else(|| "GITHUB_REMOTE_VALIDATION_FAILED".into()))
                     };
-                    let generations = pending_refreshes.settle_project(&project_id);
-                    for generation in generations {
-                        refresh_completion.complete_with_result(generation, completion.clone());
-                    }
                     if completion.is_ok() {
                         next_due.insert(
                             project_id.clone(),
@@ -1697,7 +1977,7 @@ fn polling_loop(
                         );
                     }
                 }
-                Err(error) => {
+                None => {
                     let failure = failures.entry(project_id.clone()).or_insert(0);
                     *failure = failure.saturating_add(1);
                     next_due.insert(
@@ -1708,11 +1988,11 @@ fn polling_loop(
                                 selected_for_backoff,
                             )),
                     );
-                    log::warn!("GitHub tracking scheduler failed for {project_id}: {error}");
-                    let generations = pending_refreshes.settle_project(&project_id);
-                    for generation in generations {
-                        refresh_completion.complete_with_result(generation, Err(error.clone()));
-                    }
+                    log::warn!(
+                        "GitHub tracking scheduler failed for {project_id}: {}",
+                        observation_error
+                            .unwrap_or_else(|| "GITHUB_REMOTE_OBSERVATION_FAILED".into())
+                    );
                 }
             }
         }
@@ -1734,7 +2014,7 @@ fn polling_loop(
         let now = std::time::Instant::now();
         if refresh_requested.take() {
             for request in refresh_scope.take_all() {
-                pending_refreshes.enqueue(request.clone());
+                lifecycle.enqueue_refresh(request.clone());
                 next_due.insert(request.project_id, now);
             }
         }
@@ -1746,6 +2026,12 @@ fn polling_loop(
             projects.rotate_left(offset);
             rotation_cursor = rotation_cursor.wrapping_add(1);
         }
+        projects.sort_by_key(|project| {
+            (
+                !lifecycle.has_pending_refresh(&project.id),
+                project.id.clone(),
+            )
+        });
         for project in projects {
             if !is_github_tasks_project(&project) {
                 continue;
@@ -1755,19 +2041,29 @@ fn polling_loop(
                 selected.as_deref() == Some(project.id.as_str()),
             ));
             let due = next_due.entry(project.id.clone()).or_insert(now);
-            if pending_refreshes.is_pending_for(&project.id) {
+            if lifecycle.has_pending_refresh(&project.id) {
                 *due = now;
             }
             if *due > now {
                 continue;
             }
-            if in_flight.len() >= 4 || in_flight.contains(&project.id) {
+            if lifecycle.in_flight_len() >= TRACKING_WORKER_CAPACITY
+                || lifecycle.is_in_flight(&project.id)
+            {
                 continue;
             }
-            if job_tx.send((database.clone(), project.clone())).is_err() {
+            let Some(job) = lifecycle.admit(database.clone(), project.clone(), &refresh_completion)
+            else {
+                continue;
+            };
+            if job_tx.send(job.clone()).is_err() {
+                lifecycle.abort(
+                    &job,
+                    &refresh_completion,
+                    "GITHUB_REFRESH_WORKER_UNAVAILABLE".into(),
+                );
                 break;
             }
-            in_flight.insert(project.id.clone());
             *due = now + interval;
         }
         next_due.retain(|id, _| live_ids.contains(id));
@@ -2252,8 +2548,8 @@ mod tests {
         assert_eq!(refresh_interval_seconds(false), PORTFOLIO_REFRESH_SECONDS);
         assert_eq!(SELECTED_PROJECT_REFRESH_SECONDS, 300);
         assert_eq!(PORTFOLIO_REFRESH_SECONDS, 3600);
-        assert_eq!(validation_horizon_seconds(true), 380);
-        assert_eq!(validation_horizon_seconds(false), 3680);
+        assert_eq!(m19_validation_horizon_seconds(), 3680);
+        assert_eq!(SELECTED_PROJECT_REFRESH_SECONDS, 300);
     }
 
     #[test]
@@ -2271,7 +2567,10 @@ mod tests {
         let selected = tracking_failure_backoff_seconds(1, true);
         assert_eq!(selected, SELECTED_PROJECT_REFRESH_SECONDS);
         assert!(tracking_failure_backoff_seconds(2, true) > selected);
-        assert_eq!(tracking_failure_backoff_seconds(0, false), PORTFOLIO_REFRESH_SECONDS);
+        assert_eq!(
+            tracking_failure_backoff_seconds(0, false),
+            PORTFOLIO_REFRESH_SECONDS
+        );
     }
 
     #[test]
@@ -2281,7 +2580,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(failing[0], PORTFOLIO_REFRESH_SECONDS);
         assert_eq!(failing[1], PORTFOLIO_REFRESH_SECONDS * 2);
-        assert!(failing.iter().all(|delay| *delay >= PORTFOLIO_REFRESH_SECONDS));
+        assert!(failing
+            .iter()
+            .all(|delay| *delay >= PORTFOLIO_REFRESH_SECONDS));
         assert_eq!(tracking_hourly_math(20, false).admitted_http_stages, 40);
     }
 
@@ -2303,9 +2604,555 @@ mod tests {
 
         let completion = RefreshCompletion::default();
         let generation = completion.request();
-        assert!(completion.wait(generation, Duration::from_millis(1)).is_err());
+        assert!(completion
+            .wait(generation, Duration::from_millis(1))
+            .is_err());
         completion.complete(generation);
         assert!(completion.wait(generation, Duration::ZERO).is_err());
+    }
+
+    fn scheduler_fixture_project(id: &str) -> ProjectRecord {
+        ProjectRecord {
+            id: id.into(),
+            name: id.into(),
+            original_path: id.into(),
+            normalized_path: id.into(),
+            status: "ACTIVE".into(),
+            priority: 0,
+            preferred_builder: None,
+            preferred_auditor: None,
+            task_source_policy: Some(GITHUB_TASKS_ONLY_POLICY.into()),
+            preferred_agent_provider: None,
+            registered_at: "T0".into(),
+            last_validated_at: None,
+            repository: None,
+        }
+    }
+
+    fn scheduler_fixture_result(
+        job: TrackingObservationJob,
+        health: &str,
+        completed_epoch: u64,
+    ) -> TrackingObservationResult {
+        let raw = RootTasksRemote {
+            head: "scheduler-head".into(),
+            tasks: "## Tasks\n- [ ] TASK-1 — Scheduler task\n".into(),
+            tasks_blob_sha: "sha256:scheduler".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let mut snapshot = parse_root_tasks_with_lifecycle(
+            &raw,
+            "Sekiph82/scheduler",
+            "main",
+            "T0".into(),
+            "T1".into(),
+        )
+        .unwrap();
+        snapshot.remote_health = health.into();
+        snapshot.error = (health == "ERROR").then(|| "sanitized scheduler failure".into());
+        TrackingObservationResult {
+            job,
+            result: Ok((snapshot, RemoteObservationChange::Unchanged)),
+            completed_epoch,
+        }
+    }
+
+    #[test]
+    fn changed_head_validation_uses_completion_boundary_across_two_slow_cycles() {
+        let raw = RootTasksRemote {
+            head: "slow-head".into(),
+            tasks: "## Tasks\n- [ ] TASK-1 — Slow task\n".into(),
+            tasks_blob_sha: "sha256:slow".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let first = parse_root_tasks_with_lifecycle(
+            &raw,
+            "Sekiph82/H-veAI",
+            "main",
+            "T0".into(),
+            "T0+80".into(),
+        )
+        .unwrap();
+        assert_eq!(first.content_fetched_at.as_deref(), Some("T0"));
+        assert_eq!(first.validated_at.as_deref(), Some("T0+80"));
+
+        let next_due = 80 + PORTFOLIO_REFRESH_SECONDS;
+        assert_eq!(next_due, M19_HARD_VALIDATION_HORIZON_SECONDS);
+        assert!(next_due - 80 <= M19_HARD_VALIDATION_HORIZON_SECONDS);
+        let second = parse_root_tasks_with_lifecycle(
+            &raw,
+            "Sekiph82/H-veAI",
+            "main",
+            "T0+3680".into(),
+            "T0+3760".into(),
+        )
+        .unwrap();
+        assert_eq!(second.validated_at.as_deref(), Some("T0+3760"));
+        assert_eq!(second.content_fetched_at.as_deref(), Some("T0+3680"));
+    }
+
+    #[test]
+    fn failed_changed_head_validation_preserves_previous_validation_boundary() {
+        let raw = RootTasksRemote {
+            head: "prior-head".into(),
+            tasks: "## Tasks\n- [ ] TASK-1 — Prior task\n".into(),
+            tasks_blob_sha: "sha256:prior".into(),
+            latest_commit_message: None,
+            latest_commit_author: None,
+            latest_commit_at: None,
+        };
+        let previous = parse_root_tasks_with_lifecycle(
+            &raw,
+            "Sekiph82/H-veAI",
+            "main",
+            "T0".into(),
+            "T0+80".into(),
+        )
+        .unwrap();
+        let failed = remote_error_from_previous(
+            Some(&previous),
+            "Sekiph82/H-veAI",
+            "main",
+            Some("new-head".into()),
+            "sanitized failure".into(),
+            "T0+3680".into(),
+        );
+        assert_eq!(failed.remote_health, "ERROR");
+        assert_eq!(failed.validated_at, previous.validated_at);
+        assert_eq!(failed.content_fetched_at, previous.content_fetched_at);
+    }
+
+    #[test]
+    fn production_scheduler_preexisting_inflight_observation_cannot_settle_manual_generation() {
+        let database = DatabaseState::initialize(tempdir().unwrap().path().to_path_buf()).unwrap();
+        let project = scheduler_fixture_project("project-a");
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let old_job = scheduler
+            .admit(database.clone(), project.clone(), &completion)
+            .unwrap();
+        let generation = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation,
+            project_id: project.id.clone(),
+            accepted_epoch: generation,
+        });
+        assert!(scheduler.complete(scheduler_fixture_result(old_job, "CURRENT", 2), &completion));
+        assert_eq!(
+            completion.pending_state(generation),
+            Some(RefreshGenerationState::Pending)
+        );
+        let new_job = scheduler.admit(database, project, &completion).unwrap();
+        assert_eq!(
+            new_job
+                .refreshes
+                .iter()
+                .map(|item| item.generation)
+                .collect::<Vec<_>>(),
+            vec![generation]
+        );
+        assert!(completion.was_admitted(generation));
+        assert!(scheduler.complete(scheduler_fixture_result(new_job, "CURRENT", 4), &completion));
+        assert!(completion.wait(generation, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn production_scheduler_isolates_a_b_and_same_scope_coalesces_truthfully() {
+        let database = DatabaseState::initialize(tempdir().unwrap().path().to_path_buf()).unwrap();
+        let project_a = scheduler_fixture_project("project-a");
+        let project_b = scheduler_fixture_project("project-b");
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let generation_a = completion.request();
+        let generation_b = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_a,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation_a,
+        });
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_b,
+            project_id: project_b.id.clone(),
+            accepted_epoch: generation_b,
+        });
+        let job_a = scheduler
+            .admit(database.clone(), project_a.clone(), &completion)
+            .unwrap();
+        let job_b = scheduler
+            .admit(database.clone(), project_b.clone(), &completion)
+            .unwrap();
+        assert_eq!(job_a.refreshes[0].generation, generation_a);
+        assert_eq!(job_b.refreshes[0].generation, generation_b);
+        assert!(scheduler.complete(scheduler_fixture_result(job_b, "ERROR", 3), &completion));
+        assert!(completion.wait(generation_b, Duration::ZERO).is_err());
+        assert!(completion.pending_state(generation_a).is_some());
+        assert!(scheduler.complete(scheduler_fixture_result(job_a, "CURRENT", 4), &completion));
+        assert!(completion.wait(generation_a, Duration::ZERO).is_ok());
+
+        let generation_one = completion.request();
+        let generation_two = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_one,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation_one,
+        });
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_two,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation_two,
+        });
+        let coalesced = scheduler.admit(database, project_a, &completion).unwrap();
+        assert_eq!(coalesced.refreshes.len(), 2);
+        assert!(scheduler.complete(
+            scheduler_fixture_result(coalesced, "CURRENT", 6),
+            &completion
+        ));
+        assert!(completion.wait(generation_one, Duration::ZERO).is_ok());
+        assert!(completion.wait(generation_two, Duration::ZERO).is_ok());
+    }
+
+    #[test]
+    fn production_scheduler_saturated_workers_bound_manual_admission_and_execution_budget() {
+        let database = DatabaseState::initialize(tempdir().unwrap().path().to_path_buf()).unwrap();
+        let projects = (0..TRACKING_WORKER_CAPACITY)
+            .map(|index| scheduler_fixture_project(&format!("background-{index}")))
+            .collect::<Vec<_>>();
+        let manual = scheduler_fixture_project("manual-project");
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let mut in_flight = projects
+            .into_iter()
+            .map(|project| {
+                scheduler
+                    .admit(database.clone(), project, &completion)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(scheduler.in_flight_len(), TRACKING_WORKER_CAPACITY);
+        let generation = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation,
+            project_id: manual.id.clone(),
+            accepted_epoch: generation,
+        });
+        assert!(scheduler
+            .admit(database.clone(), manual.clone(), &completion)
+            .is_none());
+        for (index, job) in in_flight.drain(..).enumerate() {
+            assert!(scheduler.complete(
+                scheduler_fixture_result(job, "CURRENT", index as u64 + 2),
+                &completion
+            ));
+        }
+        let admitted = scheduler.admit(database, manual, &completion).unwrap();
+        assert_eq!(admitted.refreshes[0].generation, generation);
+        assert!(completion.was_admitted(generation));
+        assert!(
+            TRACKING_REFRESH_ADMISSION_TIMEOUT_SECONDS
+                >= TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS
+        );
+        assert!(scheduler.complete(
+            scheduler_fixture_result(admitted, "CURRENT", 10),
+            &completion
+        ));
+        assert!(completion.wait(generation, Duration::ZERO).is_ok());
+    }
+
+    fn lifecycle_evidence_row(
+        generation: u64,
+        project_id: &str,
+        job: &TrackingObservationJob,
+        completed_epoch: u64,
+        pre_existing_in_flight: bool,
+        queue_outcome: &str,
+        result_health: &str,
+        generation_result: &str,
+        history_recording_permitted: bool,
+        diagnostic: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "generationId": generation,
+            "projectId": project_id,
+            "requestAcceptedEpoch": generation,
+            "qualifyingObservationId": job.identity.observation_id,
+            "observationStartEpoch": job.identity.started_epoch,
+            "observationCompletionEpoch": completed_epoch,
+            "workerAdmissionState": "ADMITTED",
+            "workerAdmissionEpoch": job.identity.started_epoch,
+            "preExistingInFlight": pre_existing_in_flight,
+            "queueAdmissionOutcome": queue_outcome,
+            "resultHealth": result_health,
+            "validatedAtBefore": "T0+80",
+            "validatedAtAfter": (result_health == "CURRENT").then_some("T1+80"),
+            "nextDueEpoch": completed_epoch + PORTFOLIO_REFRESH_SECONDS,
+            "freshnessHorizonSeconds": M19_HARD_VALIDATION_HORIZON_SECONDS,
+            "generationResult": generation_result,
+            "historyRecordingPermitted": history_recording_permitted,
+            "diagnostic": diagnostic,
+        })
+    }
+
+    #[test]
+    fn v07_r02_production_scheduler_lifecycle_evidence_is_measured() {
+        let database = DatabaseState::initialize(tempdir().unwrap().path().to_path_buf()).unwrap();
+        let project_a = scheduler_fixture_project("project-a");
+        let project_b = scheduler_fixture_project("project-b");
+        let mut rows = Vec::new();
+
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let old_job = scheduler
+            .admit(database.clone(), project_a.clone(), &completion)
+            .unwrap();
+        let generation = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation,
+        });
+        assert!(scheduler.complete(scheduler_fixture_result(old_job, "CURRENT", 2), &completion));
+        let qualifying = scheduler
+            .admit(database.clone(), project_a.clone(), &completion)
+            .unwrap();
+        rows.push(lifecycle_evidence_row(
+            generation,
+            &project_a.id,
+            &qualifying,
+            4,
+            true,
+            "WAITED_FOR_PREEXISTING_JOB",
+            "CURRENT",
+            "COMPLETED",
+            true,
+            None,
+        ));
+        assert!(scheduler.complete(
+            scheduler_fixture_result(qualifying, "CURRENT", 4),
+            &completion
+        ));
+        assert!(completion.wait(generation, Duration::ZERO).is_ok());
+
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let generation_a = completion.request();
+        let generation_b = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_a,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation_a,
+        });
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_b,
+            project_id: project_b.id.clone(),
+            accepted_epoch: generation_b,
+        });
+        let job_a = scheduler
+            .admit(database.clone(), project_a.clone(), &completion)
+            .unwrap();
+        let job_b = scheduler
+            .admit(database.clone(), project_b.clone(), &completion)
+            .unwrap();
+        rows.push(lifecycle_evidence_row(
+            generation_a,
+            &project_a.id,
+            &job_a,
+            6,
+            false,
+            "ADMITTED_INDEPENDENT_SCOPE",
+            "CURRENT",
+            "COMPLETED",
+            true,
+            None,
+        ));
+        rows.push(lifecycle_evidence_row(
+            generation_b,
+            &project_b.id,
+            &job_b,
+            7,
+            false,
+            "ADMITTED_INDEPENDENT_SCOPE",
+            "ERROR",
+            "FAILED",
+            false,
+            Some("sanitized scheduler failure"),
+        ));
+        assert!(scheduler.complete(scheduler_fixture_result(job_b, "ERROR", 7), &completion));
+        assert!(scheduler.complete(scheduler_fixture_result(job_a, "CURRENT", 6), &completion));
+        assert!(completion.wait(generation_a, Duration::ZERO).is_ok());
+        assert!(completion.wait(generation_b, Duration::ZERO).is_err());
+
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let generation_one = completion.request();
+        let generation_two = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_one,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation_one,
+        });
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation: generation_two,
+            project_id: project_a.id.clone(),
+            accepted_epoch: generation_two,
+        });
+        let job = scheduler
+            .admit(database.clone(), project_a.clone(), &completion)
+            .unwrap();
+        rows.push(lifecycle_evidence_row(
+            generation_one,
+            &project_a.id,
+            &job,
+            9,
+            false,
+            "COALESCED_SAME_QUALIFYING_OBSERVATION",
+            "CURRENT",
+            "COMPLETED",
+            true,
+            None,
+        ));
+        rows.push(lifecycle_evidence_row(
+            generation_two,
+            &project_a.id,
+            &job,
+            9,
+            false,
+            "COALESCED_SAME_QUALIFYING_OBSERVATION",
+            "CURRENT",
+            "COMPLETED",
+            true,
+            None,
+        ));
+        assert_eq!(job.refreshes.len(), 2);
+        assert!(scheduler.complete(scheduler_fixture_result(job, "CURRENT", 9), &completion));
+        assert!(completion.wait(generation_one, Duration::ZERO).is_ok());
+        assert!(completion.wait(generation_two, Duration::ZERO).is_ok());
+
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let background = (0..TRACKING_WORKER_CAPACITY)
+            .map(|index| scheduler_fixture_project(&format!("saturated-{index}")))
+            .collect::<Vec<_>>();
+        let mut jobs = background
+            .into_iter()
+            .map(|project| {
+                scheduler
+                    .admit(database.clone(), project, &completion)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let generation = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation,
+            project_id: "manual-project".into(),
+            accepted_epoch: generation,
+        });
+        let manual = scheduler_fixture_project("manual-project");
+        assert!(scheduler
+            .admit(database.clone(), manual.clone(), &completion)
+            .is_none());
+        for (index, job) in jobs.drain(..).enumerate() {
+            assert!(scheduler.complete(
+                scheduler_fixture_result(job, "CURRENT", 20 + index as u64),
+                &completion
+            ));
+        }
+        let manual_job = scheduler
+            .admit(database.clone(), manual.clone(), &completion)
+            .unwrap();
+        rows.push(lifecycle_evidence_row(
+            generation,
+            &manual.id,
+            &manual_job,
+            25,
+            true,
+            "ADMITTED_AFTER_BOUNDED_QUEUE_WAIT",
+            "CURRENT",
+            "COMPLETED",
+            true,
+            None,
+        ));
+        assert!(scheduler.complete(
+            scheduler_fixture_result(manual_job, "CURRENT", 25),
+            &completion
+        ));
+        assert!(completion.wait(generation, Duration::ZERO).is_ok());
+
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let slow_project = scheduler_fixture_project("slow-changed-head");
+        let generation = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation,
+            project_id: slow_project.id.clone(),
+            accepted_epoch: generation,
+        });
+        let slow_job = scheduler
+            .admit(database.clone(), slow_project.clone(), &completion)
+            .unwrap();
+        rows.push(lifecycle_evidence_row(
+            generation,
+            &slow_project.id,
+            &slow_job,
+            1080,
+            false,
+            "ADMITTED",
+            "CURRENT",
+            "COMPLETED_WITHIN_80S_EXECUTION_BUDGET",
+            true,
+            None,
+        ));
+        assert!(scheduler.complete(
+            scheduler_fixture_result(slow_job, "CURRENT", 1080),
+            &completion
+        ));
+        assert!(completion.wait(generation, Duration::ZERO).is_ok());
+
+        let completion = RefreshCompletion::default();
+        let mut scheduler = SchedulerLifecycleState::default();
+        let overdue_project = scheduler_fixture_project("over-deadline");
+        let generation = completion.request();
+        scheduler.enqueue_refresh(RefreshScopeRequest {
+            generation,
+            project_id: overdue_project.id.clone(),
+            accepted_epoch: generation,
+        });
+        let overdue_job = scheduler
+            .admit(database, overdue_project.clone(), &completion)
+            .unwrap();
+        completion.cancel(generation, "GITHUB_REFRESH_EXECUTION_TIMEOUT".into());
+        rows.push(lifecycle_evidence_row(
+            generation,
+            &overdue_project.id,
+            &overdue_job,
+            1081,
+            false,
+            "ADMITTED",
+            "CURRENT",
+            "TIMED_OUT_EXECUTION",
+            false,
+            Some("GITHUB_REFRESH_EXECUTION_TIMEOUT"),
+        ));
+        assert!(scheduler.complete(
+            scheduler_fixture_result(overdue_job, "CURRENT", 1081),
+            &completion
+        ));
+        assert!(completion.wait(generation, Duration::ZERO).is_err());
+
+        assert_eq!(rows.len(), 8);
+        println!("M19_V07_R02_LIFECYCLE_JSON={}", serde_json::to_string(&serde_json::json!({
+            "schema": "M19_V07_R02_TRACKING_LIFECYCLE_MATRIX_V1",
+            "source": "production SchedulerLifecycleState admission/in-flight/result transitions",
+            "workerCapacity": TRACKING_WORKER_CAPACITY,
+            "executionBudgetSeconds": TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS,
+            "admissionBudgetSeconds": TRACKING_REFRESH_ADMISSION_TIMEOUT_SECONDS,
+            "freshnessHorizonSeconds": M19_HARD_VALIDATION_HORIZON_SECONDS,
+            "selectedSchedulerTargetSeconds": SELECTED_PROJECT_REFRESH_SECONDS,
+            "rows": rows
+        })).unwrap());
     }
 
     #[test]
@@ -2360,11 +3207,13 @@ mod tests {
             vec![
                 RefreshScopeRequest {
                     generation: 11,
-                    project_id: "project-a".into()
+                    project_id: "project-a".into(),
+                    accepted_epoch: 11,
                 },
                 RefreshScopeRequest {
                     generation: 12,
-                    project_id: "project-b".into()
+                    project_id: "project-b".into(),
+                    accepted_epoch: 12,
                 }
             ]
         );
@@ -2379,10 +3228,12 @@ mod tests {
         coordinator.enqueue(RefreshScopeRequest {
             generation: generation_a,
             project_id: "project-a".into(),
+            accepted_epoch: generation_a,
         });
         coordinator.enqueue(RefreshScopeRequest {
             generation: generation_b,
             project_id: "project-b".into(),
+            accepted_epoch: generation_b,
         });
         assert_eq!(coordinator.settle_project("project-b"), vec![generation_b]);
         completion.complete(generation_b);
@@ -2393,7 +3244,7 @@ mod tests {
             .lock()
             .unwrap()
             .get(&generation_a)
-            .is_some_and(|result| result.as_ref().is_err()));
+            .is_some_and(|(_, result)| result.is_ok()));
         assert_eq!(coordinator.settle_project("project-a"), vec![generation_a]);
         completion.complete(generation_a);
         assert!(completion.wait(generation_a, Duration::ZERO).is_ok());
@@ -2446,7 +3297,10 @@ mod tests {
         let first = completion.request();
         let second = completion.request();
         completion.complete_with_result(first, Err("project-a failed".into()));
-        assert_eq!(completion.wait(first, Duration::ZERO).unwrap_err(), "project-a failed");
+        assert_eq!(
+            completion.wait(first, Duration::ZERO).unwrap_err(),
+            "project-a failed"
+        );
         assert!(completion.wait(second, Duration::ZERO).is_err());
     }
 
