@@ -36,7 +36,19 @@ pub const SELECTED_PROJECT_REFRESH_SECONDS: u64 = 300;
 /// stages, all subject to the shared tracking governor.
 pub const PORTFOLIO_REFRESH_SECONDS: u64 = 3600;
 pub const TRACKING_REQUESTS_PER_HOUR: usize = 40;
-const TRACKING_HTTP_TIMEOUT: Duration = Duration::from_secs(20);
+pub const TRACKING_HTTP_TIMEOUT_SECONDS: u64 = 20;
+pub const TRACKING_HTTP_PROCESS_GRACE_SECONDS: u64 = 5;
+pub const TRACKING_MAX_SCOPED_STAGES: u64 = 3;
+pub const TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS: u64 = TRACKING_MAX_SCOPED_STAGES
+    * (TRACKING_HTTP_TIMEOUT_SECONDS + TRACKING_HTTP_PROCESS_GRACE_SECONDS)
+    + TRACKING_HTTP_PROCESS_GRACE_SECONDS;
+pub const BACKGROUND_VALIDATION_HORIZON_SECONDS: u64 =
+    PORTFOLIO_REFRESH_SECONDS + TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS;
+pub const SELECTED_VALIDATION_HORIZON_SECONDS: u64 =
+    SELECTED_PROJECT_REFRESH_SECONDS + TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS;
+const TRACKING_HTTP_TIMEOUT: Duration = Duration::from_secs(TRACKING_HTTP_TIMEOUT_SECONDS);
+const MAX_PENDING_REFRESH_GENERATIONS: usize = 32;
+const FAILURE_BACKOFF_MAX_SECONDS: u64 = 24 * 60 * 60;
 static TRACKING_REQUEST_GOVERNOR: std::sync::OnceLock<Mutex<TrackingRequestGovernor>> =
     std::sync::OnceLock::new();
 
@@ -125,18 +137,83 @@ impl RefreshRequestGate {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RefreshScopeRequest {
+    generation: u64,
+    project_id: String,
+}
+
 #[derive(Debug, Default)]
-pub struct RefreshScopeGate(Mutex<Option<String>>);
+pub struct RefreshScopeGate(Mutex<std::collections::VecDeque<RefreshScopeRequest>>);
 
 impl RefreshScopeGate {
+    /// Compatibility helper for direct gate tests; production callers use
+    /// `request_for_generation` so scope is never detached from its generation.
     pub fn request(&self, project_id: String) {
+        self.request_for_generation(0, project_id)
+            .expect("refresh scope test queue is bounded");
+    }
+
+    fn request_for_generation(&self, generation: u64, project_id: String) -> Result<(), String> {
         if let Ok(mut scope) = self.0.lock() {
-            *scope = Some(project_id);
+            if scope.len() >= MAX_PENDING_REFRESH_GENERATIONS {
+                return Err("GITHUB_REFRESH_QUEUE_FULL".into());
+            }
+            scope.push_back(RefreshScopeRequest {
+                generation,
+                project_id,
+            });
+            return Ok(());
         }
+        Err("GitHub refresh scope lock poisoned".into())
     }
 
     fn take(&self) -> Option<String> {
-        self.0.lock().ok().and_then(|mut scope| scope.take())
+        self.0
+            .lock()
+            .ok()
+            .and_then(|mut scope| scope.pop_front())
+            .map(|request| request.project_id)
+    }
+
+    fn take_all(&self) -> Vec<RefreshScopeRequest> {
+        self.0
+            .lock()
+            .map(|mut scope| scope.drain(..).collect())
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RefreshGenerationCoordinator {
+    pending: Vec<RefreshScopeRequest>,
+}
+
+impl RefreshGenerationCoordinator {
+    fn enqueue(&mut self, request: RefreshScopeRequest) {
+        if !self.pending.iter().any(|pending| {
+            pending.generation == request.generation && pending.project_id == request.project_id
+        }) {
+            self.pending.push(request);
+        }
+    }
+
+    fn is_pending_for(&self, project_id: &str) -> bool {
+        self.pending
+            .iter()
+            .any(|request| request.project_id == project_id)
+    }
+
+    fn settle_project(&mut self, project_id: &str) -> Vec<u64> {
+        let generations = self
+            .pending
+            .iter()
+            .filter(|request| request.project_id == project_id)
+            .map(|request| request.generation)
+            .collect::<Vec<_>>();
+        self.pending
+            .retain(|request| request.project_id != project_id);
+        generations
     }
 }
 
@@ -146,14 +223,27 @@ impl RefreshScopeGate {
 #[derive(Debug, Default)]
 pub struct RefreshCompletion {
     requested: AtomicU64,
-    completed: Mutex<u64>,
+    completed: Mutex<std::collections::HashMap<u64, Result<(), String>>>,
     changed: Condvar,
 }
 
 impl RefreshCompletion {
     pub fn request(&self) -> u64 {
+        self.request_bounded()
+            .expect("refresh generation queue is bounded")
+    }
+
+    fn request_bounded(&self) -> Result<u64, String> {
+        let mut completed = self
+            .completed
+            .lock()
+            .map_err(|_| "GitHub refresh completion lock poisoned".to_string())?;
+        if completed.len() >= MAX_PENDING_REFRESH_GENERATIONS {
+            return Err("GITHUB_REFRESH_QUEUE_FULL".into());
+        }
         let generation = self.requested.fetch_add(1, AtomicOrdering::AcqRel) + 1;
-        generation
+        completed.insert(generation, Err("GITHUB_REFRESH_PENDING".into()));
+        Ok(generation)
     }
 
     fn requested(&self) -> u64 {
@@ -161,9 +251,15 @@ impl RefreshCompletion {
     }
 
     fn complete(&self, generation: u64) {
+        self.complete_with_result(generation, Ok(()));
+    }
+
+    fn complete_with_result(&self, generation: u64, result: Result<(), String>) {
         if let Ok(mut completed) = self.completed.lock() {
-            *completed = (*completed).max(generation);
-            self.changed.notify_all();
+            if completed.contains_key(&generation) {
+                completed.insert(generation, result);
+                self.changed.notify_all();
+            }
         }
     }
 
@@ -174,18 +270,23 @@ impl RefreshCompletion {
             .map_err(|_| "GitHub refresh completion lock poisoned".to_string())?;
         let (next, result) = self
             .changed
-            .wait_timeout_while(completed, timeout, |value| *value < generation)
+            .wait_timeout_while(completed, timeout, |value| {
+                value.get(&generation).is_none_or(|result| {
+                    result
+                        .as_ref()
+                        .is_err_and(|error| error == "GITHUB_REFRESH_PENDING")
+                })
+            })
             .map_err(|_| "GitHub refresh completion wait poisoned".to_string())?;
         completed = next;
-        if *completed >= generation {
-            Ok(())
-        } else if result.timed_out() {
-            Err(
+        match completed.remove(&generation) {
+            Some(Ok(())) => Ok(()),
+            Some(Err(error)) if error != "GITHUB_REFRESH_PENDING" => Err(error),
+            _ if result.timed_out() => Err(
                 "GitHub refresh completion timed out before the requested generation settled"
                     .into(),
-            )
-        } else {
-            Err("GitHub refresh completion ended before the requested generation settled".into())
+            ),
+            _ => Err("GitHub refresh completion ended before the requested generation settled".into()),
         }
     }
 }
@@ -575,6 +676,25 @@ pub fn refresh_interval_seconds(selected: bool) -> u64 {
     }
 }
 
+pub fn validation_horizon_seconds(selected: bool) -> u64 {
+    if selected {
+        SELECTED_VALIDATION_HORIZON_SECONDS
+    } else {
+        BACKGROUND_VALIDATION_HORIZON_SECONDS
+    }
+}
+
+pub fn tracking_refresh_completion_timeout() -> Duration {
+    Duration::from_secs(TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS)
+}
+
+pub fn tracking_failure_backoff_seconds(failure_count: u32, selected: bool) -> u64 {
+    let base = refresh_interval_seconds(selected);
+    let exponent = failure_count.saturating_sub(1).min(5);
+    base.saturating_mul(1_u64 << exponent)
+        .min(FAILURE_BACKOFF_MAX_SECONDS)
+}
+
 pub fn is_github_tasks_project(project: &ProjectRecord) -> bool {
     project.task_source_policy.as_deref() == Some(GITHUB_TASKS_ONLY_POLICY)
         && project
@@ -696,7 +816,6 @@ pub(crate) fn refresh_same_head_validation(
 ) -> RemoteTrackingSnapshot {
     let mut refreshed = snapshot.clone();
     refreshed.validated_at = Some(validated_at.clone());
-    refreshed.fetched_at = validated_at;
     refreshed.error = None;
     refreshed.remote_health = "CURRENT".into();
     refreshed
@@ -846,7 +965,10 @@ fn run_http(url: &str) -> Result<String, String> {
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
-                return Err("GitHub HTTP observation timed out after 35 seconds".into());
+                return Err(format!(
+                    "GitHub HTTP observation timed out after {} seconds",
+                    TRACKING_HTTP_TIMEOUT_SECONDS + TRACKING_HTTP_PROCESS_GRACE_SECONDS
+                ));
             }
             None => thread::sleep(Duration::from_millis(50)),
         }
@@ -1425,11 +1547,18 @@ impl GitHubTrackingManager {
         if project_id.trim().is_empty() {
             return Err("GITHUB_REFRESH_PROJECT_REQUIRED".into());
         }
-        let generation = self.refresh_completion.request();
-        self.refresh_scope.request(project_id);
+        let generation = self.refresh_completion.request_bounded()?;
+        if let Err(error) = self
+            .refresh_scope
+            .request_for_generation(generation, project_id)
+        {
+            self.refresh_completion
+                .complete_with_result(generation, Err(error.clone()));
+            return Err(error);
+        }
         self.refresh_requested.request();
         self.refresh_completion
-            .wait(generation, Duration::from_secs(30))?;
+            .wait(generation, tracking_refresh_completion_timeout())?;
         Ok(generation as usize)
     }
 }
@@ -1514,12 +1643,17 @@ fn polling_loop(
     let mut failures = HashMap::<String, u32>::new();
     let mut signatures = HashMap::<String, (Option<String>, String)>::new();
     let mut in_flight = HashSet::<String>::new();
-    let mut pending_generation = 0_u64;
-    let mut pending_scope: Option<String> = None;
+    let mut pending_refreshes = RefreshGenerationCoordinator::default();
     let mut rotation_cursor = 0usize;
     while !stop.load(Ordering::Acquire) {
         while let Ok((project_id, result)) = result_rx.try_recv() {
             in_flight.remove(&project_id);
+            let selected_for_backoff = selected_project
+                .lock()
+                .ok()
+                .and_then(|value| value.clone())
+                .as_deref()
+                == Some(project_id.as_str());
             match result {
                 Ok((snapshot, _change)) => {
                     if snapshot.remote_health == "CURRENT" {
@@ -1527,14 +1661,13 @@ fn polling_loop(
                     } else {
                         let failure = failures.entry(project_id.clone()).or_insert(0);
                         *failure = failure.saturating_add(1);
-                        let multiplier = 2u64.saturating_pow((*failure).min(4));
-                        let retry = Duration::from_secs(PORTFOLIO_REFRESH_SECONDS)
-                            .checked_mul(multiplier as u32)
-                            .unwrap_or(Duration::from_secs(300));
                         next_due.insert(
                             project_id.clone(),
                             std::time::Instant::now()
-                                + std::cmp::min(retry, Duration::from_secs(300)),
+                                + Duration::from_secs(tracking_failure_backoff_seconds(
+                                    *failure,
+                                    selected_for_backoff,
+                                )),
                         );
                     }
                     let signature = (snapshot.remote_head.clone(), snapshot.remote_health.clone());
@@ -1543,19 +1676,43 @@ fn polling_loop(
                     if should_emit {
                         emit_update(&app_handle, &project_id, &snapshot);
                     }
+                    let completion = if snapshot.remote_health == "CURRENT" {
+                        Ok(())
+                    } else {
+                        Err(snapshot
+                            .error
+                            .unwrap_or_else(|| "GITHUB_REMOTE_VALIDATION_FAILED".into()))
+                    };
+                    let generations = pending_refreshes.settle_project(&project_id);
+                    for generation in generations {
+                        refresh_completion.complete_with_result(generation, completion.clone());
+                    }
+                    if completion.is_ok() {
+                        next_due.insert(
+                            project_id.clone(),
+                            std::time::Instant::now()
+                                + Duration::from_secs(refresh_interval_seconds(
+                                    selected_for_backoff,
+                                )),
+                        );
+                    }
                 }
                 Err(error) => {
                     let failure = failures.entry(project_id.clone()).or_insert(0);
                     *failure = failure.saturating_add(1);
-                    let multiplier = 2u64.saturating_pow((*failure).min(4));
-                    let next = Duration::from_secs(PORTFOLIO_REFRESH_SECONDS)
-                        .checked_mul(multiplier as u32)
-                        .unwrap_or(Duration::from_secs(300));
                     next_due.insert(
                         project_id.clone(),
-                        std::time::Instant::now() + std::cmp::min(next, Duration::from_secs(300)),
+                        std::time::Instant::now()
+                            + Duration::from_secs(tracking_failure_backoff_seconds(
+                                *failure,
+                                selected_for_backoff,
+                            )),
                     );
                     log::warn!("GitHub tracking scheduler failed for {project_id}: {error}");
+                    let generations = pending_refreshes.settle_project(&project_id);
+                    for generation in generations {
+                        refresh_completion.complete_with_result(generation, Err(error.clone()));
+                    }
                 }
             }
         }
@@ -1576,16 +1733,9 @@ fn polling_loop(
         let selected = selected_project.lock().ok().and_then(|value| value.clone());
         let now = std::time::Instant::now();
         if refresh_requested.take() {
-            pending_generation = pending_generation.max(refresh_completion.requested());
-            pending_scope = refresh_scope.take();
-            if let Some(scope) = pending_scope.as_deref() {
-                if let Some(due) = next_due.get_mut(scope) {
-                    *due = now;
-                }
-            } else {
-                for due in next_due.values_mut() {
-                    *due = now;
-                }
+            for request in refresh_scope.take_all() {
+                pending_refreshes.enqueue(request.clone());
+                next_due.insert(request.project_id, now);
             }
         }
         let mut live_ids = std::collections::HashSet::new();
@@ -1601,16 +1751,13 @@ fn polling_loop(
                 continue;
             }
             live_ids.insert(project.id.clone());
-            if pending_scope
-                .as_deref()
-                .is_some_and(|scope| scope != project.id.as_str())
-            {
-                continue;
-            }
             let interval = Duration::from_secs(refresh_interval_seconds(
                 selected.as_deref() == Some(project.id.as_str()),
             ));
             let due = next_due.entry(project.id.clone()).or_insert(now);
+            if pending_refreshes.is_pending_for(&project.id) {
+                *due = now;
+            }
             if *due > now {
                 continue;
             }
@@ -1626,11 +1773,6 @@ fn polling_loop(
         next_due.retain(|id, _| live_ids.contains(id));
         failures.retain(|id, _| live_ids.contains(id));
         signatures.retain(|id, _| live_ids.contains(id));
-        if pending_generation > 0 && in_flight.is_empty() {
-            refresh_completion.complete(pending_generation);
-            pending_generation = 0;
-            pending_scope = None;
-        }
         thread::sleep(Duration::from_secs(1));
     }
     drop(job_tx);
@@ -1789,7 +1931,7 @@ mod tests {
             refreshed.validated_at.as_deref(),
             Some("2026-09-16T00:00:01Z")
         );
-        assert_eq!(refreshed.fetched_at, "2026-09-16T00:00:01Z");
+        assert_eq!(refreshed.fetched_at, snapshot.fetched_at);
         assert_eq!(refreshed.error, None);
     }
 
@@ -2110,6 +2252,60 @@ mod tests {
         assert_eq!(refresh_interval_seconds(false), PORTFOLIO_REFRESH_SECONDS);
         assert_eq!(SELECTED_PROJECT_REFRESH_SECONDS, 300);
         assert_eq!(PORTFOLIO_REFRESH_SECONDS, 3600);
+        assert_eq!(validation_horizon_seconds(true), 380);
+        assert_eq!(validation_horizon_seconds(false), 3680);
+    }
+
+    #[test]
+    fn failure_backoff_is_monotonic_bounded_and_success_reset_is_zero() {
+        let background = (1..=8)
+            .map(|failure| tracking_failure_backoff_seconds(failure, false))
+            .collect::<Vec<_>>();
+        assert!(background.windows(2).all(|pair| pair[1] >= pair[0]));
+        assert!(background[..5].windows(2).all(|pair| pair[1] > pair[0]));
+        assert_eq!(background[0], PORTFOLIO_REFRESH_SECONDS);
+        assert_eq!(
+            tracking_failure_backoff_seconds(100, false),
+            FAILURE_BACKOFF_MAX_SECONDS
+        );
+        let selected = tracking_failure_backoff_seconds(1, true);
+        assert_eq!(selected, SELECTED_PROJECT_REFRESH_SECONDS);
+        assert!(tracking_failure_backoff_seconds(2, true) > selected);
+        assert_eq!(tracking_failure_backoff_seconds(0, false), PORTFOLIO_REFRESH_SECONDS);
+    }
+
+    #[test]
+    fn failed_projects_keep_fair_retry_budget_for_healthy_projects() {
+        let failing = (1..=20)
+            .map(|failure| tracking_failure_backoff_seconds(failure, false))
+            .collect::<Vec<_>>();
+        assert_eq!(failing[0], PORTFOLIO_REFRESH_SECONDS);
+        assert_eq!(failing[1], PORTFOLIO_REFRESH_SECONDS * 2);
+        assert!(failing.iter().all(|delay| *delay >= PORTFOLIO_REFRESH_SECONDS));
+        assert_eq!(tracking_hourly_math(20, false).admitted_http_stages, 40);
+    }
+
+    #[test]
+    fn changed_head_refresh_deadline_covers_three_sequential_tracking_stages() {
+        assert_eq!(TRACKING_HTTP_TIMEOUT_SECONDS, 20);
+        assert_eq!(TRACKING_HTTP_PROCESS_GRACE_SECONDS, 5);
+        assert_eq!(TRACKING_MAX_SCOPED_STAGES, 3);
+        assert_eq!(TRACKING_REFRESH_COMPLETION_TIMEOUT_SECONDS, 80);
+    }
+
+    #[test]
+    fn slow_changed_head_work_is_bounded_and_late_completion_cannot_resurrect_timeout() {
+        let stage_budget = TRACKING_HTTP_TIMEOUT_SECONDS + TRACKING_HTTP_PROCESS_GRACE_SECONDS;
+        let declared_work = Duration::from_secs(TRACKING_MAX_SCOPED_STAGES * stage_budget);
+        assert!(declared_work < tracking_refresh_completion_timeout());
+        let over_deadline = tracking_refresh_completion_timeout() + Duration::from_secs(1);
+        assert!(over_deadline > tracking_refresh_completion_timeout());
+
+        let completion = RefreshCompletion::default();
+        let generation = completion.request();
+        assert!(completion.wait(generation, Duration::from_millis(1)).is_err());
+        completion.complete(generation);
+        assert!(completion.wait(generation, Duration::ZERO).is_err());
     }
 
     #[test]
@@ -2155,6 +2351,55 @@ mod tests {
     }
 
     #[test]
+    fn refresh_scope_queue_preserves_generation_project_binding() {
+        let gate = RefreshScopeGate::default();
+        gate.request_for_generation(11, "project-a".into()).unwrap();
+        gate.request_for_generation(12, "project-b".into()).unwrap();
+        assert_eq!(
+            gate.take_all(),
+            vec![
+                RefreshScopeRequest {
+                    generation: 11,
+                    project_id: "project-a".into()
+                },
+                RefreshScopeRequest {
+                    generation: 12,
+                    project_id: "project-b".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn scheduler_generation_coordinator_settles_only_declared_project_scope() {
+        let completion = std::sync::Arc::new(RefreshCompletion::default());
+        let generation_a = completion.request();
+        let generation_b = completion.request();
+        let mut coordinator = RefreshGenerationCoordinator::default();
+        coordinator.enqueue(RefreshScopeRequest {
+            generation: generation_a,
+            project_id: "project-a".into(),
+        });
+        coordinator.enqueue(RefreshScopeRequest {
+            generation: generation_b,
+            project_id: "project-b".into(),
+        });
+        assert_eq!(coordinator.settle_project("project-b"), vec![generation_b]);
+        completion.complete(generation_b);
+        assert!(completion.wait(generation_b, Duration::ZERO).is_ok());
+        assert!(coordinator.is_pending_for("project-a"));
+        assert!(completion
+            .completed
+            .lock()
+            .unwrap()
+            .get(&generation_a)
+            .is_some_and(|result| result.as_ref().is_err()));
+        assert_eq!(coordinator.settle_project("project-a"), vec![generation_a]);
+        completion.complete(generation_a);
+        assert!(completion.wait(generation_a, Duration::ZERO).is_ok());
+    }
+
+    #[test]
     fn manual_and_scheduled_refresh_requests_are_coalesced() {
         let gate = RefreshRequestGate::default();
         assert!(gate.request());
@@ -2193,6 +2438,16 @@ mod tests {
         let result = completion.wait(generation, Duration::from_millis(20));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn refresh_generation_failure_is_returned_to_the_correct_waiter() {
+        let completion = RefreshCompletion::default();
+        let first = completion.request();
+        let second = completion.request();
+        completion.complete_with_result(first, Err("project-a failed".into()));
+        assert_eq!(completion.wait(first, Duration::ZERO).unwrap_err(), "project-a failed");
+        assert!(completion.wait(second, Duration::ZERO).is_err());
     }
 
     #[test]

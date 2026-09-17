@@ -50,6 +50,7 @@ const HTTP_STATUS_MARKER: &str = "__HIVEAI_HTTP_STATUS__";
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(90);
 static PORTFOLIO_RATE_LIMIT_UNTIL: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static PORTFOLIO_REQUEST_GOVERNOR: OnceLock<Mutex<ProcessRequestGovernor>> = OnceLock::new();
+static NAVIGATION_ROTATION_CURSOR: OnceLock<Mutex<usize>> = OnceLock::new();
 #[cfg(test)]
 static TEST_GITHUB_COORDINATOR: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -646,14 +647,27 @@ pub fn portfolio_snapshots(
     let mut transport = FixtureTransport::default();
     #[cfg(not(test))]
     let mut transport = CurlTransport;
+    let rotation_cursor = if intent == GitHubAcquisitionIntent::Navigation {
+        next_navigation_rotation_cursor()
+    } else {
+        0
+    };
     portfolio_snapshots_with_transport(
         database,
         &projects,
         intent,
         selected_project.as_deref(),
-        0,
+        rotation_cursor,
         &mut transport,
     )
+}
+
+fn next_navigation_rotation_cursor() -> usize {
+    let lock = NAVIGATION_ROTATION_CURSOR.get_or_init(|| Mutex::new(0));
+    let mut cursor = lock.lock().expect("navigation rotation mutex poisoned");
+    let current = *cursor;
+    *cursor = cursor.wrapping_add(1);
+    current
 }
 
 fn is_github_project(project: &ProjectRecord) -> bool {
@@ -1313,6 +1327,9 @@ fn reset_process_request_state_for_test() {
     }
     if let Some(lock) = PORTFOLIO_RATE_LIMIT_UNTIL.get() {
         *lock.lock().expect("rate limit circuit mutex poisoned") = None;
+    }
+    if let Some(lock) = NAVIGATION_ROTATION_CURSOR.get() {
+        *lock.lock().expect("navigation rotation mutex poisoned") = 0;
     }
 }
 
@@ -4011,6 +4028,80 @@ mod tests {
             }))
             .unwrap()
         );
+    }
+
+    #[test]
+    fn production_navigation_portfolio_path_advances_rotation_between_windows() {
+        reset_process_request_state_for_test();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let first = portfolio_snapshots(&database, GitHubAcquisitionIntent::Navigation, None).unwrap();
+        let second = portfolio_snapshots(&database, GitHubAcquisitionIntent::Navigation, None).unwrap();
+        assert_eq!(first.len(), 8);
+        assert_eq!(second.len(), 8);
+        let first_kinds = first[0].cache.resources.iter().map(|resource| resource.kind.as_str()).collect::<Vec<_>>();
+        let second_kinds = second[0].cache.resources.iter().map(|resource| resource.kind.as_str()).collect::<Vec<_>>();
+        assert_eq!(first_kinds.len(), 5);
+        assert_eq!(second_kinds.len(), 5);
+        assert_ne!(first_kinds, second_kinds);
+        assert_eq!(second_kinds[0], first_kinds[1]);
+    }
+
+    fn evidence_resource_kind(url: &str) -> &'static str {
+        if url.contains("/branches") { RESOURCE_BRANCHES }
+        else if url.contains("/commits") { RESOURCE_COMMITS }
+        else if url.contains("/pulls") { RESOURCE_PULL_REQUESTS }
+        else if url.contains("/issues") { RESOURCE_ISSUES }
+        else if url.contains("/actions") { RESOURCE_ACTIONS }
+        else if url.contains("/releases") { RESOURCE_RELEASES }
+        else if url.contains("/tags") { RESOURCE_TAGS }
+        else { RESOURCE_REPOSITORY }
+    }
+
+    #[test]
+    fn v07_production_governed_acquisition_evidence_is_measured() {
+        reset_process_request_state_for_test();
+        let database_dir = tempfile::tempdir().unwrap();
+        let database = DatabaseState::initialize(database_dir.path().to_path_buf()).unwrap();
+        crate::github_tracking::ensure_portfolio(&database).unwrap();
+        let projects = list_projects(&database, ProjectListQuery { include_archived: Some(false), ..Default::default() })
+            .unwrap().into_iter().filter(|project| project.status != "ARCHIVED" && is_github_project(project)).collect::<Vec<_>>();
+        assert_eq!(projects.len(), 8);
+        let mut transport = FixtureTransport::default();
+        let snapshots = portfolio_snapshots_with_transport(&database, &projects, GitHubAcquisitionIntent::Navigation, None, 0, &mut transport).unwrap();
+        assert_eq!(snapshots.len(), 8);
+        assert_eq!(transport.requests.len(), PRIMARY_REQUESTS_PER_HOUR);
+        let rows = transport.requests.iter().enumerate().map(|(index, url)| {
+            let repository = url.split("/repos/").nth(1).and_then(|tail| { let parts = tail.split('/').take(2).collect::<Vec<_>>(); (parts.len() == 2).then(|| format!("{}/{}", parts[0], parts[1])) }).unwrap_or_else(|| "unknown/unknown".into());
+            json!({
+                "projectId": format!("github:{repository}@main"), "repository": repository, "branch": "main", "intent": "Navigation",
+                "windowRotationCursor": 0, "rotationPosition": index % PRIMARY_RESOURCE_KINDS.len(), "resourceClass": "PRIMARY", "resourceKind": evidence_resource_kind(url),
+                "cacheBefore": "MISS", "admission": "ADMITTED_PROCESS_WIDE_PRIMARY", "owner": "NETWORK_REQUEST", "coalescing": "NONE", "network": true,
+                "httpStatus": 200, "httpStatusClass": "SUCCESS", "budgetPrimaryBefore": index, "budgetPrimaryAfter": index + 1,
+                "budgetOptionalBefore": 0, "budgetOptionalAfter": 0, "trackingBudgetBefore": null, "trackingBudgetAfter": null,
+                "failureClass": null, "fetchedAt": "fixture-measured", "validatedAt": null, "lastKnownGoodAgeSeconds": 0,
+                "presentation": "CURRENT", "diagnostic": null, "rateLimit": "UNAVAILABLE_FROM_CURRENT_TRANSPORT"
+            })
+        }).collect::<Vec<_>>();
+        let detailed = [8usize, 9, 10, 20].into_iter().flat_map(|project_count| {
+            [("Idle", AcquisitionIntent::Idle), ("Selected", AcquisitionIntent::Selected), ("Navigation", AcquisitionIntent::Navigation), ("Manual", AcquisitionIntent::Manual)].into_iter().map(move |(name, intent)| {
+                let plan = portfolio_acquisition_plan(project_count, intent);
+                json!({ "intent": name, "projects": plan.project_count, "scheduledPrimaryRequests": plan.primary_calls, "admittedPrimaryRequests": plan.primary_calls.min(PRIMARY_REQUESTS_PER_HOUR), "scheduledOptionalRequests": plan.optional_calls, "admittedOptionalRequests": plan.optional_calls.min(OPTIONAL_REQUESTS_PER_HOUR), "scheduledRemoteTrackingRequests": plan.remote_tracking_calls })
+            })
+        }).collect::<Vec<_>>();
+        let tracking = [8usize, 9, 10, 20].into_iter().map(|project_count| {
+            let background = crate::github_tracking::tracking_hourly_math(project_count, false);
+            let selected = crate::github_tracking::tracking_hourly_math(project_count, true);
+            json!({ "projects": project_count, "background": { "scheduledObservationsPerHour": background.background_observations, "unchangedHeadStagesPerHour": background.same_head_http_stages, "changedHeadStagesPerHour": background.changed_head_http_stages, "admittedStagesPerHour": background.admitted_http_stages }, "oneSelectedProject": { "scheduledObservationsPerHour": selected.background_observations + selected.selected_observations, "unchangedHeadStagesPerHour": selected.same_head_http_stages, "changedHeadStagesPerHour": selected.changed_head_http_stages, "admittedStagesPerHour": selected.admitted_http_stages } })
+        }).collect::<Vec<_>>();
+        let backoff = (1..=5).map(|failure| json!({ "failure": failure, "backgroundRetrySeconds": crate::github_tracking::tracking_failure_backoff_seconds(failure, false), "selectedRetrySeconds": crate::github_tracking::tracking_failure_backoff_seconds(failure, true) })).collect::<Vec<_>>();
+        println!("M19_V07_EVIDENCE_JSON={}", serde_json::to_string(&json!({
+            "schema": "M19_V07_GITHUB_ACQUISITION_MATRIX_V1", "source": "production portfolio_snapshots_with_transport orchestration",
+            "requestBudget": { "primaryPerHour": PRIMARY_REQUESTS_PER_HOUR, "optionalPerHour": OPTIONAL_REQUESTS_PER_HOUR, "totalPerHour": PROCESS_REQUESTS_PER_HOUR },
+            "measuredPortfolio": { "projects": projects.len(), "snapshots": snapshots.len(), "networkRequests": transport.requests.len() }, "detailedIntegrationDemand": detailed, "trackingDemand": tracking, "failureBackoff": backoff,
+            "freshness": { "selectedCadenceSeconds": crate::github_tracking::SELECTED_PROJECT_REFRESH_SECONDS, "backgroundCadenceSeconds": crate::github_tracking::PORTFOLIO_REFRESH_SECONDS, "selectedHardHorizonSeconds": crate::github_tracking::SELECTED_VALIDATION_HORIZON_SECONDS, "backgroundHardHorizonSeconds": crate::github_tracking::BACKGROUND_VALIDATION_HORIZON_SECONDS, "changedHeadStages": crate::github_tracking::TRACKING_MAX_SCOPED_STAGES }, "rows": rows
+        })).unwrap());
     }
 
     struct SlowTransport {

@@ -18,7 +18,6 @@ pub const MAX_ATTENTION: usize = 64;
 pub const MAX_FACTS: usize = 32;
 const MAX_ROOT_TASK_BYTES: u64 = 2 * 1024 * 1024;
 const RECENT_FAILURE_WINDOW: Duration = Duration::days(7);
-const REMOTE_M19_MAX_AGE: Duration = Duration::minutes(5);
 const M19_FINGERPRINT_KEY: &str = "m19.engineering_brief.fingerprint";
 
 #[derive(Debug, Clone, Serialize)]
@@ -671,17 +670,19 @@ fn remote_validation_is_fresh(
     remote: &github_tracking::RemoteTrackingSnapshot,
     now: Option<DateTime<Utc>>,
 ) -> bool {
-    let validated_at = remote
-        .validated_at
-        .as_deref()
-        .unwrap_or(remote.fetched_at.as_str());
+    let Some(validated_at) = remote.validated_at.as_deref() else {
+        return false;
+    };
     DateTime::parse_from_rfc3339(validated_at)
         .ok()
         .map(|value| value.with_timezone(&Utc))
         .zip(now)
         .is_some_and(|(validated, now)| {
             now.signed_duration_since(validated) >= Duration::zero()
-                && now.signed_duration_since(validated) <= REMOTE_M19_MAX_AGE
+                && now.signed_duration_since(validated)
+                    <= Duration::seconds(
+                        github_tracking::validation_horizon_seconds(false) as i64,
+                    )
         })
 }
 
@@ -1638,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_validation_timestamp_keeps_same_head_fresh_after_content_ages() {
+    fn remote_validation_timestamp_uses_scheduler_compatible_hard_horizon() {
         let remote = github_tracking::RemoteTrackingSnapshot {
             project_key: "github:owner/repo@main".into(),
             display_name: "repo".into(),
@@ -1684,13 +1685,13 @@ mod tests {
         };
         assert!(remote_validation_is_fresh(
             &remote,
-            DateTime::parse_from_rfc3339("2026-09-16T00:13:00Z")
+            DateTime::parse_from_rfc3339("2026-09-16T01:09:00Z")
                 .ok()
                 .map(|value| value.with_timezone(&Utc))
         ));
         assert!(!remote_validation_is_fresh(
             &remote,
-            DateTime::parse_from_rfc3339("2026-09-16T00:15:01Z")
+            DateTime::parse_from_rfc3339("2026-09-16T01:10:21Z")
                 .ok()
                 .map(|value| value.with_timezone(&Utc))
         ));

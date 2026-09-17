@@ -74,6 +74,29 @@ async function geometryProbe() {
   if (cards.length !== 3) throw new Error(`expected 3 real React registry cards, got ${cards.length}`);
   const failures = [];
   const contained = (outer, inner) => inner.left >= outer.left - 1 && inner.right <= outer.right + 1 && inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
+  const focusVisualIsUnclipped = (element) => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const outlineWidth = style.outlineStyle === "none" ? 0 : (parseFloat(style.outlineWidth) || 0);
+    const visual = {
+      left: rect.left - outlineWidth - 1,
+      top: rect.top - outlineWidth - 1,
+      right: rect.right + outlineWidth + 1,
+      bottom: rect.bottom + outlineWidth + 1,
+    };
+    for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      const ancestorStyle = getComputedStyle(ancestor);
+      const clipsX = ["hidden", "clip", "scroll", "auto"].includes(ancestorStyle.overflowX);
+      const clipsY = ["hidden", "clip", "scroll", "auto"].includes(ancestorStyle.overflowY);
+      if (!clipsX && !clipsY) continue;
+      const ancestorRect = ancestor.getBoundingClientRect();
+      if ((clipsX && (visual.left < ancestorRect.left - 1 || visual.right > ancestorRect.right + 1)) ||
+          (clipsY && (visual.top < ancestorRect.top - 1 || visual.bottom > ancestorRect.bottom + 1))) {
+        return { ancestor: ancestor.tagName.toLowerCase(), overflowX: ancestorStyle.overflowX, overflowY: ancestorStyle.overflowY };
+      }
+    }
+    return null;
+  };
   for (const card of cards) {
     const footer = card.querySelector('.registry-card-foot');
     const footerRect = footer.getBoundingClientRect();
@@ -90,6 +113,8 @@ async function geometryProbe() {
   workspace.focus();
   const style = getComputedStyle(workspace);
   if (document.activeElement !== workspace || workspace.getBoundingClientRect().width <= 0 || (style.outlineStyle === 'none' && style.boxShadow === 'none')) failures.push('keyboard-focus-visibility');
+  const clipping = focusVisualIsUnclipped(workspace);
+  if (clipping) failures.push(`focus-visual-clipped:${JSON.stringify(clipping)}`);
   return { width: window.innerWidth, height: window.innerHeight, cards: cards.length, failures };
 }
 
@@ -136,7 +161,7 @@ async function run() {
   }
 }
 
-for (const [width, height] of [[1536, 900], [1280, 900], [640, 900]]) {
+for (const [width, height] of [[1536, 900], [900, 900], [640, 900]]) {
   process.env.HIVEAI_GEOMETRY_VIEWPORT = `${width}x${height}`;
   // The page uses the real responsive CSS; launch a fresh target per viewport.
   // CDP defaults are intentionally overridden by Chrome's --window-size below.
