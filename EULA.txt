@@ -1,0 +1,37 @@
+H!veAI END-USER LICENSE AGREEMENT
+
+Copyright (c) 2026 Sekip Hayit. All rights reserved.
+
+1. Grant of use
+
+The owner grants you a non-exclusive, non-transferable, no-fee license to
+download, install, and use the official, unmodified H!veAI executable and
+installer for personal use, professional use, business/commercial use, and
+internal organizational use.
+
+2. Reserved rights
+
+This license does not grant rights to the H!veAI source code, or to copy,
+modify, create derivative products from, rebrand, repackage, resell,
+sublicense, or redistribute modified H!veAI binaries. You may not present
+H!veAI or a modified copy as another party's product. Any redistribution right
+not expressly granted here remains reserved by the owner.
+
+3. Reverse engineering
+
+Reverse engineering, decompilation, and disassembly are prohibited except to
+the extent that a restriction is prohibited by applicable law. Nothing in this
+agreement limits mandatory rights under applicable law.
+
+4. Third-party components
+
+H!veAI includes or uses third-party software governed by separate licenses.
+Those licenses and notices remain in force and control the applicable
+component. See THIRD_PARTY_NOTICES.md.
+
+5. Warranty and liability
+
+To the maximum extent permitted by applicable law, H!veAI is provided without
+an express or implied warranty. The owner is not liable for indirect,
+incidental, special, consequential, or loss-of-data damages arising from use
+of the application, except where applicable law does not permit exclusion.
